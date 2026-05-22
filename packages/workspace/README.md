@@ -4,6 +4,8 @@ A Durable-Object-backed virtual filesystem that syncs incrementally with a
 `@cloudflare/sandbox` container, plus a helper for running compiled WASM in
 isolated Cloudflare Dynamic Workers.
 
+<img width="2625" height="2284" alt="image" src="https://github.com/user-attachments/assets/ecb9ae36-567a-407d-93c6-9446b62cf8f3" />
+
 Three entry points:
 
 | Entry | Purpose |
