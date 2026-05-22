@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit":              false,
+    "declaration":         true,
+    "emitDeclarationOnly": true,
+    "outDir":              "dist",
+    "rootDir":             "src"
+  },
+  "exclude": [
+    "src/worker-sandbox/runner.ts",
+    "src/worker-sandbox/wasi.ts",
+    "src/worker-sandbox/runner.bundle.ts",
+    "src/container-sandbox/**"
+  ]
+}

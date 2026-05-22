@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-workspaces-prototype",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "ai": { "binding": "AI", "remote": true },
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/debug/*", "/personas"]
+  },
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "instance_type": "lite",
+      "max_instances": 10
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "Agent",    "name": "Agent"    },
+      { "class_name": "Sandbox",  "name": "Sandbox"  },
+      { "class_name": "WarmPool", "name": "WarmPool" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Agent", "Sandbox"] },
+    { "tag": "v2", "new_sqlite_classes": ["WarmPool"] }
+  ],
+
+  // Cron trigger — primes the warm pool so its alarm loop starts on deploy.
+  // Runs every minute. Remove if you only want manual priming.
+  "triggers": { "crons": ["* * * * *"] },
+
+  "vars": {
+    // Number of pre-warmed sandbox containers to keep ready.
+    "WARM_POOL_TARGET":          "2",
+    "WARM_POOL_REFRESH_INTERVAL":"10000"
+
+    // Cloudflare Access JWT gate. Uncomment + fill in to enable; leave
+    // unset for an unauthenticated deploy or local dev.
+    // "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
+    // "ACCESS_AUD":         "<aud-tag-from-access-app-settings>"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

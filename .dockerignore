@@ -1,0 +1,13 @@
+# Exclude things that are huge and irrelevant to apps/agent's Dockerfile.
+# (Build context = repo root, set via apps/agent/wrangler.jsonc image_build_context.)
+
+.git
+.vscode
+.devbox
+container-go
+example-app-v4
+apps/agent/public
+**/node_modules/.bin
+**/node_modules/.cache
+**/*.log
+**/.DS_Store

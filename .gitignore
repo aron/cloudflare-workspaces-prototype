@@ -1,0 +1,19 @@
+node_modules/
+.wrangler/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Build artifacts
+packages/workspace/dist/
+apps/agent/dist/
+**/node_modules.host-backup.*/
+
+# Local secrets / certs (developer-supplied)
+apps/agent/.dev.vars
+apps/agent/sandbox/*.crt
+
+# container-go spike build artifacts
+container-go/spike/spike
+container-go/spike/spike.log
+container-go/spike/.zig-cache

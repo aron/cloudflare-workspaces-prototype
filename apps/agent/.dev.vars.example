@@ -1,0 +1,12 @@
+# Copy this file to .dev.vars and fill in the values.
+# .dev.vars is gitignored so secrets stay local.
+
+# --- model selection ---
+# If OPENAI_API_KEY is set, the agent uses OpenAI; otherwise falls back to Workers AI.
+OPENAI_API_KEY=sk-...
+# OPENAI_MODEL=gpt-5.5
+# OPENAI_REASONING_EFFORT=medium    # one of: none, minimal, low, medium, high, xhigh
+
+# --- deploy ---
+# Only needed if you want to run `npx wrangler` commands locally without `wrangler login`.
+# CLOUDFLARE_API_TOKEN=

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/worker-sandbox/runner.ts",
+    "src/worker-sandbox/wasi.ts",
+    "src/worker-sandbox/runner.bundle.ts"
+  ]
+}
