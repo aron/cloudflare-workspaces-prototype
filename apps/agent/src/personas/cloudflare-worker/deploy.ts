@@ -1,5 +1,5 @@
 /**
- * worker.deploy implementation for the Cloudflare Worker persona.
+ * worker_deploy implementation for the Cloudflare Worker persona.
  *
  *   1. Push the agent's /workspace to the container.
  *   2. Invoke `wrangler deploy --dry-run` against the model-supplied

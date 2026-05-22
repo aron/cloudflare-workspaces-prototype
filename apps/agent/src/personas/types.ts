@@ -16,7 +16,7 @@ export type ToolName =
   | "deleteFile" | "findFiles" | "grep" | "exec"
   // optional, persona-gated
   | "run"
-  | "worker.deploy" | "worker.fetch";
+  | "worker_deploy" | "worker_fetch";
 
 export interface Persona {
   /** Stable identifier persisted in DO storage. */

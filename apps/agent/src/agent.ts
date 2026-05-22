@@ -291,7 +291,7 @@ export class Agent extends AIChatAgent<Env> {
         },
       })),
 
-      ...pick("worker.deploy", tool({
+      ...pick("worker_deploy", tool({
         description:
           "Build a Cloudflare Worker from a wrangler.jsonc in /workspace and load it into an " +
           "isolated Dynamic Worker. Repeated calls on the same bundle reuse the warm isolate.",
@@ -307,7 +307,7 @@ export class Agent extends AIChatAgent<Env> {
         },
       })),
 
-      ...pick("worker.fetch", tool({
+      ...pick("worker_fetch", tool({
         description:
           "Send a fetch() request to the currently-deployed Worker. The argument must be a " +
           "static fetch() call expression — no variables or function calls, just string/number/" +
@@ -320,7 +320,7 @@ export class Agent extends AIChatAgent<Env> {
         execute: async ({ request }) => {
           const worker = this.deployer.current;
           if (!worker) {
-            return { error: "no worker deployed — call worker.deploy first" };
+            return { error: "no worker deployed — call worker_deploy first" };
           }
           let parsed;
           try { parsed = parseFetchCall(request); }

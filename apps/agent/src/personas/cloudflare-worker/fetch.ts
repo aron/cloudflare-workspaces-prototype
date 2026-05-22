@@ -1,5 +1,5 @@
 /**
- * worker.fetch implementation.
+ * worker_fetch implementation.
  *
  * The model passes a single string that looks like a JavaScript fetch() call:
  *

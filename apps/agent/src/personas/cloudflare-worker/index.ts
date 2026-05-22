@@ -15,9 +15,9 @@ All files live under /workspace.
 
 1. writeFile      — write Worker source and any helpers it imports
 2. writeFile      — write /workspace/wrangler.jsonc with the build config
-3. worker.deploy  — { config: "/workspace/wrangler.jsonc" } builds the Worker
+3. worker_deploy  — { config: "/workspace/wrangler.jsonc" } builds the Worker
                     and loads the bundle into an isolated Dynamic Worker
-4. worker.fetch   — { request: "fetch('https://w/path', { method: 'GET' })" }
+4. worker_fetch   — { request: "fetch('https://w/path', { method: 'GET' })" }
                     calls the loaded worker and returns the HTTP response
 
 ## wrangler.jsonc
@@ -42,13 +42,13 @@ Not wired up for the runtime here:
 ## Dependencies
 
 The build container is a real Linux box with network access. Feel free to
-\`npm install\` packages you need before invoking worker.deploy, run
+\`npm install\` packages you need before invoking worker_deploy, run
 \`git clone\` to vendor a library, or curl/wget anything else. The container
 is shared by the chat session, so installed packages stick around.
 
 Use ES-module style: \`export default { fetch(request, env, ctx) { ... } }\`.
 
-## worker.deploy
+## worker_deploy
 
 Pass the wrangler config path. Runs \`wrangler deploy --dry-run\`, captures the
 build log, and loads the bundle into a fresh Dynamic Worker (or reuses the
@@ -63,13 +63,13 @@ The loaded Worker runs in an isolate with \`globalOutbound: null\`, so calls
 to fetch() *from inside* the Worker will reject. (The build container's
 network access is unaffected — only the running Worker is sandboxed.)
 
-## worker.fetch
+## worker_fetch
 
 Pass a string \`request\` that looks like a JavaScript fetch() call. Only static
 literals are accepted — no variables, function calls, or computed keys.
 
-  worker.fetch({ request: "fetch('https://w/users')" })
-  worker.fetch({ request: "fetch('https://w/api', { method: 'POST', body: '{\\"a\\":1}', headers: { 'content-type': 'application/json' } })" })
+  worker_fetch({ request: "fetch('https://w/users')" })
+  worker_fetch({ request: "fetch('https://w/api', { method: 'POST', body: '{\\"a\\":1}', headers: { 'content-type': 'application/json' } })" })
 
 Returns: { status, statusText, headers, body, bodySize, bodyMime, durationMs }.
 Binary responses are reported with bodyOmitted: true. Text bodies past 64 KB
@@ -78,7 +78,7 @@ are truncated.
 ## Style
 
 - Use Web Standard APIs: Request, Response, URL, crypto, etc.
-- Use console.log for diagnostics (not included in worker.fetch's response;
+- Use console.log for diagnostics (not included in worker_fetch's response;
   visible in Cloudflare logs).
 - Single-file workers are fine; multi-file is fine — wrangler bundles them.
 `;
@@ -86,7 +86,7 @@ are truncated.
 export const cloudflareWorkerPersona: Persona = {
   id:           "cloudflare-worker",
   name:         "Cloudflare Worker",
-  description:  "Build Workers from /workspace, deploy into a Dynamic Worker, and call them via worker.fetch.",
+  description:  "Build Workers from /workspace, deploy into a Dynamic Worker, and call them via worker_fetch.",
   systemPrompt: PROMPT,
-  extraTools:   ["worker.deploy", "worker.fetch"],
+  extraTools:   ["worker_deploy", "worker_fetch"],
 };
