@@ -11,6 +11,8 @@
  *   - rmdir(path)
  *   - stat(path)              → { isFile, isDirectory, isSymbolicLink, size, mtimeMs, ctimeMs, mode }
  *   - lstat(path)             → same (we don't model symlinks)
+ *   - readlink(path)          → always throws EINVAL (no symlinks)
+ *   - symlink(target, path)   → always throws EPERM (no symlinks)
  *
  * Two extras on top of the standard surface that matter for clone safety:
  *
@@ -199,6 +201,20 @@ export function createVfsFs(vfs: Vfs, opts: VfsFsOptions): { promises: VfsFsProm
     async lstat(p: string): Promise<VfsStats> {
       return statAt(resolve(p));
     },
+
+    // isomorphic-git's `bindFs` walks a fixed list of fs methods and
+    // `.bind()`s each one. If any method is undefined the bind throws
+    // 'Cannot read properties of undefined (reading \'bind\')' before
+    // the clone even starts. We don't model symlinks, so these stubs
+    // exist solely to keep that bind loop happy — readlink claims the
+    // path isn't a symlink, symlink refuses to create one.
+    async readlink(p: string): Promise<string> {
+      throw fsError("EINVAL", resolve(p), "readlink");
+    },
+
+    async symlink(_target: string, p: string): Promise<void> {
+      throw fsError("EPERM", resolve(p), "symlink");
+    },
   };
 
   function mkdirRecursive(abs: string): void {
@@ -232,6 +248,8 @@ export interface VfsFsPromises {
   rmdir(path: string): Promise<void>;
   stat(path: string): Promise<VfsStats>;
   lstat(path: string): Promise<VfsStats>;
+  readlink(path: string): Promise<string>;
+  symlink(target: string, path: string): Promise<void>;
 }
 
 /** Strip `..`, `.`, and duplicate slashes; resolve against `root`. */
