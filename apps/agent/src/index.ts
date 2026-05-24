@@ -66,9 +66,12 @@ app.all("/api/app/*", async (c) => {
 // ---- /api/rooms/:id/* ----------------------------------------------------
 //
 // Forward to a per-room DO. WebSocket upgrades pass through transparently.
+// We compute the inner path from the URL directly because Hono doesn't expose
+// the wildcard capture as a named parameter.
 app.all("/api/rooms/:id/*", (c) => {
-  const id = c.req.param("id");
-  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), `/${c.req.param("*") ?? ""}`);
+  const id    = c.req.param("id");
+  const inner = stripPrefix(c.req.raw.url, `/api/rooms/${id}`);
+  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), inner);
 });
 app.all("/api/rooms/:id", (c) => {
   const id = c.req.param("id");
@@ -78,10 +81,10 @@ app.all("/api/rooms/:id", (c) => {
 // ---- /api/threads/:threadId/* -------------------------------------------
 //
 // Forward to the Agent DO that owns a thread (threadId == Agent DO name).
-// The DO uses Kimi to produce a one-or-two sentence recap on /summary.
 app.all("/api/threads/:id/*", (c) => {
-  const id = c.req.param("id");
-  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), `/${c.req.param("*") ?? ""}`);
+  const id    = c.req.param("id");
+  const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
 });
 app.all("/api/threads/:id", (c) => {
   const id = c.req.param("id");
@@ -159,6 +162,13 @@ function forwardToDO<T extends Rpc.DurableObjectBranded | undefined>(
   inner.pathname = innerPath;
   const stub = ns.get(ns.idFromName(id));
   return stub.fetch(withIdentity(new Request(inner, request), identity));
+}
+
+/** Return the URL pathname with `prefix` removed, guaranteed to start with `/`. */
+function stripPrefix(url: string, prefix: string): string {
+  const path = new URL(url).pathname;
+  const rest = path.startsWith(prefix) ? path.slice(prefix.length) : path;
+  return rest.startsWith("/") ? rest : `/${rest}`;
 }
 
 // ---- export --------------------------------------------------------------
