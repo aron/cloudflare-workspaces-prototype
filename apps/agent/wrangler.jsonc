@@ -9,7 +9,7 @@
   "worker_loaders": [{ "binding": "LOADER" }],
 
   "assets": {
-    "directory": "./dist",
+    "directory": "../frontend/dist",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*", "/api/*", "/debug/*", "/personas"]
   },

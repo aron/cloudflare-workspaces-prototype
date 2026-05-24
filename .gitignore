@@ -6,10 +6,13 @@ node_modules/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.screenshots/
 
 # Build artifacts
 packages/workspace/dist/
 apps/agent/dist/
+apps/frontend/dist/
+ui-prototype/
 **/node_modules.host-backup.*/
 
 # Local secrets / certs (developer-supplied)
