@@ -139,22 +139,23 @@ export async function ensureBaselineRepo(opts: EnsureBaselineOptions): Promise<{
   }
 
   try {
-    const created = await opts.artifacts.import({
+    await opts.artifacts.import({
       source: { url, branch: opts.ref, depth: opts.depth ?? 1 },
       target: { name, opts: { description: `Imported from ${url}@${opts.ref}`, readOnly: true } },
     });
-    // Same JsRpcProperty hazard as the fast-path — await each property
-    // so we never stringify a thenable into the remote URL.
-    const [createdName, remote, token, defaultBranch] = await Promise.all([
-      created.name,
-      created.remote,
-      created.token,
-      created.defaultBranch,
+    // The import() stub doesn't expose `remote` / `defaultBranch` over
+    // RPC — those live on the get() handle. Round-trip through get() so
+    // we get a real handle whose property reads resolve via JsRpcProperty.
+    const handle = await opts.artifacts.get(name);
+    const tk = await handle.createToken("read", 3600);
+    const [remote, defaultBranch] = await Promise.all([
+      handle.remote,
+      handle.defaultBranch,
     ]);
     return {
-      name:  createdName,
+      name,
       remote,
-      token,
+      token: tk.plaintext,
       defaultBranch,
     };
   } catch (err) {
