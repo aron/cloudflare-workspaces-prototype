@@ -289,11 +289,29 @@ export function ThreadPanel({
                       const input  = (part as { input?: unknown }).input;
                       const output = (part as { output?: unknown }).output;
                       const errorText = (part as { errorText?: string }).errorText;
+                      const toolCallId = (part as { toolCallId?: string }).toolCallId;
+                      // "Running" states: the model has emitted the call but no
+                      // result has landed yet. Show a Cancel affordance so the
+                      // user can fail a wedged tool without nuking the whole turn.
+                      const isRunning = part.state === "input-streaming" || part.state === "input-available";
                       return (
                         <Tool key={i} defaultOpen={false}>
                           <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} />
                           <ToolContent>
                             {input != null && <ToolInput input={input} />}
+                            {isRunning && toolCallId && (
+                              <div className="px-3 pb-2 pt-1">
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    void agent.call("cancelToolCall", [toolCallId]).catch(() => {});
+                                  }}
+                                  className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                                >
+                                  Cancel tool call
+                                </Button>
+                              </div>
+                            )}
                             {(output != null || errorText) && (
                               <ToolOutput output={output} errorText={errorText} />
                             )}

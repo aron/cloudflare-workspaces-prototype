@@ -18,6 +18,7 @@
  * set by default — fill in per use case).
  */
 import { Think } from "@cloudflare/think";
+import { callable } from "agents";
 import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -80,6 +81,15 @@ export class Agent extends Think<Env> {
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
+
+  /**
+   * Per-tool-call abort controllers. Keyed by `toolCallId`, populated when a
+   * long-running tool starts and removed when it settles. The cancelToolCall
+   * RPC fires the matching controller; `raceWithSignal` then resolves the
+   * tool with `{ aborted: true }` so the model loop unwinds without waiting
+   * for the underlying workspace call to return.
+   */
+  private _toolAborts = new Map<string, AbortController>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -414,11 +424,9 @@ export class Agent extends Think<Env> {
           cwd: z.string().optional().describe("Working directory, defaults to /tmp"),
         }),
         execute: async ({ command, cwd }, opts) => {
-          try {
-            return await raceWithSignal(ws.exec(command, cwd), opts?.abortSignal);
-          } catch (err) {
-            return { error: String(err), exitCode: 1, stdout: "", stderr: "" };
-          }
+          return this.runCancellable(opts, () => ws.exec(command, cwd), {
+            onError: err => ({ error: String(err), exitCode: 1, stdout: "", stderr: "" }),
+          });
         },
       })),
 
@@ -439,11 +447,9 @@ export class Agent extends Think<Env> {
           config: z.string().describe("Path to wrangler.jsonc, e.g. /workspace/wrangler.jsonc"),
         }),
         execute: async ({ config }, opts) => {
-          try {
-            return await raceWithSignal(this.deployer.deploy(config), opts?.abortSignal);
-          } catch (err) {
-            return { ok: false, error: String(err) };
-          }
+          return this.runCancellable(opts, () => this.deployer.deploy(config), {
+            onError: err => ({ ok: false, error: String(err) }),
+          });
         },
       })),
 
@@ -465,14 +471,74 @@ export class Agent extends Think<Env> {
           let parsed;
           try { parsed = parseFetchCall(request); }
           catch (err) { return { error: `bad fetch call: ${(err as Error).message}` }; }
-          try {
-            return await raceWithSignal(fetchAgainstWorker(worker, parsed), opts?.abortSignal);
-          } catch (err) {
-            return { error: String(err) };
-          }
+          return this.runCancellable(opts, () => fetchAgainstWorker(worker, parsed), {
+            onError: err => ({ error: String(err) }),
+          });
         },
       })),
     };
+  }
+
+  // ── Per-tool-call cancellation ───────────────────────────────────────
+  //
+  // The turn-level Stop button aborts every in-flight call on a thread. That
+  // is sometimes too coarse: when a single tool call wedges (a workspace.exec
+  // that never returns is the canonical case), we want to fail just that
+  // call so the model loop unwinds and the rest of the conversation keeps
+  // flowing. Each long-running tool registers an AbortController under its
+  // toolCallId here; the cancelToolCall callable just aborts the matching
+  // controller. raceWithSignal then resolves the tool with an `aborted`
+  // result, the same shape it produces for the turn-level Stop, so the model
+  // sees a terminal answer and the queue drains.
+
+  /**
+   * Wrap a tool's work so it observes both the turn-level abort signal and a
+   * per-call controller keyed by `toolCallId`. The work is started eagerly
+   * (we never gate on the signal first) so we don't change the happy-path
+   * behaviour of the tool; only the cancellation surface is new.
+   */
+  private async runCancellable<T>(
+    opts: { toolCallId?: string; abortSignal?: AbortSignal } | undefined,
+    work: () => Promise<T>,
+    handlers: { onError: (err: unknown) => T | { aborted: true; error: string } | Record<string, unknown> },
+  ): Promise<T | { aborted: true; error: string } | Record<string, unknown>> {
+    const toolCallId = opts?.toolCallId;
+    const turnSignal = opts?.abortSignal;
+    const local = new AbortController();
+    if (toolCallId) this._toolAborts.set(toolCallId, local);
+    // Propagate the turn-level abort into the per-call controller so a
+    // single listener (local.signal) covers both surfaces.
+    const onTurnAbort = () => local.abort(turnSignal?.reason);
+    if (turnSignal) {
+      if (turnSignal.aborted) local.abort(turnSignal.reason);
+      else turnSignal.addEventListener("abort", onTurnAbort, { once: true });
+    }
+    try {
+      return await raceWithSignal(work(), local.signal);
+    } catch (err) {
+      return handlers.onError(err);
+    } finally {
+      turnSignal?.removeEventListener("abort", onTurnAbort);
+      if (toolCallId) this._toolAborts.delete(toolCallId);
+    }
+  }
+
+  /**
+   * Cancel a specific in-flight tool call by id. No-op when the id has
+   * already settled or was never registered (e.g. a fast tool like `read`
+   * that doesn't go through `runCancellable`). The matching tool resolves
+   * with `{ aborted: true }` shortly after, the model loop sees a terminal
+   * answer for that call, and the turn proceeds.
+   *
+   * The underlying workspace promise is *not* killed — the workspace SDK
+   * doesn't accept abort signals — it's allowed to drain in the background.
+   */
+  @callable()
+  async cancelToolCall(toolCallId: string): Promise<{ cancelled: boolean }> {
+    const ctrl = this._toolAborts.get(toolCallId);
+    if (!ctrl) return { cancelled: false };
+    ctrl.abort(new Error("tool call cancelled by user"));
+    return { cancelled: true };
   }
 
   // ── Sub-agent spawning ─────────────────────────────────────────────
