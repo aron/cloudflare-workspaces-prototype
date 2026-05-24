@@ -100,6 +100,32 @@ export class Vfs {
     });
   }
 
+  /**
+   * Yield chunk-aligned slices that overlap [byteOffset, byteOffset+byteLength).
+   * Reads only the SQLite rows whose `idx` range covers the request, so the
+   * full file never lands in memory. Trims the first and last chunk to the
+   * exact byte range.
+   */
+  *readChunks(path: string, byteOffset = 0, byteLength?: number): Iterable<Uint8Array> {
+    const stat = this.stat(path);
+    if (!stat || stat.type !== "file") throw new Error(`File not found: ${path}`);
+    const end = byteLength === undefined ? stat.size : Math.min(stat.size, byteOffset + byteLength);
+    if (end <= byteOffset) return;
+    const firstIdx = Math.floor(byteOffset / CHUNK_SIZE);
+    const lastIdx  = Math.floor((end - 1) / CHUNK_SIZE);
+    const rows = this.sql.exec<{ idx: number; data: ArrayBuffer }>(
+      `SELECT idx, data FROM vfs_chunks WHERE path = ? AND idx BETWEEN ? AND ? ORDER BY idx`,
+      path, firstIdx, lastIdx,
+    );
+    for (const row of rows) {
+      const chunkStart = row.idx * CHUNK_SIZE;
+      const buf = new Uint8Array(row.data);
+      const sliceStart = Math.max(0, byteOffset - chunkStart);
+      const sliceEnd   = Math.min(buf.length, end - chunkStart);
+      if (sliceEnd > sliceStart) yield buf.subarray(sliceStart, sliceEnd);
+    }
+  }
+
   readdir(path: string): Array<{ name: string; type: "file" | "dir" }> {
     const prefix = path === "/" ? "/" : path + "/";
     const rows = [...this.sql.exec<{ path: string; type: string }>(
