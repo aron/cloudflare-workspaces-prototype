@@ -13,12 +13,8 @@
  *   - Never mutate the input — return a new array.
  */
 
-export interface ChatAuthor {
-  kind:  "user";
-  id:    string;
-  email: string;
-  name:  string;
-}
+export type { ChatAuthor } from "@app/shared";
+import type { ChatAuthor } from "@app/shared";
 
 interface ChatMessage {
   id?:       string;

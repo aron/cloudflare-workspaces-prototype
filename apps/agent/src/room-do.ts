@@ -24,40 +24,13 @@
 import { Server } from "partyserver";
 import { requireIdentity } from "./identity.js";
 import { firstMention } from "./mentions.js";
+import type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 
 
 
-/** Public author shape stamped onto every message in metadata. */
-export type Author =
-  | { kind: "user";  id: string; email: string; name: string }
-  | { kind: "agent"; personaId: string; name: string };
-
-/** AppMessage — the unified shape used by rooms and agent threads. */
-export interface AppMessage {
-  id:       string;
-  role:     "user" | "assistant";
-  parts:    Array<{ type: "text"; text: string }>;
-  metadata: {
-    author:    Author;
-    createdAt: number;
-    /** Set on the room message that kicked off this thread (if any). */
-    threadId?: string;
-  };
-}
-
-export interface RoomMeta {
-  id:        string;
-  name:      string;
-  createdBy: string;
-  createdAt: number;
-}
-
-export interface ThreadRow {
-  id:            string;
-  rootMessageId: string;
-  personaId:     string;
-  createdAt:     number;
-}
+// Re-export the wire types so existing imports from "./room-do" keep working.
+// The canonical definitions live in @app/shared.
+export type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 
 interface InitBody { id?: unknown; name?: unknown; createdBy?: unknown }
 interface PostBody { parts?: unknown }

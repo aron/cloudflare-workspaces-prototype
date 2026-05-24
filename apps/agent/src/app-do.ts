@@ -9,16 +9,12 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { requireIdentity } from "./identity.js";
+import type { RoomSummary } from "@app/shared";
 
 /** Stable singleton id used by the worker to address this DO. */
 export const APP_DO_NAME = "app";
 
-export interface RoomSummary {
-  id:         string;
-  name:       string;
-  createdBy:  string;     // userId
-  createdAt:  number;
-}
+export type { RoomSummary } from "@app/shared";
 
 export interface UserSummary {
   id:        string;
