@@ -215,7 +215,7 @@ export class Room extends Server<Env> {
       id: string; role: string; parts_json: string; author_json: string;
       created_at: number; thread_id: string | null;
     }>`SELECT id, role, parts_json, author_json, created_at, thread_id
-       FROM messages ORDER BY created_at ASC, id ASC LIMIT 500`;
+       FROM messages ORDER BY created_at ASC, rowid ASC LIMIT 500`;
     return rows.map(r => ({
       id:    r.id,
       role:  r.role as "user" | "assistant",
