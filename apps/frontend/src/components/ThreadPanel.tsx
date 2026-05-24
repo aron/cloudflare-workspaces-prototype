@@ -21,6 +21,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MentionText } from "@/components/MentionText";
 import { MentionTextarea } from "@/components/MentionTextarea";
 import { MentionHighlighter } from "@/components/MentionHighlighter";
@@ -42,7 +43,7 @@ import {
   ToolOutput,
 } from "@/components/ai-elements/tool";
 
-import { fetchRoomMessages } from "@/lib/api";
+import { deleteThread, fetchRoomMessages } from "@/lib/api";
 import type { AppMessage } from "@/lib/api";
 import { navigate } from "@/lib/nav";
 import { initials, relTime } from "@/lib/utils";
@@ -74,6 +75,23 @@ export function ThreadPanel({
   const [root, setRoot] = useState<AppMessage | null>(null);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const doDeleteThread = useCallback(async () => {
+    setDeleting(true);
+    try {
+      await deleteThread(roomId, threadId);
+      // RoomDO broadcasts thread:deleted so the timeline updates on its own.
+      // Bounce the user back to the room view.
+      navigate({ kind: "room", roomId });
+    } catch (e) {
+      console.error("delete thread failed", e);
+    } finally {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }, [roomId, threadId]);
 
   // The "quoted root" is the room message whose metadata.threadId matches
   // the current thread. Look it up from the room's message log.
@@ -102,30 +120,28 @@ export function ThreadPanel({
   // server — exactly the case where users need a stop button.
   const turnInFlight = isStreaming || isServerStreaming;
 
-  const send = useCallback(() => {
+  // Submit the current input. Behaviour depends on whether the agent is
+  // mid-turn: when idle we send straight to the model; while a turn is in
+  // flight we enqueue locally and drain on completion. The composer is the
+  // same control either way — only the placeholder and the helper line change.
+  const submit = useCallback(() => {
     const text = input.trim();
-    if (!text || turnInFlight) return;
+    if (!text) return;
     setInput("");
-    sendMessage({ role: "user", parts: [{ type: "text", text }] });
+    if (turnInFlight) {
+      setSteerQueue(q => [...q, text]);
+    } else {
+      sendMessage({ role: "user", parts: [{ type: "text", text }] });
+    }
   }, [input, turnInFlight, sendMessage]);
 
   // ── Steering ──────────────────────────────────────────────────────────
   //
-  // While a turn is in flight (tool round-trip, streaming, etc.) the main
-  // composer is disabled because `sendMessage` would race the active turn.
-  // Steering messages let the user nudge the agent without waiting: they're
-  // buffered locally and drained as soon as the current turn finishes, so
-  // they show up as user turns in the queue rather than mid-stream
-  // interruptions.
-  const [steerInput, setSteerInput] = useState("");
+  // Messages submitted while a turn is in flight are buffered locally and
+  // drained as soon as the current turn finishes, so they show up as user
+  // turns in the queue rather than mid-stream interruptions. The drain
+  // effect below feeds them to `sendMessage` one render at a time.
   const [steerQueue, setSteerQueue] = useState<string[]>([]);
-
-  const enqueueSteer = useCallback(() => {
-    const text = steerInput.trim();
-    if (!text) return;
-    setSteerInput("");
-    setSteerQueue(q => [...q, text]);
-  }, [steerInput]);
 
   useEffect(() => {
     if (turnInFlight || steerQueue.length === 0) return;
@@ -199,6 +215,12 @@ export function ThreadPanel({
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => { void downloadDebugTar(); }}>
               Download debug tarball
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => setConfirmDelete(true)}
+              className="text-red-300 focus:bg-red-900/40 focus:text-red-200"
+            >
+              Delete thread…
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -333,81 +355,61 @@ export function ThreadPanel({
         </div>
       </div>
 
-      {(turnInFlight || steerQueue.length > 0) && (
-        <div className="flex-shrink-0 border-t border-kumo-line bg-kumo-elevated px-4 pb-2 pt-2">
-          <div className="mb-1 flex items-center justify-between text-2xs font-medium uppercase tracking-wide text-kumo-inactive">
-            <span>Steer the agent</span>
-            {steerQueue.length > 0 && (
-              <span title="Will be sent when the current turn finishes">
-                {steerQueue.length} queued
-              </span>
-            )}
-          </div>
-          <div className="prompt-input flex items-end gap-2 rounded-xl border px-3 py-2">
-            <MentionTextarea
-              rows={1}
-              value={steerInput}
-              onChange={setSteerInput}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  enqueueSteer();
-                }
-              }}
-              placeholder="Inject a note for the next turn…"
-              disabled={status !== "connected"}
-              className="block w-full resize-none border-0 bg-transparent p-0 text-sm leading-5 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
-            />
-            <Button
-              size="icon-sm"
-              aria-label="Queue steer"
-              onClick={enqueueSteer}
-              disabled={status !== "connected" || !steerInput.trim()}
-              className="h-7 w-7 bg-kumo-brand/70 text-white hover:bg-kumo-brand"
-            >
-              <ArrowUp size={13} strokeWidth={2.5} />
-            </Button>
-          </div>
-        </div>
-      )}
-
       <div className="flex-shrink-0 bg-kumo-base px-4 pb-3 pt-2">
-        <div className="prompt-input rounded-2xl border px-3.5 pb-2 pt-3">
+        <div className={`prompt-input rounded-2xl border px-3.5 pb-2 pt-3 ${turnInFlight ? "border-kumo-brand/40" : ""}`}>
           <MentionTextarea
             rows={1}
             value={input}
             onChange={setInput}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder="Reply…"
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
+            placeholder={turnInFlight ? "Steer the agent…" : "Reply…"}
             disabled={status !== "connected"}
             className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
           />
           <div className="flex items-end justify-between gap-2 pt-2">
             <span className="text-2xs font-medium text-kumo-inactive" title="current model">
-              {model}
+              {turnInFlight
+                ? steerQueue.length > 0
+                  ? `steering · ${steerQueue.length} queued`
+                  : "steering… enter to queue"
+                : model}
             </span>
-            {turnInFlight ? (
-              <Button
-                size="sm"
-                onClick={stop}
-                className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
-              >
-                Stop
-              </Button>
-            ) : (
+            <div className="flex items-center gap-2">
+              {turnInFlight && (
+                <Button
+                  size="sm"
+                  onClick={stop}
+                  className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                >
+                  Stop
+                </Button>
+              )}
               <Button
                 size="icon-sm"
-                aria-label="Send"
-                onClick={send}
+                aria-label={turnInFlight ? "Queue steer" : "Send"}
+                onClick={submit}
                 disabled={status !== "connected" || !input.trim()}
-                className="h-7 w-7 bg-kumo-brand text-white hover:bg-kumo-brand-hover"
+                className={`h-7 w-7 text-white ${turnInFlight ? "bg-kumo-brand/70 hover:bg-kumo-brand" : "bg-kumo-brand hover:bg-kumo-brand-hover"}`}
               >
                 <ArrowUp size={13} strokeWidth={2.5} />
               </Button>
-            )}
+            </div>
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete this thread?"
+        description={
+          <>
+            The agent session and its messages will be removed. The
+            originating message stays in the room.
+          </>
+        }
+        busy={deleting}
+        onConfirm={() => void doDeleteThread()}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </aside>
   );
 }

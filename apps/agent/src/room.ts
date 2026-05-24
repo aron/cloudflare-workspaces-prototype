@@ -110,6 +110,24 @@ export class Room extends Server<Env> {
     if (request.method === "GET" && url.pathname.endsWith("/threads")) {
       return Response.json({ threads: this.listThreads() });
     }
+    // DELETE /threads/:id — detach the thread from the room. The thread
+    // row goes away and the originating message has its thread_id nulled
+    // (the message itself stays in the timeline). The Agent DO that backed
+    // the thread is wiped by the worker.
+    {
+      const m = url.pathname.match(/^\/threads\/([^/]+)\/?$/);
+      if (request.method === "DELETE" && m) {
+        return this.handleDeleteThread(m[1]);
+      }
+    }
+
+    // DELETE / — wipe the entire room (meta, messages, threads). The
+    // worker calls this as part of /api/rooms/:id deletion; it then cleans
+    // up the App registry and the per-thread Agent DOs.
+    if (request.method === "DELETE" && (url.pathname === "/" || url.pathname === "")) {
+      return this.handleDeleteRoom();
+    }
+
 
     return new Response("not found", { status: 404 });
   }
@@ -296,6 +314,31 @@ export class Room extends Server<Env> {
       agentId:       r.agent_id,
       createdAt:     r.created_at,
     }));
+  }
+
+
+  // ---- /delete ----
+
+  private handleDeleteThread(threadId: string): Response {
+    const rows = this.sql<{ id: string }>`SELECT id FROM threads WHERE id = ${threadId}`;
+    if (rows.length === 0) {
+      return Response.json({ ok: true, missing: true });
+    }
+    this.sql`DELETE FROM threads WHERE id = ${threadId}`;
+    this.sql`UPDATE messages SET thread_id = NULL WHERE thread_id = ${threadId}`;
+    this.broadcast(JSON.stringify({ type: "thread:deleted", threadId }));
+    return Response.json({ ok: true, threadId });
+  }
+
+  private async handleDeleteRoom(): Promise<Response> {
+    // Collect thread ids before we wipe so the worker can clean up the
+    // per-thread Agent DOs.
+    const threadIds = [...this.sql<{ id: string }>`SELECT id FROM threads`].map(r => r.id);
+    this.broadcast(JSON.stringify({ type: "room:deleted" }));
+    // Wipe storage. Schema is recreated lazily on next onStart() if the DO
+    // is ever re-addressed, but in normal flow this id is gone for good.
+    await this.ctx.storage.deleteAll();
+    return Response.json({ ok: true, threadIds });
   }
 }
 

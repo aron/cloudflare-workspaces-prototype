@@ -10,16 +10,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
+  ChevronDown,
   ChevronRight,
   Sparkles,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MentionText } from "@/components/MentionText";
 import { MentionTextarea } from "@/components/MentionTextarea";
 
 
 import {
+  deleteRoom,
   fetchRoomMeta,
   fetchRoomMessages,
   fetchThreadSummary,
@@ -73,6 +82,23 @@ export function RoomTimeline({
   const [input,    setInput]    = useState("");
   const [sending,  setSending]  = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting,      setDeleting]      = useState(false);
+
+  const doDeleteRoom = useCallback(async () => {
+    setDeleting(true);
+    try {
+      await deleteRoom(roomId);
+      // RoomDO broadcasts room:deleted to other connected clients; for us,
+      // bounce back to the picker so the now-empty room view doesn't 404.
+      navigate({ kind: "picker" });
+    } catch (e) {
+      setError((e as Error).message);
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  }, [roomId]);
 
   // Initial load.
   useEffect(() => {
@@ -250,6 +276,26 @@ export function RoomTimeline({
           )}
         </div>
 
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Room options"
+              disabled={!meta}
+            >
+              <ChevronDown className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => setConfirmDelete(true)}
+              className="text-red-300 focus:bg-red-900/40 focus:text-red-200"
+            >
+              Delete room…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </header>
 
       {error && (
@@ -312,6 +358,19 @@ export function RoomTimeline({
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title={meta ? `Delete “${meta.name}”?` : "Delete this room?"}
+        description={
+          <>
+            This permanently removes the room, its messages, and every
+            thread spawned from it. This can’t be undone.
+          </>
+        }
+        busy={deleting}
+        onConfirm={() => void doDeleteRoom()}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </section>
   );
 }

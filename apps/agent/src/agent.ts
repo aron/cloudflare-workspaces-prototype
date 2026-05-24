@@ -307,6 +307,14 @@ export class Agent extends Think<Env> {
       return Response.json({ cleared: true });
     }
 
+    // DELETE / — wipe everything (messages, VFS, summary, fork registry).
+    // Called by the worker as part of /api/rooms/:id (cascade) and
+    // /api/rooms/:id/threads/:tid deletion.
+    if (request.method === "DELETE" && (url.pathname === "/" || url.pathname === "")) {
+      await this.ctx.storage.deleteAll();
+      return Response.json({ ok: true });
+    }
+
     // POST /seed { roomId, threadId, message } — called by Room when an
     // @agent mention mints a thread. Persists the originating user message
     // so the agent sees it on first turn. Idempotent: re-seeding the same

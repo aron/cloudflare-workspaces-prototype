@@ -68,6 +68,49 @@ app.all("/api/app/*", async (c) => {
 // Forward to a per-room DO. WebSocket upgrades pass through transparently.
 // We compute the inner path from the URL directly because Hono doesn't expose
 // the wildcard capture as a named parameter.
+// DELETE /api/rooms/:id — wipe the Room DO (returns thread ids it owned),
+// cascade-wipe each per-thread Agent DO, and remove the App registry row.
+// Done as a dedicated route so we can orchestrate the multi-DO cleanup; the
+// catch-all forwarder below still handles GET/POST/etc on the same paths.
+app.delete("/api/rooms/:id", async (c) => {
+  const id       = c.req.param("id");
+  const identity = c.get("identity");
+  const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
+  const roomRes  = await roomStub.fetch(withIdentity(
+    new Request("https://room/", { method: "DELETE" }), identity,
+  ));
+  // Best-effort cascade: even if Room reported failure, try to clean up the
+  // pieces we know about so a half-deleted room doesn't linger in the UI.
+  const body = await roomRes.clone().json().catch(() => ({})) as { threadIds?: unknown };
+  const threadIds = Array.isArray(body.threadIds) ? body.threadIds.filter((x): x is string => typeof x === "string") : [];
+  await Promise.allSettled(threadIds.map(tid => {
+    const stub = c.env.Agent.get(c.env.Agent.idFromName(tid));
+    return stub.fetch(withIdentity(new Request("https://agent/", { method: "DELETE" }), identity));
+  }));
+  const appStub = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
+  await appStub.fetch(withIdentity(
+    new Request(`https://app/rooms/${id}`, { method: "DELETE" }), identity,
+  )).catch(() => undefined);
+  return roomRes;
+});
+
+// DELETE /api/rooms/:id/threads/:tid — detach the thread from the room and
+// wipe the backing Agent DO. The originating message stays in the room.
+app.delete("/api/rooms/:id/threads/:tid", async (c) => {
+  const id       = c.req.param("id");
+  const tid      = c.req.param("tid");
+  const identity = c.get("identity");
+  const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
+  const roomRes  = await roomStub.fetch(withIdentity(
+    new Request(`https://room/threads/${tid}`, { method: "DELETE" }), identity,
+  ));
+  const agentStub = c.env.Agent.get(c.env.Agent.idFromName(tid));
+  await agentStub.fetch(withIdentity(
+    new Request("https://agent/", { method: "DELETE" }), identity,
+  )).catch(() => undefined);
+  return roomRes;
+});
+
 app.all("/api/rooms/:id/*", (c) => {
   const id    = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/rooms/${id}`);

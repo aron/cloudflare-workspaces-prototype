@@ -93,6 +93,17 @@ export class App extends DurableObject<Env> {
       return Response.json({ room }, { status: 201 });
     }
 
+    // DELETE /rooms/:id — remove the registry row. Per-room state lives in
+    // the Room DO and is wiped separately by the worker.
+    {
+      const m = url.pathname.match(/\/rooms\/([^/]+)\/?$/);
+      if (request.method === "DELETE" && m) {
+        const id = m[1];
+        this.sql.exec(`DELETE FROM rooms WHERE id = ?`, id);
+        return Response.json({ ok: true });
+      }
+    }
+
     return new Response("not found", { status: 404 });
   }
 

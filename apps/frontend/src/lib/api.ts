@@ -58,6 +58,22 @@ export async function createRoom(name: string): Promise<RoomSummary> {
   return body.room;
 }
 
+export async function deleteRoom(roomId: string): Promise<void> {
+  const res = await fetch(`/api/rooms/${roomId}`, { ...OPTS, method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`DELETE /api/rooms/${roomId} → ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+}
+
+export async function deleteThread(roomId: string, threadId: string): Promise<void> {
+  const res = await fetch(`/api/rooms/${roomId}/threads/${threadId}`, { ...OPTS, method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`DELETE /api/rooms/${roomId}/threads/${threadId} → ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+}
+
 // ---- /api/rooms/:id ----
 
 export async function fetchRoomMeta(roomId: string): Promise<RoomMeta> {
