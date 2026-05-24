@@ -13,8 +13,9 @@ All files live under /workspace.
 
 ## Workflow
 
-1. writeFile      — write Worker source and any helpers it imports
-2. writeFile      — write /workspace/wrangler.jsonc with the build config
+1. write          — write Worker source and any helpers it imports (use \`edit\`
+                    for surgical changes to existing files)
+2. write          — write /workspace/wrangler.jsonc with the build config
 3. worker_deploy  — { config: "/workspace/wrangler.jsonc" } builds the Worker
                     and loads the bundle into an isolated Dynamic Worker
 4. worker_fetch   — { request: "fetch('https://w/path', { method: 'GET' })" }

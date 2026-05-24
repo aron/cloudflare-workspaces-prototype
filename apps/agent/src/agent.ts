@@ -12,6 +12,17 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 import { Workspace } from "@cloudflare/workspace";
 import { runWasm } from "@cloudflare/workspace/worker-sandbox";
+import {
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+  WorkspaceFileStore,
+} from "@cloudflare/fs-tools";
+import {
+  createBraveSearchProvider,
+  createWebFetchTool,
+  createWebSearchTool,
+} from "@cloudflare/web-tools";
 import { resolveContainerId } from "./pool.js";
 import {
   COMMON_TOOLS,
@@ -169,27 +180,15 @@ export class Agent extends AIChatAgent<Env> {
       allow.has(name) ? { [name]: def } : {};
 
     return {
-      ...pick("readFile", tool({
-        description: "Read the contents of a file",
-        inputSchema: z.object({ path: z.string().describe("Absolute path, e.g. /workspace/main.zig") }),
-        execute: async ({ path }) => {
-          const bytes = ws.readFile(path);
-          if (!bytes) return { error: `File not found: ${path}` };
-          return { path, content: new TextDecoder().decode(bytes) };
-        },
-      })),
-
-      ...pick("writeFile", tool({
-        description: "Write content to a file, creating parent directories as needed",
-        inputSchema: z.object({
-          path:    z.string().describe("Absolute path, e.g. /workspace/main.zig"),
-          content: z.string().describe("File content"),
-        }),
-        execute: async ({ path, content }) => {
-          ws.writeFile(path, content);
-          return { path, bytesWritten: content.length };
-        },
-      })),
+      ...pick("read",  createReadTool({ store: new WorkspaceFileStore(ws) })),
+      ...pick("write", createWriteTool({ store: new WorkspaceFileStore(ws) })),
+      ...pick("edit",  createEditTool({ store: new WorkspaceFileStore(ws) })),
+      ...pick("webFetch", createWebFetchTool({ ai: this.env.AI })),
+      ...(this.env.BRAVE_API_KEY
+        ? pick("webSearch", createWebSearchTool({
+            provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
+          }))
+        : {}),
 
       ...pick("listDirectory", tool({
         description: "List files and directories at a path",

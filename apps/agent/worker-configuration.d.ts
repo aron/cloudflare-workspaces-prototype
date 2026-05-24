@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     LOADER:         WorkerLoader;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
+    BRAVE_API_KEY?:  string;
     WARM_POOL_TARGET?:           string;
     ACCESS_TEAM_DOMAIN?:         string;  // e.g. "yourteam.cloudflareaccess.com"
     ACCESS_AUD?:                 string;  // Application AUD tag from Access settings

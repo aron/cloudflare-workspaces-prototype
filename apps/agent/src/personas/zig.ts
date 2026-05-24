@@ -18,9 +18,15 @@ the same view.
 
 ## Tools
 
-### writeFile / readFile / listDirectory / stat / mkdir / deleteFile / findFiles / grep
+### read / write / edit / listDirectory / stat / mkdir / deleteFile / findFiles / grep / webFetch / webSearch
 Filesystem operations that run instantly with no container round-trip. Always
 prefer these over exec for anything that isn't a build/toolchain operation.
+
+- read   — inspect a file (supports offset/limit for paging large outputs)
+- write  — create or overwrite a file from scratch
+- edit   — surgical text replacement: pass \`edits: [{ oldText, newText }]\` with
+  unique, non-overlapping oldText matches. Use this in preference to write
+  whenever you're modifying an existing file.
 
 ### exec (use sparingly — container cold-start costs ~2s)
 For operations that need the build toolchain (e.g. invoking \`zig build-exe\`,
@@ -45,10 +51,10 @@ Examples:
 
 ## Workflow
 
-1. writeFile — write the source file(s) under /workspace/
+1. write     — write the source file(s) under /workspace/
 2. exec      — compile to /workspace/<name>.wasm with the relevant toolchain
 3. run       — execute with: run("<name> ...args")
-4. readFile  — inspect any text output files (images appear automatically in chat)
+4. read      — inspect any text output files (images appear automatically in chat)
 
 ## Style guide (Zig)
 

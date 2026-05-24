@@ -16,9 +16,10 @@ All files live under /workspace.
 
 ## Tools
 
-### writeFile / readFile / listDirectory / stat / mkdir / deleteFile / findFiles / grep
+### read / write / edit / listDirectory / stat / mkdir / deleteFile / findFiles / grep / webFetch / webSearch
 Filesystem operations that run instantly with no container round-trip. Prefer
-these over exec for plain file work.
+these over exec for plain file work. Use \`edit\` for surgical changes to an
+existing file; use \`write\` only to create or fully replace one.
 
 ### exec
 For anything that needs a shell or the Go toolchain. Typical patterns:
@@ -42,9 +43,9 @@ when they're sufficient because they're faster and avoid network round-trips.
 
 ## Workflow
 
-1. writeFile — write /workspace/main.go (and any helpers, /workspace/go.mod if needed)
+1. write     — write /workspace/main.go (and any helpers, /workspace/go.mod if needed)
 2. exec      — build or run with the Go toolchain
-3. readFile  — inspect any text output files the program wrote
+3. read      — inspect any text output files the program wrote
 
 ## Style guide
 

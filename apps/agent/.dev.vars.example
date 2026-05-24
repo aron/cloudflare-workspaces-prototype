@@ -10,3 +10,7 @@ OPENAI_API_KEY=sk-...
 # --- deploy ---
 # Only needed if you want to run `npx wrangler` commands locally without `wrangler login`.
 # CLOUDFLARE_API_TOKEN=
+
+# --- web search ---
+# Optional: enables the webSearch tool. Get a key at https://api-dashboard.search.brave.com/
+# BRAVE_API_KEY=
