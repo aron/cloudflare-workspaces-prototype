@@ -2,8 +2,8 @@
  * Top-level client component. The URL drives everything:
  *
  *   /                              → RoomPicker
- *   /rooms/:id                     → Mockup (placeholder until wired)
- *   /rooms/:id/threads/:threadId   → Mockup (placeholder until wired)
+ *   /rooms/:id                     → three-pane shell (sidebar + timeline)
+ *   /rooms/:id/threads/:threadId   → adds a thread panel on the right
  *
  * Identity is bootstrapped once at boot via `GET /api/app/me`. While we
  * wait, render a small splash so the layout doesn't jump.
@@ -11,8 +11,9 @@
 
 import { useEffect, useState } from "react";
 
-import { Mockup } from "./Mockup";
 import { RoomPicker } from "./components/RoomPicker";
+import { RoomShell } from "./components/RoomShell";
+import { RoomTimelinePlaceholder } from "./components/RoomTimelinePlaceholder";
 import { fetchMe, type Me } from "./lib/api";
 import { useRoute } from "./lib/nav";
 
@@ -43,10 +44,26 @@ export function App() {
   switch (route.kind) {
     case "picker":
       return <RoomPicker me={me} />;
+
     case "room":
+      return (
+        <RoomShell me={me} roomId={route.roomId}
+                   centre={<RoomTimelinePlaceholder roomId={route.roomId} />} />
+      );
+
     case "thread":
-      // TODO: wire these against the real API. For now, fall back to the
-      // static mockup so the rest of the UI can be developed in place.
-      return <Mockup />;
+      return (
+        <RoomShell
+          me={me}
+          roomId={route.roomId}
+          threadId={route.threadId}
+          centre={<RoomTimelinePlaceholder roomId={route.roomId} />}
+          thread={(
+            <div className="flex h-full items-center justify-center text-sm text-kumo-inactive">
+              Thread panel coming online — next commit wires useAgentChat.
+            </div>
+          )}
+        />
+      );
   }
 }
