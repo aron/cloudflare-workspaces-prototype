@@ -6,9 +6,9 @@ import type { FileStat, FileStore } from "./types.js";
  * type-time dependency on `@cloudflare/workspace`.
  */
 export interface WorkspaceLike {
-  stat(path: string): { type: "file" | "dir"; size: number; mtime: number } | null;
-  readFile(path: string): Uint8Array | null;
-  writeFile(path: string, content: Uint8Array | string, mode?: number): void;
+  stat(path: string): Promise<{ type: "file" | "dir"; size: number; mtime: number } | null>;
+  readFile(path: string): Promise<Uint8Array | null>;
+  writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void>;
   /**
    * Optional: streaming chunk reader. When present, this is preferred over
    * `readFile` so the underlying SQLite-backed VFS can serve byte ranges
@@ -32,7 +32,7 @@ export class WorkspaceFileStore implements FileStore {
   constructor(private readonly ws: WorkspaceLike) {}
 
   async stat(path: string): Promise<FileStat | null> {
-    const s = this.ws.stat(path);
+    const s = await this.ws.stat(path);
     if (!s || s.type !== "file") return null;
     return { size: s.size, mtime: s.mtime };
   }
@@ -42,7 +42,7 @@ export class WorkspaceFileStore implements FileStore {
   }
 
   async write(path: string, content: Uint8Array): Promise<void> {
-    this.ws.writeFile(path, content);
+    await this.ws.writeFile(path, content);
   }
 
   async *readChunks(
@@ -57,7 +57,7 @@ export class WorkspaceFileStore implements FileStore {
       return;
     }
     // Fallback: read everything and slice in JS. Memory-hostile but correct.
-    const buf = this.ws.readFile(path);
+    const buf = await this.ws.readFile(path);
     if (!buf) throw new Error(`File not found: ${path}`);
     const end = byteLength === undefined ? buf.length : Math.min(buf.length, byteOffset + byteLength);
     if (end > byteOffset) yield buf.subarray(byteOffset, end);
