@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import { RoomPicker } from "./components/RoomPicker";
 import { RoomShell } from "./components/RoomShell";
 import { RoomTimeline } from "./components/RoomTimeline";
+import { ThreadPanel } from "./components/ThreadPanel";
 import { fetchMe, type Me } from "./lib/api";
 import { useRoute } from "./lib/nav";
 
@@ -58,11 +59,7 @@ export function App() {
           roomId={route.roomId}
           threadId={route.threadId}
           centre={<RoomTimeline roomId={route.roomId} activeThreadId={route.threadId} />}
-          thread={(
-            <div className="flex h-full items-center justify-center text-sm text-kumo-inactive">
-              Thread panel coming online — next commit wires useAgentChat.
-            </div>
-          )}
+          thread={<ThreadPanel roomId={route.roomId} threadId={route.threadId} />}
         />
       );
   }
