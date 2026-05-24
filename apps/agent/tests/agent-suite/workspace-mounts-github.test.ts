@@ -1,4 +1,3 @@
-/// <reference path="../../node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts" />
 /**
  * Tests for the GitHub→Artifacts→isomorphic-git seam exposed at
  * `@cloudflare/workspace/git`.
@@ -24,8 +23,23 @@ import {
   sanitizeForRepoName,
   tokenSecret,
   type ArtifactsBinding,
-  type ArtifactsRepoHandle,
+  type ArtifactsCreateOptions,
+  type ArtifactsRepo,
 } from "@cloudflare/workspace/git";
+
+// Fields every ArtifactsRepo*Result needs that the in-memory fake doesn't
+// actually care about. Keep them in one place so the binding type stays
+// satisfied even as upstream adds more.
+const REPO_META = {
+  id:             "fake-id",
+  description:    null,
+  createdAt:      "2099-01-01T00:00:00Z",
+  updatedAt:      "2099-01-01T00:00:00Z",
+  lastPushAt:     null,
+  source:         null,
+  readOnly:       false,
+  tokenExpiresAt: "2099-01-01T00:00:00Z",
+} as const;
 
 interface FakeRepoState {
   remote: string;
@@ -44,20 +58,24 @@ function fakeArtifacts(initial: Record<string, FakeRepoState> = {}) {
   let failNextImport: string | null = null;
 
   const binding: ArtifactsBinding = {
-    async get(name: string): Promise<ArtifactsRepoHandle> {
+    async get(name: string): Promise<ArtifactsRepo> {
       calls.get.push(name);
       const state = repos.get(name);
       if (!state) throw new Error(`fake: repo not found: ${name}`);
       return {
+        ...REPO_META,
+        name,
         remote:        state.remote,
         defaultBranch: state.defaultBranch,
-        async createToken(scope = "read", _ttl?: number) {
+        async createToken(scope: "read" | "write" = "read", _ttl?: number) {
           return {
+            id:        `tok_${name}_${scope}`,
             plaintext: `art_v1_${name}_${scope}?expires=9999999999`,
+            scope,
             expiresAt: "2099-01-01T00:00:00Z",
           };
         },
-        async fork(_name, _opts) {
+        async fork(_name: string, _opts?: ArtifactsCreateOptions & { defaultBranchOnly?: boolean }) {
           throw new Error("fake: fork not implemented");
         },
       };
@@ -66,9 +84,24 @@ function fakeArtifacts(initial: Record<string, FakeRepoState> = {}) {
       calls.create.push(name);
       const state = { remote: `https://fake.artifacts.dev/git/default/${name}.git`, defaultBranch: "main" };
       repos.set(name, state);
-      return { name, remote: state.remote, defaultBranch: state.defaultBranch, token: `art_v1_${name}?expires=9999999999` };
+      return {
+        ...REPO_META,
+        name,
+        remote:        state.remote,
+        defaultBranch: state.defaultBranch,
+        token:         `art_v1_${name}?expires=9999999999`,
+      };
     },
-    async list() { return { repos: [...repos.entries()].map(([name, st]) => ({ name, status: "ready", remote: st.remote, defaultBranch: st.defaultBranch })) }; },
+
+    async list() {
+      const entries = [...repos.entries()].map(([name, st]) => ({
+        ...REPO_META,
+        name,
+        remote:        st.remote,
+        defaultBranch: st.defaultBranch,
+      }));
+      return { repos: entries, total: entries.length };
+    },
     async import(params) {
       calls.import.push({ url: params.source.url, branch: params.source.branch, depth: params.source.depth, name: params.target.name });
       if (failNextImport === params.target.name) {
@@ -93,10 +126,11 @@ function fakeArtifacts(initial: Record<string, FakeRepoState> = {}) {
       const state = { remote: `https://fake.artifacts.dev/git/default/${params.target.name}.git`, defaultBranch: params.source.branch ?? "main" };
       repos.set(params.target.name, state);
       return {
-        name: params.target.name,
-        remote: state.remote,
+        ...REPO_META,
+        name:          params.target.name,
+        remote:        state.remote,
         defaultBranch: state.defaultBranch,
-        token: `art_v1_${params.target.name}?expires=9999999999`,
+        token:         `art_v1_${params.target.name}?expires=9999999999`,
       };
     },
     async delete(name: string) { return repos.delete(name); },

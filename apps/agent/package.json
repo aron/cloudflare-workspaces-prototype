@@ -7,7 +7,7 @@
     "dev": "wrangler dev --ip 0.0.0.0",
     "predeploy": "bash sandbox/sync-host-ca.sh && npm run build --workspace=@cloudflare/workspace && npm run build --workspace=@app/frontend",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/agent-suite/tsconfig.json",
     "test": "vitest run && vitest run --config tests/agent-suite/vitest.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "skills:sync": "node scripts/sync-skills.mjs",

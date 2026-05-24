@@ -19,52 +19,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { createGitCloneTool } from "../src/index.js";
-
-function fakeArtifacts() {
-  const calls = { import: [] as unknown[], get: [] as string[] };
-  return {
-    calls,
-    binding: {
-      async create(_name: string) { throw new Error("unused"); },
-      async get(name: string) {
-        calls.get.push(name);
-        throw new Error("fake: not found");
-      },
-      async list() { return { repos: [], total: 0 }; },
-      async import(params: unknown) {
-        calls.import.push(params);
-        return {
-          name:          (params as { target: { name: string } }).target.name,
-          remote:        "https://fake.artifacts.dev/git/default/x.git",
-          defaultBranch: "main",
-          token:         "art_v1_x?expires=9999999999",
-        };
-      },
-      async delete() { return true; },
-    },
-  };
-}
-
-/** Minimal Vfs-like stub. Each call returns the canned value or throws. */
-function fakeVfs() {
-  return {
-    stat: vi.fn().mockReturnValue(null),
-    readFile: vi.fn().mockReturnValue(null),
-    writeFile: vi.fn(),
-    mkdir: vi.fn(),
-    deleteFile: vi.fn(),
-    readdir: vi.fn().mockReturnValue([]),
-    listFilesUnder: vi.fn().mockReturnValue([]),
-  };
-}
-
-function fakeWorkspace() {
-  return {
-    sessionId: "test-session",
-    vfs: fakeVfs() as unknown as import("@cloudflare/workspace").Vfs,
-    mkdir: vi.fn(async () => {}),
-  };
-}
+import { fakeArtifacts, fakeWorkspace } from "./_fakes.js";
 
 describe("createGitCloneTool", () => {
   it("exposes the expected input schema", () => {

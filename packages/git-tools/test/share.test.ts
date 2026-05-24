@@ -11,52 +11,15 @@
  *   - the suggested commands string includes the fork URL and branch
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   createGitCommitTool,
   createGitPushTool,
   createGitShareTool,
 } from "../src/index.js";
+import { fakeWorkspace, unusedArtifacts } from "./_fakes.js";
 
-function fakeVfs() {
-  // Default: stat returns null (no working tree). Override in tests that
-  // need a different behaviour.
-  return {
-    stat:           vi.fn().mockReturnValue(null),
-    readFile:       vi.fn().mockReturnValue(null),
-    writeFile:      vi.fn(),
-    mkdir:          vi.fn(),
-    deleteFile:     vi.fn(),
-    readdir:        vi.fn().mockReturnValue([]),
-    listFilesUnder: vi.fn().mockReturnValue([]),
-  };
-}
-
-function fakeWorkspace(opts: { withRegistry?: boolean } = {}) {
-  const registry = opts.withRegistry
-    ? {
-        get: vi.fn().mockReturnValue(null),
-        upsert: vi.fn(),
-        delete: vi.fn(),
-      }
-    : undefined;
-  return {
-    sessionId: "test-session",
-    vfs: fakeVfs() as unknown as import("@cloudflare/workspace").Vfs,
-    mkdir: vi.fn(async () => {}),
-    forkRegistry: registry,
-  };
-}
-
-function fakeArtifacts() {
-  return {
-    async create() { throw new Error("unused"); },
-    async get() { throw new Error("fake: not found"); },
-    async list() { return { repos: [] }; },
-    async import() { throw new Error("unused"); },
-    async delete() { return true; },
-  };
-}
+const fakeArtifacts = unusedArtifacts;
 
 describe("createGitShareTool", () => {
   it("rejects when the workspace has no forkRegistry", async () => {

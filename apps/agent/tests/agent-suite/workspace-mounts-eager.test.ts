@@ -1,4 +1,3 @@
-/// <reference path="../../node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts" />
 /**
  * Tests for the eager-mount dispatch path in `@cloudflare/workspace`.
  *
