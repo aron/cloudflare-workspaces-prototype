@@ -39,6 +39,7 @@ import {
 import { resolveContainerId } from "./pool.js";
 import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
+import { shortId } from "./ids.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
 import type { DeployResult } from "./worker/deploy.js";
@@ -483,7 +484,7 @@ export class Agent extends Think<Env> {
    */
   async seedUserMessage(text: string): Promise<void> {
     await this.session.appendMessage({
-      id: crypto.randomUUID(),
+      id: shortId(),
       role: "user",
       parts: [{ type: "text", text }]
     });

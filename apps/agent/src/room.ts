@@ -23,6 +23,7 @@
 
 import { Server } from "partyserver";
 import { requireIdentity } from "./identity.js";
+import { shortId } from "./ids.js";
 
 /**
  * Triggers an agent thread when the message mentions `@agent` as a whole word.
@@ -141,7 +142,7 @@ export class Room extends Server<Env> {
 
     const text         = parts.map(p => p.text).join("\n");
     const mintsThread  = hasAgentMention(text);
-    const messageId    = crypto.randomUUID();
+    const messageId    = shortId();
     const createdAt    = Date.now();
     const author: Author = {
       kind:  "user",
@@ -155,7 +156,7 @@ export class Room extends Server<Env> {
     // "agent".
     let threadId: string | undefined;
     if (mintsThread) {
-      threadId = crypto.randomUUID();
+      threadId = shortId();
       this.sql`INSERT INTO threads(id, root_message_id, agent_id, created_at)
                VALUES (${threadId}, ${messageId}, ${"agent"}, ${createdAt})`;
     }

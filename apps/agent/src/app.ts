@@ -9,6 +9,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { requireIdentity } from "./identity.js";
+import { shortId } from "./ids.js";
 import { currentModelLabel } from "./model.js";
 import type { RoomSummary, UserSummary } from "@app/shared";
 
@@ -80,7 +81,7 @@ export class App extends DurableObject<Env> {
         return Response.json({ error: "name too long (max 80 chars)" }, { status: 400 });
       }
       const room: RoomSummary = {
-        id:        crypto.randomUUID(),
+        id:        shortId(),
         name,
         createdBy: identity.userId,
         createdAt: Date.now(),
