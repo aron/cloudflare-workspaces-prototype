@@ -49,7 +49,7 @@ describe("App /rooms", () => {
     const { room } = await created.json() as { room: { id: string; name: string; createdBy: string } };
     expect(room.name).toBe("Hackspace");
     expect(room.createdBy).toBe(VENKMAN.userId);
-    expect(room.id).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(room.id).toMatch(/^[0-9a-hjkmnp-tv-z]{26}$/);
 
     const list = await appStub().fetch(asUser("https://app/rooms", STANTZ));
     const { rooms } = await list.json() as { rooms: Array<{ id: string }> };
