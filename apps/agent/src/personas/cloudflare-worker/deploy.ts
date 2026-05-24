@@ -42,7 +42,7 @@ export class WorkerDeployer {
   get currentHash(): string | null   { return this.slot?.hash ?? null; }
 
   async deploy(configPath: string): Promise<DeployResult> {
-    const stat = this.workspace.stat(configPath);
+    const stat = await this.workspace.stat(configPath);
     if (!stat || stat.type !== "file") {
       return { ok: false, error: `wrangler config not found: ${configPath}` };
     }
@@ -66,14 +66,14 @@ export class WorkerDeployer {
     // 4. Locate the built main module. wrangler emits the entry as the
     //    basename of `main` with .js, e.g. src/index.ts → src/index.js.
     //    The simplest robust thing is to find the only .js (or first one).
-    const builtFiles = this.workspace.listFilesUnder(outDir)
+    const builtFiles = (await this.workspace.listFilesUnder(outDir))
       .filter(p => p.startsWith(outDir + "/"))
       .map(p => p.slice(outDir.length + 1));
     const mainEntry = pickEntry(builtFiles);
     if (!mainEntry) {
       return { ok: false, error: "no main module emitted by wrangler", buildLog };
     }
-    const mainBytes = this.workspace.readFile(`${outDir}/${mainEntry}`);
+    const mainBytes = await this.workspace.readFile(`${outDir}/${mainEntry}`);
     if (!mainBytes) {
       return { ok: false, error: `built file disappeared: ${outDir}/${mainEntry}`, buildLog };
     }
@@ -83,7 +83,7 @@ export class WorkerDeployer {
     const extras: Record<string, { js?: string; text?: string; data?: ArrayBuffer; json?: unknown }> = {};
     for (const name of builtFiles) {
       if (name === mainEntry) continue;
-      const bytes = this.workspace.readFile(`${outDir}/${name}`);
+      const bytes = await this.workspace.readFile(`${outDir}/${name}`);
       if (!bytes) continue;
       if (name.endsWith(".js") || name.endsWith(".mjs")) {
         extras[name] = { js: new TextDecoder().decode(bytes) };

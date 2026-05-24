@@ -81,7 +81,7 @@ export class Agent extends Think<Env> {
       sessionId: this.name,
       resolveSessionId: (id) => resolveContainerId(this.env, id),
     });
-    this.workspace.mkdir(WORKSPACE);
+    this.ctx.blockConcurrencyWhile(async () => { await this.workspace.mkdir(WORKSPACE); });
   }
 
   /**
@@ -192,7 +192,7 @@ export class Agent extends Think<Env> {
     if (request.method === "GET" && url.pathname.endsWith("/vfs")) {
       const entries: Array<{ path: string; type: string; size: number; mtime: number }> = [];
       for (const e of this.workspace.vfs.snapshot().entries) {
-        const stat = this.workspace.stat(e.path);
+        const stat = await this.workspace.stat(e.path);
         entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
@@ -258,14 +258,14 @@ export class Agent extends Think<Env> {
       ...pick("listDirectory", tool({
         description: "List files and directories at a path",
         inputSchema: z.object({ path: z.string().describe("Absolute directory path, e.g. /workspace") }),
-        execute: async ({ path }) => ({ path, entries: ws.readdir(path) }),
+        execute: async ({ path }) => ({ path, entries: await ws.readdir(path) }),
       })),
 
       ...pick("stat", tool({
         description: "Get metadata for a file or directory: type, size, mtime",
         inputSchema: z.object({ path: z.string().describe("Absolute path") }),
         execute: async ({ path }) => {
-          const s = ws.stat(path);
+          const s = await ws.stat(path);
           if (!s) return { error: `Not found: ${path}` };
           return { path, ...s };
         },
@@ -274,13 +274,13 @@ export class Agent extends Think<Env> {
       ...pick("mkdir", tool({
         description: "Create a directory (including parent directories)",
         inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => { ws.mkdir(path); return { path, created: true }; },
+        execute: async ({ path }) => { await ws.mkdir(path); return { path, created: true }; },
       })),
 
       ...pick("deleteFile", tool({
         description: "Delete a file or directory (recursive)",
         inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
-        execute: async ({ path }) => { ws.deleteFile(path); return { path, deleted: true }; },
+        execute: async ({ path }) => { await ws.deleteFile(path); return { path, deleted: true }; },
       })),
 
       ...pick("findFiles", tool({
@@ -291,7 +291,7 @@ export class Agent extends Think<Env> {
         }),
         execute: async ({ directory, pattern }) => ({
           directory, pattern,
-          matches: ws.findFiles(directory, pattern),
+          matches: await ws.findFiles(directory, pattern),
         }),
       })),
 
@@ -304,7 +304,7 @@ export class Agent extends Think<Env> {
         }),
         execute: async ({ pattern, path, ignoreCase }) => ({
           pattern, path,
-          matches: ws.grep(pattern, path, { ignoreCase }),
+          matches: await ws.grep(pattern, path, { ignoreCase }),
         }),
       })),
 
