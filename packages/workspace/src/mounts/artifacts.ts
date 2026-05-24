@@ -490,27 +490,35 @@ export interface MintShareUrlOptions {
   forkName: string;
   /** Token TTL in seconds. Default 3600 (1 hour). */
   ttlSeconds?: number;
+  /**
+   * Token scope. `"read"` (default) mints a fetch-only URL the user can
+   * `git remote add` for code review; `"write"` mints a URL they can also
+   * push back through so the agent picks up their changes.
+   */
+  scope?: "read" | "write";
 }
 
 /**
- * Mint a fresh read-only token on `forkName` and return an HTTPS URL
- * with the secret embedded in Basic auth. Suitable for handing to a
- * user who will `git remote add` against it.
+ * Mint a fresh token on `forkName` and return an HTTPS URL with the
+ * secret embedded in Basic auth. Suitable for handing to a user who
+ * will `git remote add` against it.
  *
- * Token TTL is bounded by Artifacts' own limits: min 60s, max 1 year.
- * Defaults to 1 hour.
+ * Defaults to a read-only token (TTL 1 hour). Pass `scope: "write"` to
+ * mint a URL that also accepts `git push`. Artifacts caps tokens at
+ * min 60s / max 1 year.
  */
-export async function mintShareUrl(opts: MintShareUrlOptions): Promise<{ url: string; expiresAt: string; remote: string }> {
-  const ttl = opts.ttlSeconds ?? 3600;
+export async function mintShareUrl(opts: MintShareUrlOptions): Promise<{ url: string; expiresAt: string; remote: string; scope: "read" | "write" }> {
+  const ttl   = opts.ttlSeconds ?? 3600;
+  const scope = opts.scope ?? "read";
   const handle = await opts.artifacts.get(opts.forkName);
-  const tk = await handle.createToken("read", ttl);
+  const tk = await handle.createToken(scope, ttl);
   const secret = tokenSecret(tk.plaintext);
   const remote = handle.remote;
   // Convert https://host/... → https://x:<secret>@host/...
   const u = new URL(remote);
   u.username = "x";
   u.password = secret;
-  return { url: u.toString(), expiresAt: tk.expiresAt, remote };
+  return { url: u.toString(), expiresAt: tk.expiresAt, remote, scope };
 }
 
 export interface CommitChangesOptions {

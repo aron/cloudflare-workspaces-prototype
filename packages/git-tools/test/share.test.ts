@@ -51,7 +51,7 @@ describe("createGitShareTool", () => {
       workspace: fakeWorkspace({ withRegistry: true }),
       artifacts: fakeArtifacts(),
     });
-    expect((tool as unknown as { description: string }).description).toMatch(/short-lived read-only URL/);
+    expect((tool as unknown as { description: string }).description).toMatch(/writeable/);
   });
 });
 

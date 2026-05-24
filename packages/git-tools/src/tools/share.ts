@@ -1,14 +1,17 @@
 /**
  * `gitShare` — convenience wrapper: commit + push + mint short-lived
- * read-only URL for the user's local clone.
+ * share URL for the user's local clone.
  *
  * One-shot operation the agent calls when it wants to hand the user a
- * snapshot of in-flight work for code review. Returns:
+ * snapshot of in-flight work. By default the URL is read-only (for code
+ * review); pass `writeable: true` to mint a push-enabled URL so the user
+ * can commit back and the agent will pick the changes up on the next
+ * pull. Returns:
  *
  *   - the fork's wip branch name
  *   - the new HEAD commit
  *   - a summary of files changed
- *   - the share URL (with read token embedded in Basic auth) + expiry
+ *   - the share URL (read or write) + expiry + scope
  *   - copy-paste git commands the agent can quote at the user
  *
  * If there are no uncommitted changes and the wip branch is already up
@@ -62,6 +65,10 @@ const inputSchema = z.object({
     .max(MAX_TTL)
     .optional()
     .describe(`Share URL lifetime in seconds. Default ${DEFAULT_TTL} (1 hour). Min ${MIN_TTL}, max ${MAX_TTL}.`),
+  writeable: z
+    .boolean()
+    .optional()
+    .describe("When true, mint a push-enabled URL the user can `git push` to. Default false (read-only)."),
 });
 
 interface ShareOk {
@@ -73,18 +80,24 @@ interface ShareOk {
   share: {
     url: string;
     expiresAt: string;
+    scope: "read" | "write";
   };
   suggestedCommands: string;
 }
 type ShareResult = ShareOk | { error: string };
 
-function suggestedCommands(remoteName: string, url: string, branch: string): string {
-  return [
+function suggestedCommands(remoteName: string, url: string, branch: string, writeable: boolean): string {
+  const base = [
     `git remote add ${remoteName} "${url}"`,
     `git fetch ${remoteName}`,
     `git checkout -b review ${remoteName}/${branch}`,
     "git diff main..review",
-  ].join("\n");
+  ];
+  if (writeable) {
+    // Show the push line too so the user knows the URL accepts writes.
+    base.push(`# to push back: git push ${remoteName} HEAD:${branch}`);
+  }
+  return base.join("\n");
 }
 
 export function createGitShareTool(opts: GitShareToolOptions) {
@@ -97,9 +110,9 @@ export function createGitShareTool(opts: GitShareToolOptions) {
 
   return tool({
     description:
-      "Snapshot the cloned git working tree, push it to a per-session fork on Cloudflare Artifacts, and return a short-lived read-only URL the user can `git remote add` against their local clone for code review. Default URL lifetime is 1 hour.",
+      "Snapshot the cloned git working tree, push it to a per-session fork on Cloudflare Artifacts, and return a short-lived URL the user can `git remote add` against their local clone. By default the URL is read-only (code review); set `writeable: true` to mint a push-enabled URL so the user can commit back. Default URL lifetime is 1 hour.",
     inputSchema,
-    execute: async ({ dir, message, branch, ttlSeconds }): Promise<ShareResult> => {
+    execute: async ({ dir, message, branch, ttlSeconds, writeable }): Promise<ShareResult> => {
       const registry = opts.workspace.forkRegistry;
       if (!registry) {
         return { error: "workspace has no forkRegistry; cannot share" };
@@ -179,6 +192,7 @@ export function createGitShareTool(opts: GitShareToolOptions) {
           artifacts:  opts.artifacts,
           forkName:   fork.forkName,
           ttlSeconds: ttlSeconds ?? defaultTtl,
+          scope:      writeable ? "write" : "read",
         });
       } catch (err) {
         return { error: `mint share URL: ${(err as Error).message}` };
@@ -191,8 +205,8 @@ export function createGitShareTool(opts: GitShareToolOptions) {
           ? { added: commitOut.added, modified: commitOut.modified, removed: commitOut.removed }
           : { added: 0, modified: 0, removed: 0 },
         reused: commitOut === null,
-        share: { url: share.url, expiresAt: share.expiresAt },
-        suggestedCommands: suggestedCommands("agent", share.url, remoteRef),
+        share: { url: share.url, expiresAt: share.expiresAt, scope: share.scope },
+        suggestedCommands: suggestedCommands("agent", share.url, remoteRef, share.scope === "write"),
       };
     },
   });
