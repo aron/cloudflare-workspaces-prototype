@@ -3,9 +3,8 @@
  * always-on; the centre pane will host the room timeline (next commit);
  * the right pane mounts only when the route carries a threadId.
  *
- * Currently the centre and right panes are placeholders pointing to
- * the static Mockup for the eyes; the data wiring lands in the
- * RoomTimeline and ThreadPanel commits.
+ * The centre and right slots are passed in by the caller (App.tsx),
+ * so this component is layout-only.
  */
 
 import { Hexagon, Settings, Share2 } from "lucide-react";
