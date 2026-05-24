@@ -510,10 +510,25 @@ export interface MintShareUrlOptions {
 export async function mintShareUrl(opts: MintShareUrlOptions): Promise<{ url: string; expiresAt: string; remote: string; scope: "read" | "write" }> {
   const ttl   = opts.ttlSeconds ?? 3600;
   const scope = opts.scope ?? "read";
+
+  // Resolve `remote` via list() rather than reading `handle.remote` off the
+  // get() stub. ArtifactsRepo exposes `remote` as an own-property field, and
+  // workerd's JsRpcTarget refuses to proxy own-properties over RPC — reading
+  // it back raises 'The RPC receiver does not implement the method "remote"',
+  // which previously surfaced as `new URL(undefined)` → 'Invalid URL string'.
+  // `list()` returns plain-data RepoInfo entries that *do* carry remote.
+  const info = await findRepoByName(opts.artifacts, opts.forkName);
+  if (!info) {
+    throw new Error(`mintShareUrl: fork "${opts.forkName}" not found`);
+  }
+  const remote = info.remote;
+
+  // createToken is a prototype method, so calling it on the get() handle is
+  // fine — the own-property restriction only bites for fields.
   const handle = await opts.artifacts.get(opts.forkName);
   const tk = await handle.createToken(scope, ttl);
   const secret = tokenSecret(tk.plaintext);
-  const remote = handle.remote;
+
   // Convert https://host/... → https://x:<secret>@host/...
   const u = new URL(remote);
   u.username = "x";

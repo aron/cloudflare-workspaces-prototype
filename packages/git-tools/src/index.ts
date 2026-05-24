@@ -20,6 +20,9 @@ export type { GitCloneToolOptions } from "./tools/clone.js";
 export { createGitCreateRepoTool } from "./tools/create-repo.js";
 export type { GitCreateRepoToolOptions } from "./tools/create-repo.js";
 
+export { createGitListReposTool } from "./tools/list-repos.js";
+export type { GitListReposToolOptions } from "./tools/list-repos.js";
+
 export { createGitCommitTool } from "./tools/commit.js";
 export type { GitCommitToolOptions } from "./tools/commit.js";
 

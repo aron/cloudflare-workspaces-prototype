@@ -34,6 +34,7 @@ import {
 import {
   createGitCloneTool,
   createGitCreateRepoTool,
+  createGitListReposTool,
   createGitCommitTool,
   createGitPushTool,
   createGitShareTool,
@@ -476,6 +477,9 @@ export class Agent extends Think<Env> {
       })),
       ...pick("gitCreateRepo", createGitCreateRepoTool({
         workspace: gitWorkspace,
+        artifacts: this.env.Artifacts,
+      })),
+      ...pick("gitListRepos", createGitListReposTool({
         artifacts: this.env.Artifacts,
       })),
       ...pick("gitCommit", createGitCommitTool({
