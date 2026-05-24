@@ -73,5 +73,5 @@ export const zigPersona: Persona = {
   name:         "Zig",
   description:  "Build single-file Zig CLIs and run them as WASI programs.",
   systemPrompt: PROMPT,
-  extraTools:   ["run"],
+  extraTools:   ["run", "webSearch"],
 };

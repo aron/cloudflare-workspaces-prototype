@@ -89,5 +89,5 @@ export const cloudflareWorkerPersona: Persona = {
   name:         "Cloudflare Worker",
   description:  "Build Workers from /workspace, deploy into a Dynamic Worker, and call them via worker_fetch.",
   systemPrompt: PROMPT,
-  extraTools:   ["worker_deploy", "worker_fetch"],
+  extraTools:   ["worker_deploy", "worker_fetch", "webSearch"],
 };

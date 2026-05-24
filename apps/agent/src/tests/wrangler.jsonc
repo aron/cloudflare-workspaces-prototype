@@ -26,5 +26,8 @@
       "tag": "v1",
       "new_sqlite_classes": ["Agent", "SubAgent"]
     }
-  ]
+  ],
+  // Dummy key so webSearch tool registers under getTools(). Tests never
+  // hit the network — they only inspect tool-name visibility.
+  "vars": { "BRAVE_API_KEY": "test-key" }
 }

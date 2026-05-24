@@ -63,5 +63,5 @@ export const goPersona: Persona = {
   name:         "Go",
   description:  "Write Go CLIs and run them in the build container with `go build` / `go run`.",
   systemPrompt: PROMPT,
-  extraTools:   [],
+  extraTools:   ["webSearch"],
 };
