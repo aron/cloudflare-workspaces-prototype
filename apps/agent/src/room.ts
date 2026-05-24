@@ -41,7 +41,7 @@ import type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 export type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 
 interface InitBody { id?: unknown; name?: unknown; createdBy?: unknown }
-interface PostBody { parts?: unknown }
+interface PostBody { parts?: unknown; clientId?: unknown }
 
 export class Room extends Server<Env> {
   // Enable hibernation so the DO unloads while idle but WS connections survive.
@@ -61,9 +61,19 @@ export class Room extends Server<Env> {
       parts_json  TEXT NOT NULL,
       author_json TEXT NOT NULL,
       created_at  INTEGER NOT NULL,
-      thread_id   TEXT
+      thread_id   TEXT,
+      client_id   TEXT
     )`;
+    // Migration for rooms that pre-date the client_id column. Done as a
+    // conditional ALTER rather than try/catch around a duplicate-column
+    // error so we don't trip partyserver's exception logger every startup.
+    const cols = this.sql<{ name: string }>`PRAGMA table_info(messages)`;
+    if (!cols.some(c => c.name === "client_id")) {
+      this.sql`ALTER TABLE messages ADD COLUMN client_id TEXT`;
+    }
     this.sql`CREATE INDEX IF NOT EXISTS messages_created_at ON messages(created_at)`;
+    this.sql`CREATE UNIQUE INDEX IF NOT EXISTS messages_client_id
+             ON messages(client_id) WHERE client_id IS NOT NULL`;
     this.sql`CREATE TABLE IF NOT EXISTS threads (
       id              TEXT PRIMARY KEY,
       root_message_id TEXT NOT NULL,
@@ -139,6 +149,23 @@ export class Room extends Server<Env> {
     if (!parts) {
       return Response.json({ error: "parts must contain at least one non-empty text part" }, { status: 400 });
     }
+    const clientId = typeof body.clientId === "string" && body.clientId.length <= 128
+      ? body.clientId
+      : undefined;
+
+    // Idempotent retry: if the client supplies a clientId we've already
+    // seen, return the original row instead of inserting a duplicate. This
+    // lets the browser safely retry POSTs across a deploy / network hiccup
+    // without the room growing duplicate messages.
+    if (clientId) {
+      const existing = this.findByClientId(clientId);
+      if (existing) {
+        return Response.json(
+          { message: existing, threadId: existing.metadata.threadId, deduped: true },
+          { status: 200 },
+        );
+      }
+    }
 
     const text         = parts.map(p => p.text).join("\n");
     const mintsThread  = hasAgentMention(text);
@@ -167,13 +194,17 @@ export class Room extends Server<Env> {
       parts,
       metadata: { author, createdAt, threadId },
     };
-    this.sql`INSERT INTO messages(id, role, parts_json, author_json, created_at, thread_id)
+    this.sql`INSERT INTO messages(id, role, parts_json, author_json, created_at, thread_id, client_id)
              VALUES (${message.id}, ${message.role},
                      ${JSON.stringify(message.parts)},
                      ${JSON.stringify(message.metadata.author)},
-                     ${createdAt}, ${threadId ?? null})`;
+                     ${createdAt}, ${threadId ?? null}, ${clientId ?? null})`;
     // Fan out to WS subscribers so other clients see the message live.
-    this.broadcast(JSON.stringify({ type: "message", message }));
+    // Fan out to WS subscribers so other clients see the message live.
+    // We include `clientId` on the broadcast (and POST response) so the
+    // sender can match the live frame to its optimistic placeholder and
+    // swap in the server-assigned id without rendering a duplicate.
+    this.broadcast(JSON.stringify({ type: "message", message, clientId }));
 
     // Seed the Agent DO when a thread was minted. The thread id is also the
     // Agent DO id, so the client can connect to the same DO later.
@@ -198,7 +229,7 @@ export class Room extends Server<Env> {
       } catch { /* swallow */ }
     }
 
-    return Response.json({ message, threadId }, { status: 201 });
+    return Response.json({ message, threadId, clientId }, { status: 201 });
   }
 
   // ---- queries ----
@@ -227,6 +258,31 @@ export class Room extends Server<Env> {
         threadId:  r.thread_id ?? undefined,
       },
     }));
+  }
+
+  /**
+   * Look up a previously-posted message by the client-supplied dedup key.
+   * Used by `handlePostMessage` to make POSTs idempotent across retries.
+   * Returns null when no message has been posted under this key yet.
+   */
+  private findByClientId(clientId: string): AppMessage | null {
+    const rows = this.sql<{
+      id: string; role: string; parts_json: string; author_json: string;
+      created_at: number; thread_id: string | null;
+    }>`SELECT id, role, parts_json, author_json, created_at, thread_id
+       FROM messages WHERE client_id = ${clientId} LIMIT 1`;
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      id:    r.id,
+      role:  r.role as "user" | "assistant",
+      parts: JSON.parse(r.parts_json),
+      metadata: {
+        author:    JSON.parse(r.author_json),
+        createdAt: r.created_at,
+        threadId:  r.thread_id ?? undefined,
+      },
+    };
   }
 
   private listThreads(): ThreadRow[] {

@@ -26,7 +26,8 @@ import {
   openRoomSocket,
   postRoomMessage,
 } from "@/lib/api";
-import type { AppMessage, RoomMeta } from "@/lib/api";
+import * as outbox from "@/lib/roomOutbox";
+import type { AppMessage, Me, RoomMeta } from "@/lib/api";
 import { navigate } from "@/lib/nav";
 import { initials, relTime } from "@/lib/utils";
 
@@ -55,10 +56,12 @@ function authorKey(msg: AppMessage): string {
 }
 
 export function RoomTimeline({
+  me,
   roomId,
   activeThreadId,
   model,
 }: {
+  me:              Me;
   roomId:          string;
   activeThreadId?: string;
   /** Human-readable label for the current model. Display-only. */
@@ -91,6 +94,40 @@ export function RoomTimeline({
     return () => { cancelled = true; };
   }, [roomId]);
 
+  // Pending outbox entries the flusher hasn't drained yet. We don't render
+  // these directly (the optimistic message lives in `messages` keyed by
+  // clientId), but holding the count in state lets the composer surface a
+  // "queued" indicator when sends are sitting waiting for connectivity.
+  const [pending, setPending] = useState<number>(() => outbox.list(roomId).length);
+
+  // Stable handle for the WS so the flusher (a separate effect) can prod
+  // the server when it sees we're online again. We don't need to read it,
+  // we just need to know the socket is currently open.
+  const wsOpenRef = useRef(false);
+
+  const applyServerMessage = useCallback(
+    (incoming: AppMessage, clientId?: string | null) => {
+      setMessages(prev => {
+        // Optimistic swap: if we have a pending message under this clientId,
+        // replace it in place so the row doesn't jump or duplicate.
+        if (clientId) {
+          const idx = prev.findIndex(m => m.id === clientId);
+          if (idx !== -1) {
+            const next = prev.slice();
+            next[idx] = incoming;
+            return next;
+          }
+        }
+        // No clientId match — this is either someone else's message or our
+        // own coming back after we already swapped. Skip if the id is
+        // already present.
+        if (prev.some(m => m.id === incoming.id)) return prev;
+        return [...prev, incoming];
+      });
+    },
+    [],
+  );
+
   // Live fanout via the RoomDO WebSocket. Reconnects with capped backoff.
   useEffect(() => {
     let closed = false;
@@ -99,20 +136,23 @@ export function RoomTimeline({
 
     const connect = () => {
       ws = openRoomSocket(roomId);
+      ws.addEventListener("open", () => {
+        retry = 0;
+        wsOpenRef.current = true;
+        // Re-arm the flusher on (re)connect; outbox entries that survived a
+        // page reload or a WS outage now have somewhere to drain to.
+        setPending(outbox.list(roomId).length);
+      });
       ws.addEventListener("message", (e) => {
         try {
           const frame = JSON.parse(typeof e.data === "string" ? e.data : "");
           if (frame?.type === "message" && frame.message) {
-            setMessages(prev => {
-              // De-dupe: poster already appended optimistically through the
-              // POST response. Skip if the id is already here.
-              if (prev.some(m => m.id === frame.message.id)) return prev;
-              return [...prev, frame.message];
-            });
+            applyServerMessage(frame.message, frame.clientId ?? null);
           }
         } catch { /* ignore malformed frames */ }
       });
       ws.addEventListener("close", () => {
+        wsOpenRef.current = false;
         if (closed) return;
         retry = Math.min(retry + 1, 5);
         setTimeout(connect, retry * 500);
@@ -120,28 +160,75 @@ export function RoomTimeline({
     };
     connect();
     return () => { closed = true; ws?.close(); };
-  }, [roomId]);
+  }, [roomId, applyServerMessage]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Outbox flusher. Re-runs whenever `pending` changes (which is whenever we
+  // enqueue, dequeue, or reconnect). Drains entries sequentially so the
+  // server processes them in submit order; the unique `client_id` index in
+  // Room makes the POSTs idempotent if we crash mid-drain.
+  useEffect(() => {
+    if (pending === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const entry of outbox.list(roomId)) {
+        if (cancelled) return;
+        try {
+          const resp = await postRoomMessage(roomId, entry.parts, entry.clientId);
+          if (cancelled) return;
+          applyServerMessage(resp.message, resp.clientId ?? entry.clientId);
+          outbox.remove(roomId, entry.clientId);
+          if (resp.threadId) navigate({ kind: "thread", roomId, threadId: resp.threadId });
+        } catch {
+          // Leave the entry in the outbox; the next reconnect (or the next
+          // user send) will trigger another flush attempt.
+          break;
+        }
+      }
+      if (!cancelled) setPending(outbox.list(roomId).length);
+    })();
+    return () => { cancelled = true; };
+  }, [pending, roomId, applyServerMessage]);
 
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || sending) return;
     setSending(true);
     setInput("");
+
+    const clientId = outbox.newClientId();
+    const parts = [{ type: "text" as const, text }];
+    const optimistic: AppMessage = {
+      id:    clientId,
+      role:  "user",
+      parts,
+      metadata: {
+        author:    { kind: "user", id: me.userId, email: me.email, name: me.name },
+        createdAt: Date.now(),
+      },
+    };
+    outbox.enqueue(roomId, { clientId, parts, createdAt: optimistic.metadata.createdAt });
+    setMessages(prev => [...prev, optimistic]);
+    setPending(outbox.list(roomId).length);
+
     try {
-      const { message, threadId } = await postRoomMessage(roomId, [{ type: "text", text }]);
-      setMessages(prev => prev.some(m => m.id === message.id) ? prev : [...prev, message]);
-      if (threadId) navigate({ kind: "thread", roomId, threadId });
+      const resp = await postRoomMessage(roomId, parts, clientId);
+      applyServerMessage(resp.message, resp.clientId ?? clientId);
+      outbox.remove(roomId, clientId);
+      setPending(outbox.list(roomId).length);
+      if (resp.threadId) navigate({ kind: "thread", roomId, threadId: resp.threadId });
     } catch (e) {
+      // The optimistic message and outbox entry stay put. The flusher will
+      // retry on reconnect; the user sees their message immediately and a
+      // “queued” indicator until the POST lands.
       setError((e as Error).message);
-      setInput(text);  // restore so the user can retry
     } finally {
       setSending(false);
     }
-  }, [input, sending, roomId]);
+  }, [input, sending, roomId, me, applyServerMessage]);
 
   return (
     <section className="flex h-full min-w-0 flex-col border-r border-kumo-line">
@@ -151,6 +238,14 @@ export function RoomTimeline({
           {meta && (
             <div className="mt-0.5 flex items-center gap-2 text-xs text-kumo-inactive">
               <span>{messages.length} message{messages.length === 1 ? "" : "s"}</span>
+              {pending > 0 && (
+                <span
+                  className="rounded bg-yellow-500/10 px-1.5 py-0.5 text-yellow-300"
+                  title="Messages queued locally; will send when the connection comes back"
+                >
+                  {pending} queued
+                </span>
+              )}
             </div>
           )}
         </div>

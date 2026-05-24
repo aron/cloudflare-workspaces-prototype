@@ -66,7 +66,7 @@ export function App() {
       return (
         <Suspense fallback={RoomFallback}>
           <RoomShell me={me} roomId={route.roomId}
-                     centre={<RoomTimeline roomId={route.roomId} model={me.model} />} />
+                     centre={<RoomTimeline me={me} roomId={route.roomId} model={me.model} />} />
         </Suspense>
       );
 
@@ -77,7 +77,7 @@ export function App() {
             me={me}
             roomId={route.roomId}
             threadId={route.threadId}
-            centre={<RoomTimeline roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
+            centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
             thread={<ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />}
           />
         </Suspense>

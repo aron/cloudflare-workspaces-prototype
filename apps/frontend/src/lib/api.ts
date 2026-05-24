@@ -75,17 +75,31 @@ export async function fetchRoomMessages(roomId: string): Promise<AppMessage[]> {
   return body.messages;
 }
 
-export interface PostMessageResponse { message: AppMessage; threadId?: string }
+export interface PostMessageResponse {
+  message:   AppMessage;
+  threadId?: string;
+  /** Echoed back so the client outbox can match the response to its entry. */
+  clientId?: string;
+  /** True when the server returned a previously-persisted message for this clientId. */
+  deduped?:  boolean;
+}
 export async function postRoomMessage(
   roomId: string,
   parts:  Array<{ type: "text"; text: string }>,
+  /**
+   * Stable client-side id for this attempted send. The Room DO uses it to
+   * collapse retries onto a single persisted message, so a network blip
+   * or DO redeploy mid-POST can't produce duplicates when the client
+   * outbox replays.
+   */
+  clientId?: string,
 ): Promise<PostMessageResponse> {
   return jsonOrThrow(
     await fetch(`/api/rooms/${roomId}/messages`, {
       ...OPTS,
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts }),
+      body:    JSON.stringify({ parts, clientId }),
     }),
     `POST /api/rooms/${roomId}/messages`,
   );
