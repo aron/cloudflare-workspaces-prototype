@@ -7,11 +7,11 @@
  *   - `tokenSecret` strips the `?expires=` suffix per the Artifacts docs
  *   - `sanitizeForRepoName` produces names that match the Artifacts
  *     naming rules (start with alnum, then [A-Za-z0-9._-])
- *   - `baselineName` is deterministic and sanitized
- *   - `ensureBaselineRepo` calls `get()` first (fast path) and only falls
- *     through to `import()` on miss
- *   - `ensureBaselineRepo` recovers from an `import()` race by re-reading
- *     via `get()`
+ *   - `ensureBaselineRepo` uses `import()` as the primary path, returning
+ *     plain data in one round trip
+ *   - `ensureBaselineRepo` recovers from an `ALREADY_EXISTS` import error
+ *     by reading the remote URL via `list()` and minting a token via
+ *     `get().createToken()`
  *
  * The actual `git.clone` path is exercised by integration tests against a
  * live Artifacts binding (`remote: true` in wrangler) — not here.
@@ -68,20 +68,27 @@ function fakeArtifacts(initial: Record<string, FakeRepoState> = {}) {
       repos.set(name, state);
       return { name, remote: state.remote, defaultBranch: state.defaultBranch, token: `art_v1_${name}?expires=9999999999` };
     },
-    async list() { return { repos: [...repos.entries()].map(([name]) => ({ name, status: "ready" })) }; },
+    async list() { return { repos: [...repos.entries()].map(([name, st]) => ({ name, status: "ready", remote: st.remote, defaultBranch: st.defaultBranch })) }; },
     async import(params) {
       calls.import.push({ url: params.source.url, branch: params.source.branch, depth: params.source.depth, name: params.target.name });
       if (failNextImport === params.target.name) {
         failNextImport = null;
         // Simulate the race winner having populated the repo just
-        // before our import() returned its failure.
+        // before our import() returned its ALREADY_EXISTS error.
         if (!repos.has(params.target.name)) {
           repos.set(params.target.name, {
             remote: `https://fake.artifacts.dev/git/default/${params.target.name}.git`,
             defaultBranch: params.source.branch ?? "main",
           });
         }
-        throw new Error("fake: import race");
+        const err = new Error(`repo "${params.target.name}" already exists`) as Error & { code: string };
+        err.code = "ALREADY_EXISTS";
+        throw err;
+      }
+      if (repos.has(params.target.name)) {
+        const err = new Error(`repo "${params.target.name}" already exists`) as Error & { code: string };
+        err.code = "ALREADY_EXISTS";
+        throw err;
       }
       const state = { remote: `https://fake.artifacts.dev/git/default/${params.target.name}.git`, defaultBranch: params.source.branch ?? "main" };
       repos.set(params.target.name, state);
@@ -149,7 +156,7 @@ describe("baselineName", () => {
 });
 
 describe("ensureBaselineRepo", () => {
-  it("uses the fast path when the baseline already exists", async () => {
+  it("uses list() + get() to recover when the baseline already exists", async () => {
     const name = baselineName("cf", "agents", "main");
     const a = fakeArtifacts({
       [name]: { remote: "https://fake/git/default/" + name + ".git", defaultBranch: "main" },
@@ -157,7 +164,9 @@ describe("ensureBaselineRepo", () => {
     const out = await ensureBaselineRepo({ artifacts: a.binding, owner: "cf", repo: "agents", ref: "main" });
     expect(out.name).toBe(name);
     expect(out.remote).toContain(name);
-    expect(a.calls().import).toEqual([]);
+    // import() is the primary path and is always tried; on ALREADY_EXISTS
+    // we fall back to list() + get().createToken().
+    expect(a.calls().import.length).toBe(1);
     expect(a.calls().get).toEqual([name]);
   });
 
@@ -173,18 +182,18 @@ describe("ensureBaselineRepo", () => {
     }]);
   });
 
-  it("falls back to get() when import() loses a race", async () => {
+  it("falls back to list() + get() when import() loses a race", async () => {
     const a = fakeArtifacts();
     const name = "gh-cloudflare-agents-main";
-    // Arm a race: the next import() will throw but also populate the
-    // repo, mimicking a winning concurrent writer that landed first.
+    // Arm a race: the next import() will throw ALREADY_EXISTS but also
+    // populate the repo, mimicking a winning concurrent writer that landed first.
     a.failNextImport(name);
     const out = await ensureBaselineRepo({ artifacts: a.binding, owner: "cloudflare", repo: "agents", ref: "main" });
     expect(out.name).toBe(name);
     expect(out.remote).toContain(name);
-    // get() is called twice: first the fast-path probe that misses,
-    // then the recovery re-read after import() threw.
-    expect(a.calls().get.length).toBe(2);
+    // import() is called once (and throws); recovery reads the remote via
+    // list() and mints a token via get().createToken().
     expect(a.calls().import.length).toBe(1);
+    expect(a.calls().get).toEqual([name]);
   });
 });
