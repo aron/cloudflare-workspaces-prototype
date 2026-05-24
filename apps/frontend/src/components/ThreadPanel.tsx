@@ -12,9 +12,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
-import { ArrowUp, X } from "lucide-react";
+import { ArrowUp, ChevronDown, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { MentionText } from "@/components/MentionText";
 import { MentionTextarea } from "@/components/MentionTextarea";
 import { MentionHighlighter } from "@/components/MentionHighlighter";
@@ -96,6 +102,25 @@ export function ThreadPanel({
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
   }, [input, isStreaming, sendMessage]);
 
+  // Download a tar archive of the agent's session state (messages + VFS +
+  // metadata). Useful for filing bug reports — drop it next to a repro.
+  const downloadDebugTar = useCallback(async () => {
+    const res = await fetch(`/api/threads/${threadId}/tar`, { credentials: "include" });
+    if (!res.ok) {
+      console.error("debug tar download failed", res.status, await res.text());
+      return;
+    }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href     = url;
+    link.download = `thread-${threadId}.tar`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, [threadId]);
+
   const rootInitial = useMemo(() => {
     if (!root) return null;
     const a = root.metadata.author;
@@ -126,6 +151,23 @@ export function ThreadPanel({
             <span>{status}</span>
           </div>
         </div>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Thread options"
+            >
+              <ChevronDown className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => { void downloadDebugTar(); }}>
+              Download debug tarball
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         <Button
           variant="ghost"

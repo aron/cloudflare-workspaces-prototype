@@ -39,6 +39,7 @@ import {
 import { resolveContainerId } from "./pool.js";
 import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
+import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
@@ -244,6 +245,27 @@ export class Agent extends Think<Env> {
         entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
+    }
+
+    if (request.method === "GET" && url.pathname.endsWith("/tar")) {
+      const tar = await buildSessionTar({
+        agentName: this.name,
+        metadata:  {
+          agent:      this.name,
+          model:     currentModelId(this.env),
+          messageCount: this.messages.length,
+          capturedAt: new Date().toISOString(),
+        },
+        messages:  this.messages,
+        workspace: this.workspace,
+      });
+      return new Response(tar as BodyInit, {
+        headers: {
+          "content-type":        "application/x-tar",
+          "content-disposition": `attachment; filename="${this.name}.tar"`,
+          "cache-control":       "no-store",
+        },
+      });
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/summary")) {
