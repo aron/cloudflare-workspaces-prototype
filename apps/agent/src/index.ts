@@ -1,12 +1,12 @@
 import { routeAgentRequest } from "agents";
-import { Agent } from "./agent.js";
+import { Agent, SubAgent } from "./agent.js";
 import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { PERSONAS, DEFAULT_PERSONA } from "./personas/index.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { verifyAccessJwt } from "./access.js";
 
-export { Agent, Sandbox, WarmPool };
+export { Agent, SubAgent, Sandbox, WarmPool };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
