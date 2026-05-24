@@ -19,4 +19,4 @@ OPENAI_API_KEY=sk-...
 # When Access is not configured (ACCESS_TEAM_DOMAIN / ACCESS_AUD unset), the
 # worker falls back to this dev identity so `wrangler dev` keeps working.
 # Leave unset to use the hardcoded "Local Dev" user.
-# ACCESS_DEV_USER={"userId":"u-aron","email":"aron@example.com","name":"Aron"}
+# ACCESS_DEV_USER={"userId":"u-venkman","email":"venkman@example.com","name":"Venkman"}

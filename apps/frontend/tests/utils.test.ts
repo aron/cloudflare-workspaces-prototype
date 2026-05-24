@@ -9,13 +9,13 @@ import { initials, relTime } from "../src/lib/utils.js";
 
 describe("initials", () => {
   it("returns two-letter initials for a two-part name", () => {
-    expect(initials("Aron Schultz")).toBe("AS");
+    expect(initials("Venkman Stantz")).toBe("VS");
   });
   it("uses the first two letters for a single-word name", () => {
-    expect(initials("Aron")).toBe("AR");
+    expect(initials("Venkman")).toBe("VE");
   });
   it("uppercases", () => {
-    expect(initials("aron schultz")).toBe("AS");
+    expect(initials("venkman stantz")).toBe("VS");
   });
   it("ignores extra parts beyond the second", () => {
     expect(initials("First Middle Last")).toBe("FM");

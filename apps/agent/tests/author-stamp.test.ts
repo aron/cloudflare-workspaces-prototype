@@ -14,20 +14,20 @@ import {
   stampChatFrame,
   type ChatAuthor,
 } from "../src/author-stamp.js";
-import { asUser, ARON as ARON_USER, BEA as BEA_USER } from "./identity.js";
+import { asUser, VENKMAN as VENKMAN_USER, STANTZ as STANTZ_USER } from "./identity.js";
 import { readIdentity } from "../src/identity.js";
 
-const ARON: ChatAuthor = { kind: "user", id: ARON_USER.userId, email: ARON_USER.email, name: ARON_USER.name };
-const BEA:  ChatAuthor = { kind: "user", id: BEA_USER.userId,  email: BEA_USER.email,  name: BEA_USER.name  };
+const VENKMAN: ChatAuthor = { kind: "user", id: VENKMAN_USER.userId, email: VENKMAN_USER.email, name: VENKMAN_USER.name };
+const STANTZ:  ChatAuthor = { kind: "user", id: STANTZ_USER.userId,  email: STANTZ_USER.email,  name: STANTZ_USER.name  };
 
 describe("stampAuthor", () => {
   it("stamps user messages that have no author with the connection's author", () => {
     const messages = [
       { id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] },
     ];
-    const stamped = stampAuthor(messages, ARON);
+    const stamped = stampAuthor(messages, VENKMAN);
     expect(stamped[0]?.metadata).toEqual({
-      author:    ARON,
+      author:    VENKMAN,
       createdAt: expect.any(Number),
     });
   });
@@ -36,10 +36,10 @@ describe("stampAuthor", () => {
     const messages = [
       { id: "m1", role: "user",
         parts: [{ type: "text", text: "hi" }],
-        metadata: { author: BEA, createdAt: 12345 } },
+        metadata: { author: STANTZ, createdAt: 12345 } },
     ];
-    const stamped = stampAuthor(messages, ARON);
-    expect(stamped[0]?.metadata?.author).toEqual(BEA);
+    const stamped = stampAuthor(messages, VENKMAN);
+    expect(stamped[0]?.metadata?.author).toEqual(STANTZ);
     expect(stamped[0]?.metadata?.createdAt).toBe(12345);
   });
 
@@ -47,7 +47,7 @@ describe("stampAuthor", () => {
     const messages = [
       { id: "m1", role: "assistant", parts: [{ type: "text", text: "..." }] },
     ];
-    const stamped = stampAuthor(messages, ARON);
+    const stamped = stampAuthor(messages, VENKMAN);
     expect(stamped[0]?.metadata).toBeUndefined();
   });
 
@@ -55,7 +55,7 @@ describe("stampAuthor", () => {
     const messages = [
       { id: "m1", role: "user", parts: [{ type: "text", text: "x" }] },
     ];
-    const stamped = stampAuthor(messages, ARON);
+    const stamped = stampAuthor(messages, VENKMAN);
     expect(stamped).not.toBe(messages);
     expect(stamped[0]).not.toBe(messages[0]);
     expect(messages[0]).not.toHaveProperty("metadata");
@@ -67,16 +67,16 @@ describe("stampAuthor", () => {
         parts: [{ type: "text", text: "x" }],
         metadata: { threadId: "t-1" } },
     ];
-    const stamped = stampAuthor(messages, ARON);
+    const stamped = stampAuthor(messages, VENKMAN);
     expect(stamped[0]?.metadata).toEqual({
-      author:    ARON,
+      author:    VENKMAN,
       createdAt: expect.any(Number),
       threadId:  "t-1",
     });
   });
 
   it("handles an empty list", () => {
-    expect(stampAuthor([], ARON)).toEqual([]);
+    expect(stampAuthor([], VENKMAN)).toEqual([]);
   });
 });
 
@@ -86,12 +86,12 @@ describe("stampAuthor", () => {
 
 describe("extractAuthorFromUpgradeRequest", () => {
   it("reads worker-attached identity headers into a ChatAuthor", () => {
-    const req = asUser("https://agent/ws", ARON_USER, { headers: { upgrade: "websocket" } });
+    const req = asUser("https://agent/ws", VENKMAN_USER, { headers: { upgrade: "websocket" } });
     expect(extractAuthorFromUpgradeRequest(req, readIdentity)).toEqual({
       kind:  "user",
-      id:    ARON.id,
-      email: ARON.email,
-      name:  ARON.name,
+      id:    VENKMAN.id,
+      email: VENKMAN.email,
+      name:  VENKMAN.name,
     });
   });
 
@@ -114,10 +114,10 @@ function chatFrame(messages: Array<{ id?: string; role: string; parts: unknown[]
 describe("stampChatFrame", () => {
   it("stamps every user message inside a cf_agent_use_chat_request", () => {
     const raw  = chatFrame([{ id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] }]);
-    const out  = stampChatFrame(raw, { kind: "user", id: ARON.id, email: ARON.email, name: ARON.name });
+    const out  = stampChatFrame(raw, { kind: "user", id: VENKMAN.id, email: VENKMAN.email, name: VENKMAN.name });
     const data = JSON.parse(out) as { init: { body: string } };
     const body = JSON.parse(data.init.body) as { messages: Array<{ metadata: { author: { name: string } } }> };
-    expect(body.messages[0]?.metadata.author.name).toBe(ARON.name);
+    expect(body.messages[0]?.metadata.author.name).toBe(VENKMAN.name);
   });
 
   it("is a no-op when author is null", () => {
@@ -136,12 +136,12 @@ describe("stampChatFrame", () => {
   });
 
   it("preserves existing author metadata on a message (idempotent)", () => {
-    const existing = { kind: "user" as const, id: BEA.id, email: BEA.email, name: BEA.name };
+    const existing = { kind: "user" as const, id: STANTZ.id, email: STANTZ.email, name: STANTZ.name };
     const raw  = chatFrame([{ id: "m1", role: "user",
       parts: [{ type: "text", text: "x" }],
       metadata: { author: existing } }]);
-    const out  = stampChatFrame(raw, { kind: "user", id: ARON.id, email: ARON.email, name: ARON.name });
+    const out  = stampChatFrame(raw, { kind: "user", id: VENKMAN.id, email: VENKMAN.email, name: VENKMAN.name });
     const body = JSON.parse(JSON.parse(out).init.body) as { messages: Array<{ metadata: { author: { name: string } } }> };
-    expect(body.messages[0]?.metadata.author.name).toBe(BEA.name);
+    expect(body.messages[0]?.metadata.author.name).toBe(STANTZ.name);
   });
 });

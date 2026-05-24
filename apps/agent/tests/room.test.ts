@@ -11,7 +11,7 @@
  */
 import { env } from "cloudflare:workers";
 import { describe, it, expect, beforeEach } from "vitest";
-import { asUser, ARON, BEA } from "./identity.js";
+import { asUser, VENKMAN, STANTZ } from "./identity.js";
 
 let roomCounter = 0;
 function freshRoom() {
@@ -22,9 +22,9 @@ function freshRoom() {
   return { id, stub };
 }
 
-async function initRoom(stub: DurableObjectStub, id: string, name = "Test room", createdBy = ARON.userId) {
+async function initRoom(stub: DurableObjectStub, id: string, name = "Test room", createdBy = VENKMAN.userId) {
   return stub.fetch(
-    asUser(`https://room/init`, ARON, {
+    asUser(`https://room/init`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
       body:    JSON.stringify({ id, name, createdBy }),
@@ -38,12 +38,12 @@ describe("Room /init", () => {
     const res = await initRoom(stub, id, "Hackspace");
     expect(res.status).toBe(201);
 
-    const meta = await stub.fetch(asUser("https://room/meta", BEA));
+    const meta = await stub.fetch(asUser("https://room/meta", STANTZ));
     expect(meta.status).toBe(200);
     const body = await meta.json() as { id: string; name: string; createdBy: string; createdAt: number };
     expect(body.id).toBe(id);
     expect(body.name).toBe("Hackspace");
-    expect(body.createdBy).toBe(ARON.userId);
+    expect(body.createdBy).toBe(VENKMAN.userId);
     expect(body.createdAt).toBeGreaterThan(0);
   });
 
@@ -58,7 +58,7 @@ describe("Room /init", () => {
 describe("Room /meta", () => {
   it("returns 404 before init", async () => {
     const { stub } = freshRoom();
-    const res = await stub.fetch(asUser("https://room/meta", ARON));
+    const res = await stub.fetch(asUser("https://room/meta", VENKMAN));
     expect(res.status).toBe(404);
   });
 });
@@ -67,7 +67,7 @@ describe("Room /messages", () => {
   it("starts empty", async () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
-    const res = await stub.fetch(asUser("https://room/messages", ARON));
+    const res = await stub.fetch(asUser("https://room/messages", VENKMAN));
     expect(res.status).toBe(200);
     const body = await res.json() as { messages: unknown[] };
     expect(body.messages).toEqual([]);
@@ -78,7 +78,7 @@ describe("Room /messages", () => {
     await initRoom(stub, id);
 
     const post = await stub.fetch(
-      asUser("https://room/messages", BEA, {
+      asUser("https://room/messages", STANTZ, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "hello team" }] }),
@@ -91,11 +91,11 @@ describe("Room /messages", () => {
     };
 
     expect(message.role).toBe("user");
-    expect(message.metadata.author).toEqual({ kind: "user", id: BEA.userId, email: BEA.email, name: BEA.name });
+    expect(message.metadata.author).toEqual({ kind: "user", id: STANTZ.userId, email: STANTZ.email, name: STANTZ.name });
     expect(message.metadata.createdAt).toBeGreaterThan(0);
     expect(threadId).toBeUndefined();
 
-    const list = await stub.fetch(asUser("https://room/messages", ARON));
+    const list = await stub.fetch(asUser("https://room/messages", VENKMAN));
     const { messages } = await list.json() as { messages: Array<{ id: string }> };
     expect(messages).toHaveLength(1);
     expect(messages[0]?.id).toBe(message.id);
@@ -105,7 +105,7 @@ describe("Room /messages", () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
     const res = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [] }),
@@ -120,7 +120,7 @@ describe("Room /messages", () => {
 
     for (const text of ["one", "two", "three"]) {
       await stub.fetch(
-        asUser("https://room/messages", ARON, {
+        asUser("https://room/messages", VENKMAN, {
           method:  "POST",
           headers: { "content-type": "application/json" },
           body:    JSON.stringify({ parts: [{ type: "text", text }] }),
@@ -128,7 +128,7 @@ describe("Room /messages", () => {
       );
     }
 
-    const res = await stub.fetch(asUser("https://room/messages", ARON));
+    const res = await stub.fetch(asUser("https://room/messages", VENKMAN));
     const { messages } = await res.json() as {
       messages: Array<{ parts: Array<{ type: string; text: string }> }>;
     };
@@ -142,7 +142,7 @@ describe("Room @agent mention → thread", () => {
     await initRoom(stub, id);
 
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "hey @agent can you help?" }] }),
@@ -162,7 +162,7 @@ describe("Room @agent mention → thread", () => {
     await initRoom(stub, id);
 
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "@agent @agent ping" }] }),
@@ -171,7 +171,7 @@ describe("Room @agent mention → thread", () => {
     const { threadId } = await post.json() as { threadId: string };
     expect(threadId).toBeTruthy();
 
-    const list = await stub.fetch(asUser("https://room/threads", ARON));
+    const list = await stub.fetch(asUser("https://room/threads", VENKMAN));
     const { threads } = await list.json() as { threads: Array<{ id: string }> };
     expect(threads).toHaveLength(1);
     expect(threads[0]?.id).toBe(threadId);
@@ -182,7 +182,7 @@ describe("Room @agent mention → thread", () => {
     await initRoom(stub, id);
 
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "talking about @nobody-here and @go" }] }),
@@ -197,7 +197,7 @@ describe("Room /threads", () => {
   it("returns 200 with an empty list when no threads exist", async () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
-    const res = await stub.fetch(asUser("https://room/threads", ARON));
+    const res = await stub.fetch(asUser("https://room/threads", VENKMAN));
     expect(res.status).toBe(200);
     const body = await res.json() as { threads: unknown[] };
     expect(body.threads).toEqual([]);

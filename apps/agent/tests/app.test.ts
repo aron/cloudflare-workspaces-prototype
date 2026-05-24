@@ -4,7 +4,7 @@
  */
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { asUser, ARON, BEA } from "./identity.js";
+import { asUser, VENKMAN, STANTZ } from "./identity.js";
 import { deriveUsername } from "../src/app.js";
 
 function appStub() {
@@ -13,12 +13,12 @@ function appStub() {
 
 describe("App /me", () => {
   it("echoes the caller's identity and current model", async () => {
-    const res = await appStub().fetch(asUser("https://app/me", ARON));
+    const res = await appStub().fetch(asUser("https://app/me", VENKMAN));
     expect(res.status).toBe(200);
     const body = await res.json() as { userId: string; email: string; name: string; model: string };
-    expect(body.userId).toBe(ARON.userId);
-    expect(body.email).toBe(ARON.email);
-    expect(body.name).toBe(ARON.name);
+    expect(body.userId).toBe(VENKMAN.userId);
+    expect(body.email).toBe(VENKMAN.email);
+    expect(body.name).toBe(VENKMAN.name);
     // Test env has no OPENAI_API_KEY, so we fall back to the Workers AI default.
     expect(body.model).toBe("kimi-k2.6");
   });
@@ -31,7 +31,7 @@ describe("App /me", () => {
 
 describe("App /rooms", () => {
   it("starts with an empty room list", async () => {
-    const res = await appStub().fetch(asUser("https://app/rooms", ARON));
+    const res = await appStub().fetch(asUser("https://app/rooms", VENKMAN));
     expect(res.status).toBe(200);
     const body = await res.json() as { rooms: unknown[] };
     expect(body.rooms).toEqual([]);
@@ -39,7 +39,7 @@ describe("App /rooms", () => {
 
   it("creates a room and records the creator", async () => {
     const created = await appStub().fetch(
-      asUser("https://app/rooms", ARON, {
+      asUser("https://app/rooms", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ name: "Hackspace" }),
@@ -48,17 +48,17 @@ describe("App /rooms", () => {
     expect(created.status).toBe(201);
     const { room } = await created.json() as { room: { id: string; name: string; createdBy: string } };
     expect(room.name).toBe("Hackspace");
-    expect(room.createdBy).toBe(ARON.userId);
+    expect(room.createdBy).toBe(VENKMAN.userId);
     expect(room.id).toMatch(/^[0-9a-f-]{36}$/);
 
-    const list = await appStub().fetch(asUser("https://app/rooms", BEA));
+    const list = await appStub().fetch(asUser("https://app/rooms", STANTZ));
     const { rooms } = await list.json() as { rooms: Array<{ id: string }> };
     expect(rooms.map(r => r.id)).toContain(room.id);
   });
 
   it("rejects empty room names", async () => {
     const res = await appStub().fetch(
-      asUser("https://app/rooms", ARON, {
+      asUser("https://app/rooms", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ name: "   " }),
@@ -69,7 +69,7 @@ describe("App /rooms", () => {
 
   it("rejects names longer than 80 chars", async () => {
     const res = await appStub().fetch(
-      asUser("https://app/rooms", ARON, {
+      asUser("https://app/rooms", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ name: "x".repeat(81) }),
@@ -82,15 +82,15 @@ describe("App /rooms", () => {
 describe("App /users", () => {
   it("records every caller and returns them with derived usernames", async () => {
     // Touch both users via /me so they're upserted.
-    await appStub().fetch(asUser("https://app/me", ARON));
-    await appStub().fetch(asUser("https://app/me", BEA));
+    await appStub().fetch(asUser("https://app/me", VENKMAN));
+    await appStub().fetch(asUser("https://app/me", STANTZ));
 
-    const res = await appStub().fetch(asUser("https://app/users", ARON));
+    const res = await appStub().fetch(asUser("https://app/users", VENKMAN));
     expect(res.status).toBe(200);
     const body = await res.json() as { users: Array<{ id: string; username: string; email: string }> };
     const byId = new Map(body.users.map(u => [u.id, u]));
-    expect(byId.get(ARON.userId)?.username).toBe("aron");
-    expect(byId.get(BEA.userId)?.username).toBe("bea");
+    expect(byId.get(VENKMAN.userId)?.username).toBe("venkman");
+    expect(byId.get(STANTZ.userId)?.username).toBe("stantz");
   });
 
   it("rejects requests without identity headers with 401", async () => {
@@ -101,7 +101,7 @@ describe("App /users", () => {
 
 describe("deriveUsername", () => {
   it("takes the bit before @, lowercased", () => {
-    expect(deriveUsername("Aron@example.com")).toBe("aron");
+    expect(deriveUsername("Venkman@example.com")).toBe("venkman");
   });
   it("keeps dots, dashes, underscores", () => {
     expect(deriveUsername("first.last_v2-beta@x")).toBe("first.last_v2-beta");

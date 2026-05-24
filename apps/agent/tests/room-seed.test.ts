@@ -10,15 +10,15 @@
  */
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { asUser, ARON } from "./identity.js";
+import { asUser, VENKMAN } from "./identity.js";
 
 async function setupRoom() {
   const id   = `room-seed-${crypto.randomUUID()}`;
   const stub = env.Room.get(env.Room.idFromName(id));
-  const init = await stub.fetch(asUser("https://room/init", ARON, {
+  const init = await stub.fetch(asUser("https://room/init", VENKMAN, {
     method:  "POST",
     headers: { "content-type": "application/json" },
-    body:    JSON.stringify({ id, name: "Seed room", createdBy: ARON.userId }),
+    body:    JSON.stringify({ id, name: "Seed room", createdBy: VENKMAN.userId }),
   }));
   expect(init.status).toBe(201);
   return { id, stub };
@@ -35,7 +35,7 @@ describe("Room mints a thread and seeds the Agent DO", () => {
     const { id: roomId, stub } = await setupRoom();
 
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "@agent help with the build" }] }),
@@ -74,7 +74,7 @@ describe("Room mints a thread and seeds the Agent DO", () => {
     // for the only id Room could have invented — but since it shouldn't
     // invent one at all, we just confirm threadId is absent in the response.
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "no mentions here, hi @go" }] }),

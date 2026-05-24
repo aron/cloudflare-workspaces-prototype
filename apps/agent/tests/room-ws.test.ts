@@ -6,15 +6,15 @@
  */
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { asUser, ARON, BEA } from "./identity.js";
+import { asUser, VENKMAN, STANTZ } from "./identity.js";
 
 async function setupRoom() {
   const id   = `room-ws-${crypto.randomUUID()}`;
   const stub = env.Room.get(env.Room.idFromName(id));
-  const init = await stub.fetch(asUser("https://room/init", ARON, {
+  const init = await stub.fetch(asUser("https://room/init", VENKMAN, {
     method:  "POST",
     headers: { "content-type": "application/json" },
-    body:    JSON.stringify({ id, name: "WS room", createdBy: ARON.userId }),
+    body:    JSON.stringify({ id, name: "WS room", createdBy: VENKMAN.userId }),
   }));
   expect(init.status).toBe(201);
   return { id, stub };
@@ -22,7 +22,7 @@ async function setupRoom() {
 
 async function openSocket(stub: DurableObjectStub): Promise<WebSocket> {
   const res = await stub.fetch(
-    asUser("https://room/ws", BEA, { headers: { upgrade: "websocket" } }),
+    asUser("https://room/ws", STANTZ, { headers: { upgrade: "websocket" } }),
   );
   expect(res.status).toBe(101);
   const ws = res.webSocket;
@@ -57,7 +57,7 @@ describe("Room WebSocket fanout", () => {
     const incoming = nextMessage(ws);
 
     const post = await stub.fetch(
-      asUser("https://room/messages", ARON, {
+      asUser("https://room/messages", VENKMAN, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify({ parts: [{ type: "text", text: "broadcast me" }] }),
@@ -72,7 +72,7 @@ describe("Room WebSocket fanout", () => {
     };
     expect(parsed.type).toBe("message");
     expect(parsed.message.parts[0]?.text).toBe("broadcast me");
-    expect(parsed.message.metadata.author.id).toBe(ARON.userId);
+    expect(parsed.message.metadata.author.id).toBe(VENKMAN.userId);
 
     ws.close();
   });

@@ -14,8 +14,8 @@ import {
 // users in last-seen order.
 const POOL: MentionCandidate[] = [
   { handle: "agent", label: "Agent", sub: "the room's assistant", kind: "agent" },
-  { handle: "aron",  label: "Aron",  sub: "aron@x", kind: "user"  },
-  { handle: "bea",   label: "Bea",   sub: "bea@x",  kind: "user"  },
+  { handle: "venkman", label: "Venkman", sub: "venkman@x", kind: "user"  },
+  { handle: "stantz",  label: "Stantz",  sub: "stantz@x",  kind: "user"  },
 ];
 
 describe("filterCandidates", () => {
@@ -25,12 +25,12 @@ describe("filterCandidates", () => {
 
   it("prefix-matches handles case-insensitively", () => {
     expect(filterCandidates(POOL, "ag").map(c => c.handle)).toEqual(["agent"]);
-    expect(filterCandidates(POOL, "Ar").map(c => c.handle)).toEqual(["aron"]);
+    expect(filterCandidates(POOL, "Ve").map(c => c.handle)).toEqual(["venkman"]);
   });
 
   it("also matches against the label as a substring", () => {
-    // `aron`'s handle doesn't share a prefix with `ro`, but its label does.
-    expect(filterCandidates(POOL, "ro").map(c => c.handle)).toEqual(["aron"]);
+    // `venkman`'s handle doesn't share a prefix with `nk`, but its label does.
+    expect(filterCandidates(POOL, "nk").map(c => c.handle)).toEqual(["venkman"]);
   });
 
   it("puts the synthetic agent row first when no prefix is given", () => {
