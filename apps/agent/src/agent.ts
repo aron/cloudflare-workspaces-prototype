@@ -33,6 +33,7 @@ import {
 } from "@cloudflare/fs-tools";
 import {
   createGitCloneTool,
+  createGitCreateRepoTool,
   createGitCommitTool,
   createGitPushTool,
   createGitShareTool,
@@ -470,6 +471,10 @@ export class Agent extends Think<Env> {
       })),
 
       ...pick("gitClone", createGitCloneTool({
+        workspace: gitWorkspace,
+        artifacts: this.env.Artifacts,
+      })),
+      ...pick("gitCreateRepo", createGitCreateRepoTool({
         workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),

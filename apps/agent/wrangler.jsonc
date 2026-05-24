@@ -12,7 +12,7 @@
   ],
 
   "artifacts": [
-    { "binding": "Artifacts", "namespace": "default" }
+    { "binding": "Artifacts", "namespace": "hackspace-prototype" }
   ],
 
   "assets": {
