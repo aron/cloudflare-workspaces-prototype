@@ -30,7 +30,7 @@ function fakeArtifacts() {
         calls.get.push(name);
         throw new Error("fake: not found");
       },
-      async list() { return { repos: [] }; },
+      async list() { return { repos: [], total: 0 }; },
       async import(params: unknown) {
         calls.import.push(params);
         return {

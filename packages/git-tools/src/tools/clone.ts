@@ -94,7 +94,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
       try {
         await opts.workspace.mkdir(input.dest);
       } catch (err) {
-        return { error: `cannot create dest ${input.dest}: ${(err as Error).message}` };
+        return { error: `cannot create dest ${input.dest}: ${formatErr(err)}` };
       }
 
       let baseline;
@@ -104,7 +104,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
           owner, repo, ref, depth,
         });
       } catch (err) {
-        return { error: `artifacts import failed: ${(err as Error).message}` };
+        return { error: `artifacts import failed: ${formatErr(err)}` };
       }
 
       try {
@@ -125,8 +125,28 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
           bytesWritten,
         };
       } catch (err) {
-        return { error: `clone failed: ${(err as Error).message}` };
+        return { error: `clone failed: ${formatErr(err)}` };
       }
     },
   });
+}
+
+/**
+ * Render an error for the tool result. Unwraps AggregateError so the inner
+ * causes are visible (isomorphic-git's http client throws AggregateError on
+ * fetch failure with the per-attempt errors hidden behind `.errors`).
+ */
+function formatErr(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const inner = (err as AggregateError).errors;
+  if (Array.isArray(inner) && inner.length > 0) {
+    const parts = inner.map((e, i) => `  [${i}] ${formatErr(e)}`).join("\n");
+    return `${err.message}\n${parts}`;
+  }
+  // isomorphic-git wraps fetch errors with a `.data` payload — surface it.
+  const data = (err as { data?: unknown }).data;
+  if (data && typeof data === "object") {
+    return `${err.message} (data=${JSON.stringify(data)})`;
+  }
+  return err.message;
 }
