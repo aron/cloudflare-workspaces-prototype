@@ -25,8 +25,8 @@
 
   "durable_objects": {
     "bindings": [
-      { "class_name": "Agent",    "name": "Agent"    },
-      { "class_name": "Sandbox",  "name": "Sandbox"  },
+      { "class_name": "Agent", "name": "Agent" },
+      { "class_name": "Sandbox", "name": "Sandbox" },
       { "class_name": "WarmPool", "name": "WarmPool" },
       { "class_name": "SubAgent", "name": "SubAgent" }
     ]
@@ -44,8 +44,8 @@
 
   "vars": {
     // Number of pre-warmed sandbox containers to keep ready.
-    "WARM_POOL_TARGET":          "2",
-    "WARM_POOL_REFRESH_INTERVAL":"10000"
+    "WARM_POOL_TARGET": "2",
+    "WARM_POOL_REFRESH_INTERVAL": "10000"
 
     // Cloudflare Access JWT gate. Uncomment + fill in to enable; leave
     // unset for an unauthenticated deploy or local dev.
@@ -54,5 +54,7 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  "workers_dev": true,
+  "preview_urls": false
 }
