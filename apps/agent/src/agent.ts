@@ -7,9 +7,9 @@
  * hooks. The custom `@cloudflare/workspace` Workspace stays put — it
  * owns the SQLite VFS, the container sync, and the capnweb session.
  *
- * This file only does chat-shaped things: choosing a persona, defining
- * tools, picking a model, and persisting per-turn config. The model call
- * itself is owned by Think.
+ * This file only does chat-shaped things: defining tools, picking a model,
+ * and persisting per-turn config. The model call itself is owned by Think.
+ *
  *
  * Sub-agents: a top-level Agent can spawn `SubAgent` facets via
  * `this.subAgent(SubAgent, name)` for fan-out work (research, parallel
@@ -23,7 +23,7 @@ import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 import { Workspace } from "@cloudflare/workspace";
-import { runWasm } from "@cloudflare/workspace/worker-sandbox";
+
 import {
   createEditTool,
   createReadTool,
@@ -36,21 +36,17 @@ import {
   createWebSearchTool,
 } from "@cloudflare/web-tools";
 import { resolveContainerId } from "./pool.js";
-import { resolvePersonaForTurn } from "./mentions.js";
 import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
-import {
-  COMMON_TOOLS,
-  DEFAULT_PERSONA,
-  fetchAgainstWorker,
-  lookupPersona,
-  parseFetchCall,
-  PERSONAS,
-  WorkerDeployer,
-  type Persona,
-  type ToolName,
-} from "./personas/index.js";
+import { WorkerDeployer } from "./worker/deploy.js";
+import type { DeployResult } from "./worker/deploy.js";
+import { parseFetchCall, fetchAgainstWorker } from "./worker/fetch.js";
+import type { FetchToolResult, ParsedFetch } from "./worker/fetch.js";
+import { buildSystemPrompt } from "./system-prompt.js";
+
+export { WorkerDeployer, parseFetchCall, fetchAgainstWorker };
+export type { DeployResult, FetchToolResult, ParsedFetch };
 
 const WORKSPACE = "/workspace";
 
@@ -74,7 +70,7 @@ export class Agent extends Think<Env> {
    */
   declare workspace: any;
 
-  /** Lazily-constructed deployer for the Cloudflare Worker persona. */
+  /** Lazily-constructed deployer for worker_deploy. */
   private _deployer?: WorkerDeployer;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -86,23 +82,6 @@ export class Agent extends Think<Env> {
       resolveSessionId: (id) => resolveContainerId(this.env, id),
     });
     this.ctx.blockConcurrencyWhile(async () => { await this.workspace.mkdir(WORKSPACE); });
-  }
-
-  /**
-   * Persona persistence is backed by Think's `configure<T>()` /
-   * `getConfig<T>()`, which writes to Session's SQLite. Survives
-   * hibernation and restarts without per-agent schema setup.
-   */
-  private get personaId(): string {
-    return this.getConfig<{ personaId: string }>()?.personaId ?? DEFAULT_PERSONA.id;
-  }
-
-  private setPersonaId(id: string): void {
-    this.configure<{ personaId: string }>({ personaId: id });
-  }
-
-  private get persona(): Persona {
-    return lookupPersona(this.personaId);
   }
 
   private get deployer(): WorkerDeployer {
@@ -120,18 +99,13 @@ export class Agent extends Think<Env> {
   // ── Think hooks ───────────────────────────────────────
 
   /**
-   * Active persona for this turn. Resolves the most-recent `@mention`
-   * in message history and falls back to the thread's stored persona.
-   * Shared by `getSystemPrompt()` and `getTools()` so the prompt and
-   * tool surface always agree.
+   * Single fixed system prompt for the TypeScript / Cloudflare /
+   * Agents / Sandbox agent. Specialization comes from skills, which
+   * are enumerated in the prompt's <available_skills> block and
+   * loaded on demand via the read tool.
    */
-  private activePersona(): Persona {
-    return lookupPersona(resolvePersonaForTurn(this.messages, this.personaId));
-  }
-
-  /** Active persona's system prompt (per-turn, mention-aware). */
   override getSystemPrompt(): string {
-    return this.activePersona().systemPrompt;
+    return buildSystemPrompt({ cwd: WORKSPACE });
   }
 
   /**
@@ -242,51 +216,28 @@ export class Agent extends Think<Env> {
       return Response.json({ cleared: true });
     }
 
-    if (request.method === "GET" && url.pathname.endsWith("/persona")) {
-      return Response.json({
-        current:   this.persona,
-        available: PERSONAS,
-      });
-    }
-    if (request.method === "POST" && url.pathname.endsWith("/persona")) {
-      const { id } = (await request.json()) as { id: string };
-      const p = lookupPersona(id);
-      if (p.id !== id) return Response.json({ error: `Unknown persona: ${id}` }, { status: 400 });
-      this.setPersonaId(p.id);
-      return Response.json({ ok: true, persona: p });
-    }
-
-    // POST /seed { personaId, roomId, threadId, message } — called by Room
-    // when a `@persona` mention mints a thread. Sets the thread's default
-    // persona and persists the originating user message as the first turn.
-    // Idempotent: re-seeding a thread that already exists is a no-op so the
-    // client can safely retry on transient failures.
+    // POST /seed { roomId, threadId, message } — called by Room when an
+    // @agent mention mints a thread. Persists the originating user message
+    // so the agent sees it on first turn. Idempotent: re-seeding the same
+    // message id is a no-op so the client can safely retry.
     if (request.method === "POST" && url.pathname.endsWith("/seed")) {
       const body = await request.json().catch(() => ({})) as {
-        personaId?: unknown; roomId?: unknown; threadId?: unknown; message?: unknown;
+        roomId?: unknown; threadId?: unknown; message?: unknown;
       };
-      const personaId = typeof body.personaId === "string" ? body.personaId : "";
-      const message   = body.message;
-      if (!personaId || !message || typeof message !== "object") {
-        return Response.json({ error: "personaId and message are required" }, { status: 400 });
+      const message = body.message;
+      if (!message || typeof message !== "object") {
+        return Response.json({ error: "message is required" }, { status: 400 });
       }
-      const persona = lookupPersona(personaId);
-      if (persona.id !== personaId) {
-        return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
-      }
-      // Idempotency: if the seed message id is already in history, treat as
-      // already-seeded and just confirm the current persona.
       const messageId = (message as { id?: unknown }).id;
       const alreadySeeded = typeof messageId === "string"
         && this.messages.some(m => m.id === messageId);
       if (!alreadySeeded) {
-        this.setPersonaId(persona.id);
         // Cast through `any` — saveMessages accepts the AI SDK UIMessage shape;
         // we trust the caller (Room) to send a well-formed AppMessage.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await this.saveMessages([message as any]);
       }
-      return Response.json({ ok: true, seeded: !alreadySeeded, personaId: persona.id });
+      return Response.json({ ok: true, seeded: !alreadySeeded });
     }
 
     return new Response("not found", { status: 404 });
@@ -295,14 +246,12 @@ export class Agent extends Think<Env> {
   // ---- tools ----
 
   /**
-   * Tools the agentic loop sees this turn. Gated by the active persona
-   * (per-turn, mention-aware): COMMON_TOOLS plus the persona's
-   * `extraTools`. The old `buildTools(persona)` helper was called from a
-   * manual `onChatMessage`; under Think this IS the public override
-   * Think's loop calls every turn.
+   * Tools the agentic loop sees this turn. Single fixed tool set —
+   * the agent has one persona, so there's no gating. webSearch is
+   * registered only when BRAVE_API_KEY is configured.
    */
   override getTools() {
-    return this.buildTools(this.activePersona());
+    return this.buildTools();
   }
 
   /** Introspection RPC: the set of tool names visible to the LLM. */
@@ -310,11 +259,10 @@ export class Agent extends Think<Env> {
     return Object.keys(this.getTools());
   }
 
-  private buildTools(persona: Persona) {
+  private buildTools() {
     const ws = this.workspace;
-    const allow = new Set<ToolName>([...COMMON_TOOLS, ...persona.extraTools]);
-    const pick = <T extends Record<string, unknown>>(name: ToolName, def: T) =>
-      allow.has(name) ? { [name]: def } : {};
+    const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
+      ({ [name]: def });
 
     return {
       ...pick("read",  createReadTool({ store: new WorkspaceFileStore(ws) })),
@@ -398,34 +346,6 @@ export class Agent extends Think<Env> {
         },
       })),
 
-      ...pick("run", tool({
-        description:
-          "Run a compiled WASM binary in an isolated Dynamic Worker. The binary lives at " +
-          "/workspace/<name>.wasm. /workspace is preopened as a virtual filesystem; any " +
-          "files the program writes under /workspace/* are saved back into the VFS, and " +
-          "image files render inline in the chat as previews.",
-        inputSchema: z.object({
-          command: z.string().describe(
-            "Binary name + args, e.g. 'mandelbrot --width 800 --output /workspace/out.png'",
-          ),
-          stdin: z.string().optional().describe("Optional stdin"),
-        }),
-        execute: async ({ command, stdin }) => {
-          const [name, ...rest] = command.trim().split(/\s+/);
-          const wasmPath = `/workspace/${name}.wasm`;
-          try {
-            return await runWasm({
-              workspace: ws,
-              loader:    this.env.LOADER,
-              wasmPath,
-              argv:      [name, ...rest],
-              stdin,
-            });
-          } catch (err) {
-            return { error: String(err), exitCode: 1, stdout: "", stderr: "", files: [], images: [] };
-          }
-        },
-      })),
 
       ...pick("worker_deploy", tool({
         description:

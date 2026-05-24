@@ -97,7 +97,7 @@ export function ThreadPanel({
     if (!root) return null;
     const a = root.metadata.author;
     const name = a.kind === "user" ? a.name : a.name;
-    const key  = a.kind === "user" ? a.id   : a.personaId;
+    const key  = a.kind === "user" ? a.id   : a.id;
     return {
       name,
       letter: initials(name).slice(0, 1),

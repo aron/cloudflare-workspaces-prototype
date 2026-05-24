@@ -1,10 +1,9 @@
 /**
  * Room → Agent `/seed` wiring.
  *
- * When a room message mentions `@persona`, Room mints a thread and tells
- * the Agent DO at `idFromName(threadId)` to:
- *   - adopt that persona for the thread
- *   - persist the originating user message so the agent sees it on first turn
+ * When a room message mentions `@agent`, Room mints a thread and tells
+ * the Agent DO at `idFromName(threadId)` to persist the originating user
+ * message so the agent sees it on first turn.
  *
  * The Agent binding in `wrangler.test.jsonc` points at `FakeAgent`, which
  * records every fetch so we can assert exactly what Room sent.
@@ -32,14 +31,14 @@ async function fakeAgentCalls(threadId: string) {
 }
 
 describe("Room mints a thread and seeds the Agent DO", () => {
-  it("POSTs /seed with the persona id, room id, and the originating message", async () => {
+  it("POSTs /seed with the room id and the originating message", async () => {
     const { id: roomId, stub } = await setupRoom();
 
     const post = await stub.fetch(
       asUser("https://room/messages", ARON, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ parts: [{ type: "text", text: "@go help with the build" }] }),
+        body:    JSON.stringify({ parts: [{ type: "text", text: "@agent help with the build" }] }),
       }),
     );
     expect(post.status).toBe(201);
@@ -54,33 +53,31 @@ describe("Room mints a thread and seeds the Agent DO", () => {
     expect(seed, "Room must POST /seed to the Agent DO").toBeDefined();
 
     const body = seed!.body as {
-      personaId:     string;
       roomId:        string;
       threadId:      string;
       message:       { id: string; role: string; parts: Array<{ text: string }>; metadata: { author: unknown } };
     };
-    expect(body.personaId).toBe("go");
     expect(body.roomId).toBe(roomId);
     expect(body.threadId).toBe(threadId);
     expect(body.message.id).toBe(message.id);
     expect(body.message.role).toBe("user");
-    expect(body.message.parts[0]?.text).toBe("@go help with the build");
+    expect(body.message.parts[0]?.text).toBe("@agent help with the build");
     expect(body.message.metadata.author).toEqual(message.metadata.author);
   });
 
-  it("does NOT call /seed when no known persona is mentioned", async () => {
+  it("does NOT call /seed when @agent isn't mentioned", async () => {
     const { stub } = await setupRoom();
 
     // Use a unique thread namespace we control so we can poll FakeAgent for
     // any unexpected calls. The contract: Room must not call any Agent DO
-    // when no persona is mentioned. We assert that by checking the FakeAgent
+    // when @agent is not mentioned. We assert that by checking the FakeAgent
     // for the only id Room could have invented — but since it shouldn't
     // invent one at all, we just confirm threadId is absent in the response.
     const post = await stub.fetch(
       asUser("https://room/messages", ARON, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ parts: [{ type: "text", text: "no mentions here" }] }),
+        body:    JSON.stringify({ parts: [{ type: "text", text: "no mentions here, hi @go" }] }),
       }),
     );
     const body = await post.json() as { threadId?: string };

@@ -23,7 +23,14 @@
 
 import { Server } from "partyserver";
 import { requireIdentity } from "./identity.js";
-import { firstMention } from "./mentions.js";
+
+/**
+ * Triggers an agent thread when the message mentions `@agent` as a whole word.
+ * Single-agent app: there's only one bot to address, so we don't parse names.
+ */
+function hasAgentMention(text: string): boolean {
+  return /(^|\s)@agent(\b|$)/i.test(text);
+}
 import type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 
 
@@ -59,7 +66,7 @@ export class Room extends Server<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS threads (
       id              TEXT PRIMARY KEY,
       root_message_id TEXT NOT NULL,
-      persona_id      TEXT NOT NULL,
+      agent_id        TEXT NOT NULL,
       created_at      INTEGER NOT NULL
     )`;
   }
@@ -132,10 +139,10 @@ export class Room extends Server<Env> {
       return Response.json({ error: "parts must contain at least one non-empty text part" }, { status: 400 });
     }
 
-    const text       = parts.map(p => p.text).join("\n");
-    const mentioned  = firstMention(text);
-    const messageId  = crypto.randomUUID();
-    const createdAt  = Date.now();
+    const text         = parts.map(p => p.text).join("\n");
+    const mintsThread  = hasAgentMention(text);
+    const messageId    = crypto.randomUUID();
+    const createdAt    = Date.now();
     const author: Author = {
       kind:  "user",
       id:    identity.userId,
@@ -143,14 +150,14 @@ export class Room extends Server<Env> {
       name:  identity.name,
     };
 
-    // Mint a thread row if a known persona was mentioned. We mint at most one
-    // thread per message — multiple `@persona` mentions collapse into a single
-    // combined thread (per product requirements).
+    // Mint a thread row when the user @-mentions the agent. There's exactly
+    // one agent persona in this app, so the thread's agent_id is always
+    // "agent".
     let threadId: string | undefined;
-    if (mentioned) {
+    if (mintsThread) {
       threadId = crypto.randomUUID();
-      this.sql`INSERT INTO threads(id, root_message_id, persona_id, created_at)
-               VALUES (${threadId}, ${messageId}, ${mentioned}, ${createdAt})`;
+      this.sql`INSERT INTO threads(id, root_message_id, agent_id, created_at)
+               VALUES (${threadId}, ${messageId}, ${"agent"}, ${createdAt})`;
     }
 
     const message: AppMessage = {
@@ -169,10 +176,9 @@ export class Room extends Server<Env> {
 
     // Seed the Agent DO when a thread was minted. The thread id is also the
     // Agent DO id, so the client can connect to the same DO later.
-    if (threadId && mentioned) {
+    if (threadId && mintsThread) {
       const meta = this.loadMeta();
       const seedBody = {
-        personaId: mentioned,
         roomId:    meta?.id ?? "",
         threadId,
         message,
@@ -224,13 +230,13 @@ export class Room extends Server<Env> {
 
   private listThreads(): ThreadRow[] {
     const rows = this.sql<{
-      id: string; root_message_id: string; persona_id: string; created_at: number;
-    }>`SELECT id, root_message_id, persona_id, created_at
+      id: string; root_message_id: string; agent_id: string; created_at: number;
+    }>`SELECT id, root_message_id, agent_id, created_at
        FROM threads ORDER BY created_at ASC`;
     return rows.map(r => ({
       id:            r.id,
       rootMessageId: r.root_message_id,
-      personaId:     r.persona_id,
+      agentId:       r.agent_id,
       createdAt:     r.created_at,
     }));
   }

@@ -4,7 +4,7 @@
  * Lifecycle:
  *   1. App mints a room id and POSTs /init to the Room.
  *   2. Users post messages via POST /messages.
- *   3. Messages mentioning `@<persona>` mint a thread row; the response
+ *   3. Messages mentioning `@agent` mint a thread row; the response
  *      includes a `threadId` the client uses to open the Agent DO.
  *
  * These tests cover the HTTP surface. WebSocket fanout is covered separately.
@@ -136,8 +136,8 @@ describe("Room /messages", () => {
   });
 });
 
-describe("Room @mention → thread", () => {
-  it("mints a thread when a message mentions a known persona", async () => {
+describe("Room @agent mention → thread", () => {
+  it("mints a thread when a message mentions @agent", async () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
 
@@ -145,7 +145,7 @@ describe("Room @mention → thread", () => {
       asUser("https://room/messages", ARON, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ parts: [{ type: "text", text: "hey @go can you help?" }] }),
+        body:    JSON.stringify({ parts: [{ type: "text", text: "hey @agent can you help?" }] }),
       }),
     );
     expect(post.status).toBe(201);
@@ -157,7 +157,7 @@ describe("Room @mention → thread", () => {
     expect(message.metadata.threadId).toBe(threadId);
   });
 
-  it("only mints one thread per message even with multiple mentions", async () => {
+  it("only mints one thread per message even with multiple @agent mentions", async () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
 
@@ -165,7 +165,7 @@ describe("Room @mention → thread", () => {
       asUser("https://room/messages", ARON, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ parts: [{ type: "text", text: "@go @go ping" }] }),
+        body:    JSON.stringify({ parts: [{ type: "text", text: "@agent @agent ping" }] }),
       }),
     );
     const { threadId } = await post.json() as { threadId: string };
@@ -177,7 +177,7 @@ describe("Room @mention → thread", () => {
     expect(threads[0]?.id).toBe(threadId);
   });
 
-  it("ignores unknown @mentions", async () => {
+  it("ignores @mentions that aren't @agent", async () => {
     const { id, stub } = freshRoom();
     await initRoom(stub, id);
 
@@ -185,7 +185,7 @@ describe("Room @mention → thread", () => {
       asUser("https://room/messages", ARON, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ parts: [{ type: "text", text: "talking about @nobody-here" }] }),
+        body:    JSON.stringify({ parts: [{ type: "text", text: "talking about @nobody-here and @go" }] }),
       }),
     );
     const body = await post.json() as { threadId?: string };

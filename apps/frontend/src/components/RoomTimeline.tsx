@@ -47,7 +47,7 @@ function authorName(msg: AppMessage): string {
 
 function authorKey(msg: AppMessage): string {
   const a = msg.metadata.author;
-  return a.kind === "user" ? a.id : a.personaId;
+  return a.kind === "user" ? a.id : a.id;
 }
 
 export function RoomTimeline({

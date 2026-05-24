@@ -1,11 +1,8 @@
 /**
- * Slice 6+7 — turn configuration: system prompt, model selection,
- * and `providerOptions` for OpenAI ZDR.
+ * Turn configuration: system prompt, model selection, and
+ * `providerOptions` for OpenAI ZDR.
  *
- * The old `onChatMessage` baked all of these into one `streamText({ ... })`
- * call. Under Think they're three separate overrides:
- *
- *   - `getSystemPrompt()`   → the persona's system prompt
+ *   - `getSystemPrompt()`   → the fixed system prompt from src/system-prompt.ts
  *   - `getModel()`          → OpenAI when `OPENAI_API_KEY` is set, else Workers AI
  *   - `beforeTurn()`        → returns `{ providerOptions }` for ZDR reasoning
  *
@@ -17,7 +14,6 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_PERSONA } from "../../src/personas/index.js";
 import type { Agent } from "../../src/agent.js";
 
 async function freshAgent(): Promise<DurableObjectStub<Agent>> {
@@ -26,10 +22,16 @@ async function freshAgent(): Promise<DurableObjectStub<Agent>> {
 }
 
 describe("Agent — turn configuration", () => {
-  it("uses the active persona's systemPrompt", async () => {
+  it("uses the fixed Cloudflare-focused system prompt", async () => {
     const agent = await freshAgent();
     const preview = await agent.previewTurnConfig();
-    expect(preview.systemPrompt).toBe(DEFAULT_PERSONA.systemPrompt);
+    // Identity sentence and a couple of structural markers from
+    // src/system-prompt.ts. Full prompt shape is covered by
+    // tests/system-prompt.test.ts.
+    expect(preview.systemPrompt).toMatch(/^You are an expert TypeScript developer/);
+    expect(preview.systemPrompt).toMatch(/Cloudflare Workers/);
+    expect(preview.systemPrompt).toMatch(/\nAvailable tools:\n/);
+    expect(preview.systemPrompt).toMatch(/Current working directory: \/workspace$/);
   });
 
   it("threads ZDR-safe providerOptions through beforeTurn()", async () => {

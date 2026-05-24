@@ -19,7 +19,7 @@ export interface ChatAuthor {
 /** Author shape that may appear in room/thread message metadata. */
 export type Author =
   | { kind: "user";  id: string; email: string; name: string }
-  | { kind: "agent"; personaId: string; name: string };
+  | { kind: "agent"; id: string;    name: string };
 
 /** What `GET /api/app/me` returns. */
 export interface Me {
@@ -66,6 +66,7 @@ export interface RoomSummary {
 export interface ThreadRow {
   id:            string;
   rootMessageId: string;
-  personaId:     string;
+  /** Stable identifier of the agent that owns the thread. Always "agent" for v1. */
+  agentId:       string;
   createdAt:     number;
 }

@@ -6,7 +6,7 @@
  *   3. GET  /api/app/rooms                     → list contains the new room
  *   4. GET  /api/rooms/:id/meta                → Room was initialized by worker
  *   5. POST /api/rooms/:id/messages            → simple message, no thread
- *   6. POST /api/rooms/:id/messages with @go   → thread minted
+ *   6. POST /api/rooms/:id/messages with @agent  → thread minted
  *   7. GET  /api/rooms/:id/threads             → thread is listed
  *   8. WS   /api/rooms/:id/ws                  → broadcast received on new post
  *   9. GET  Agent DO /debug/:threadId/messages → seed message persisted
@@ -70,11 +70,11 @@ describe("E2E: room messages", () => {
     expect(body.message.metadata.author.name).toBeTruthy();
   });
 
-  it("mints a thread when a known persona is mentioned", async () => {
+  it("mints a thread when @agent is mentioned", async () => {
     const res = await fetch(`${BASE_URL}/api/rooms/${roomId}/messages`, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: "@go can you help with the build?" }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: "@agent can you help with the build?" }] }),
     });
     expect(res.status).toBe(201);
     const body = await res.json() as { threadId: string };
@@ -85,8 +85,8 @@ describe("E2E: room messages", () => {
   it("lists the minted thread", async () => {
     const res = await fetch(`${BASE_URL}/api/rooms/${roomId}/threads`);
     expect(res.status).toBe(200);
-    const body = await res.json() as { threads: Array<{ id: string; personaId: string }> };
-    expect(body.threads.find(t => t.id === threadId)?.personaId).toBe("go");
+    const body = await res.json() as { threads: Array<{ id: string; agentId: string }> };
+    expect(body.threads.find(t => t.id === threadId)?.agentId).toBe("agent");
   });
 });
 
@@ -143,7 +143,7 @@ describe("E2E: Agent DO seed", () => {
     const seed = messages[0]!;
     expect(seed.role).toBe("user");
     const text = seed.parts.find(p => p.text)?.text ?? "";
-    expect(text).toContain("@go");
+    expect(text).toContain("@agent");
     expect(seed.metadata?.author?.name).toBeTruthy();
   });
 });

@@ -1,7 +1,6 @@
 import { routeAgentRequest } from "agents";
 import { Agent, SubAgent } from "./agent.js";
 import { Sandbox, getSandbox } from "@cloudflare/sandbox";
-import { PERSONAS, DEFAULT_PERSONA } from "./personas/index.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
@@ -31,18 +30,6 @@ export default {
       return handleRoomRequest(request, env, identity);
     }
 
-
-
-    // Top-level persona registry — used by the chat UI to populate the
-    // "New session" dropdown. Stateless, no session required.
-    if (request.method === "GET" && url.pathname === "/personas") {
-      return Response.json({
-        // Don't ship systemPrompt to the browser — it's huge and the UI only
-        // needs id/name/description/extraTools.
-        personas: PERSONAS.map(({ systemPrompt: _, ...rest }) => rest),
-        default:  DEFAULT_PERSONA.id,
-      }, { headers: { "cache-control": "public, max-age=60" } });
-    }
 
     // /debug/<sessionId>/exec|env|logs
     if (url.pathname.startsWith("/debug/")) {
@@ -82,7 +69,7 @@ export default {
       }
 
       // Forward agent-level debug routes (messages, vfs, reset) to the DO's onRequest().
-      if (cmd === "messages" || cmd === "vfs" || cmd === "reset" || cmd === "persona") {
+      if (cmd === "messages" || cmd === "vfs" || cmd === "reset") {
         const id   = env.Agent.idFromName(sessionId);
         const stub = env.Agent.get(id);
         return stub.fetch(withIdentity(request, identity));
