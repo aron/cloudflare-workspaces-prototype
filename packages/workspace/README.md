@@ -18,7 +18,7 @@ Three entry points:
 ## DO-side
 
 ```ts
-import { Workspace } from "@cloudflare/workspace";
+import { Workspace, R2Bucket } from "@cloudflare/workspace";
 
 export class MyAgent extends DurableObject {
   workspace: Workspace;
@@ -29,11 +29,18 @@ export class MyAgent extends DurableObject {
       storage:   ctx.storage,
       sandbox:   env.Sandbox,
       sessionId: ctx.id.name ?? ctx.id.toString(),
+      mounts: {
+        // Read-only mount. Index is built once on first use;
+        // file content is fetched per-file on first read.
+        "/workspace/.agents/skills": R2Bucket(env.SHARED_FILES, {
+          prefix: ".agents/skills",
+        }),
+      },
     });
   }
 
   async someMethod() {
-    this.workspace.writeFile("/workspace/main.zig", "...");
+    await this.workspace.writeFile("/workspace/main.zig", "...");
     const result = await this.workspace.exec(
       "zig build-exe /workspace/main.zig -target wasm32-wasi",
     );
@@ -41,6 +48,56 @@ export class MyAgent extends DurableObject {
   }
 }
 ```
+
+### Async API
+
+Every read/write method on `Workspace` is `async` so the implementation can
+lazily index a mount (one `R2.list()`) or fetch file bytes (one `R2.get()`)
+without forcing callers to plumb a separate hydration step:
+
+```ts
+await workspace.readFile(path);
+await workspace.writeFile(path, bytes);
+await workspace.readdir(path);
+await workspace.stat(path);
+await workspace.mkdir(path);
+await workspace.deleteFile(path);
+await workspace.listFilesUnder(prefix);
+await workspace.findFiles(dir, pattern);
+await workspace.grep(pattern, path);
+```
+
+### Mounts
+
+Mounts default to `mode: "read-only"`. Writes anywhere under a read-only
+mount root throw `EROFS`, and container-side writes under the same path
+are dropped on the pull.
+
+Pass `mode: "read-write"` to opt a mount into write-through. `writeFile`
+and `deleteFile` are mirrored to R2 (R2 first, then the VFS — a failed
+`put`/`delete` leaves the VFS untouched). `mkdir` is VFS-only since R2
+has no directory concept. Container-side writes pulled back via `exec()`
+are applied to the VFS *and* mirrored to R2 with bounded concurrency.
+
+```ts
+mounts: {
+  "/workspace/.agents/skills": R2Bucket(env.SHARED_FILES, { prefix: ".agents/skills" }),
+  "/workspace/scratch":        R2Bucket(env.SCRATCH,      { mode: "read-write" }),
+}
+```
+
+On first call to any `Workspace` read/write/`exec`/`warmup`, the index for
+every configured mount is built (one `list()` per mount). File rows appear
+in the VFS as zero-byte stubs whose `stat()` reports the size returned by
+`list()`. The first `readFile` (or `grep`, or the pre-`exec` hydration
+pass) fetches the bytes and writes them into the VFS chunked storage.
+
+Index state is persisted in the DO's SQLite, so reloads skip the re-list.
+Concurrent reads of the same stub share a single in-flight fetch.
+
+Call `workspace.prefetch()` (or `prefetch(root)`) to eagerly hydrate every
+stub upfront — useful from `onStart`/`waitUntil` if you want the first
+`grep` against a large mount to avoid a cold-start fetch fan-out.
 
 ## Running WASM
 

@@ -44,7 +44,7 @@ export async function runWasm(opts: RunWasmOptions): Promise<RunWasmResult> {
   const { workspace, loader, wasmPath, argv } = opts;
   const stdin = opts.stdin ?? "";
 
-  const stat = workspace.stat(wasmPath);
+  const stat = await workspace.stat(wasmPath);
   if (!stat || stat.type !== "file") {
     throw new Error(`WASM not found: ${wasmPath}`);
   }
@@ -53,16 +53,16 @@ export async function runWasm(opts: RunWasmOptions): Promise<RunWasmResult> {
   // The VFS is in-memory SQLite and the runner deserializes into a Map —
   // cheap for the workspace sizes typical of these demos (a few MB at most).
   const inputFiles: Record<string, string> = {};
-  for (const path of workspace.listFilesUnder("/workspace")) {
+  for (const path of await workspace.listFilesUnder("/workspace")) {
     if (path.endsWith(".wasm")) continue;  // skip compiled binaries
-    const data = workspace.readFile(path);
+    const data = await workspace.readFile(path);
     if (data) inputFiles[path] = bytesToBase64(data);
   }
 
   // Cache the Dynamic Worker by (path, mtime) so warm runs skip the wasm load.
   const cacheId = `wasm:${wasmPath}@${stat.mtime}`;
   const worker = loader.get(cacheId, async () => {
-    const wasmBytes = workspace.readFile(wasmPath);
+    const wasmBytes = await workspace.readFile(wasmPath);
     if (!wasmBytes) throw new Error(`${wasmPath} disappeared between stat and read`);
     return {
       compatibilityDate: opts.compatibilityDate ?? "2026-05-01",
@@ -91,7 +91,7 @@ export async function runWasm(opts: RunWasmOptions): Promise<RunWasmResult> {
   const images: Array<{ path: string; dataUrl: string }> = [];
   for (const [path, b64] of Object.entries(raw.files)) {
     const bytes = base64ToBytes(b64);
-    workspace.writeFile(path, bytes);
+    await workspace.writeFile(path, bytes);
     const mime = mimeFromPath(path);
     files.push({ path, size: bytes.length, mime });
     if (mime?.startsWith("image/")) {

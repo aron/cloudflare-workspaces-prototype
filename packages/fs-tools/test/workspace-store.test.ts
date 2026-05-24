@@ -12,7 +12,7 @@ const dec = new TextDecoder();
  */
 function makeFakeWorkspace(chunkSize = 8): WorkspaceLike & { _files: Map<string, Uint8Array> } {
   const files = new Map<string, Uint8Array>();
-  const stat: WorkspaceLike["stat"] = (path) => {
+  const stat: WorkspaceLike["stat"] = async (path) => {
     const f = files.get(path);
     if (!f) return null;
     return { type: "file", size: f.length, mtime: 1 };
@@ -20,10 +20,10 @@ function makeFakeWorkspace(chunkSize = 8): WorkspaceLike & { _files: Map<string,
   return {
     _files: files,
     stat,
-    readFile(path) {
+    async readFile(path) {
       return files.get(path) ?? null;
     },
-    writeFile(path, content) {
+    async writeFile(path, content) {
       const bytes =
         typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
       files.set(path, bytes);
@@ -67,9 +67,9 @@ describe("WorkspaceFileStore", () => {
 
   it("returns null when stat reports a directory", async () => {
     const ws: WorkspaceLike = {
-      stat: () => ({ type: "dir", size: 0, mtime: 1 }),
-      readFile: () => null,
-      writeFile: () => {},
+      stat: async () => ({ type: "dir", size: 0, mtime: 1 }),
+      readFile: async () => null,
+      writeFile: async () => {},
     };
     const store = new WorkspaceFileStore(ws);
     expect(await store.stat("/d")).toBeNull();
@@ -116,9 +116,9 @@ describe("WorkspaceFileStore", () => {
     const files = new Map<string, Uint8Array>();
     files.set("/a", enc.encode("abcdefghij"));
     const ws: WorkspaceLike = {
-      stat: (p) => (files.has(p) ? { type: "file", size: files.get(p)!.length, mtime: 1 } : null),
-      readFile: (p) => files.get(p) ?? null,
-      writeFile: () => {},
+      stat: async (p) => (files.has(p) ? { type: "file" as const, size: files.get(p)!.length, mtime: 1 } : null),
+      readFile: async (p) => files.get(p) ?? null,
+      writeFile: async () => {},
       // no vfs
     };
     const store = new WorkspaceFileStore(ws);
