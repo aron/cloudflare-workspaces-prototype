@@ -413,9 +413,9 @@ export class Agent extends Think<Env> {
           ),
           cwd: z.string().optional().describe("Working directory, defaults to /tmp"),
         }),
-        execute: async ({ command, cwd }) => {
+        execute: async ({ command, cwd }, opts) => {
           try {
-            return await ws.exec(command, cwd);
+            return await raceWithSignal(ws.exec(command, cwd), opts?.abortSignal);
           } catch (err) {
             return { error: String(err), exitCode: 1, stdout: "", stderr: "" };
           }
@@ -438,9 +438,9 @@ export class Agent extends Think<Env> {
         inputSchema: z.object({
           config: z.string().describe("Path to wrangler.jsonc, e.g. /workspace/wrangler.jsonc"),
         }),
-        execute: async ({ config }) => {
+        execute: async ({ config }, opts) => {
           try {
-            return await this.deployer.deploy(config);
+            return await raceWithSignal(this.deployer.deploy(config), opts?.abortSignal);
           } catch (err) {
             return { ok: false, error: String(err) };
           }
@@ -457,7 +457,7 @@ export class Agent extends Think<Env> {
             "A fetch() call expression, e.g. fetch('https://w/api', { method: 'POST', body: '{}' })",
           ),
         }),
-        execute: async ({ request }) => {
+        execute: async ({ request }, opts) => {
           const worker = this.deployer.current;
           if (!worker) {
             return { error: "no worker deployed — call worker_deploy first" };
@@ -466,7 +466,7 @@ export class Agent extends Think<Env> {
           try { parsed = parseFetchCall(request); }
           catch (err) { return { error: `bad fetch call: ${(err as Error).message}` }; }
           try {
-            return await fetchAgainstWorker(worker, parsed);
+            return await raceWithSignal(fetchAgainstWorker(worker, parsed), opts?.abortSignal);
           } catch (err) {
             return { error: String(err) };
           }
@@ -636,6 +636,35 @@ export class SubAgent extends Think<Env> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Race a tool's work against the turn's abort signal. The container/sandbox
+ * APIs we call from `exec`/`worker_deploy`/`worker_fetch` don't all accept
+ * an `AbortSignal`, so when the user clicks Stop we resolve the tool call
+ * with an `aborted` result and let the underlying work finish in the
+ * background. The Think loop sees the abort on the model side regardless,
+ * so the turn unwinds even if the container keeps churning briefly.
+ */
+async function raceWithSignal<T>(
+  work:   Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | { aborted: true; error: string }> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    return { aborted: true, error: "tool call cancelled before start" };
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve({ aborted: true, error: "tool call cancelled" });
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      v => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      e => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
 
 /**
  * Render a thread's chat history as a plain transcript for summarisation.
