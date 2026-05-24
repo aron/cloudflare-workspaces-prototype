@@ -352,7 +352,19 @@ export class Agent extends Think<Env> {
 
       ...pick("exec", tool({
         description:
-          "ONLY for compilation and build-tool operations. Do not use for file ops; use the file tools.",
+          "Run a shell command in the workspace sandbox. " +
+          "Prefer the dedicated tools first: read/write/edit/listDirectory/stat/" +
+          "mkdir/deleteFile/findFiles/grep for file ops, worker_deploy/worker_fetch " +
+          "for Cloudflare Workers, run for compiled WASM binaries. " +
+          "Primary use: compilation and build-tool invocation (zig, go, npm, etc.). " +
+          "Fallback use: after the same dedicated tool has failed at least twice " +
+          "in a row on the same input with errors that look like tool-level bugs " +
+          "(not user input errors), it is acceptable to drop down to `exec` to " +
+          "achieve the same effect \u2014 e.g. `cat`/`sed`/`mv` when `read`/`edit` " +
+          "keeps erroring, `ls` when `listDirectory` fails. When you do this, " +
+          "say so briefly in your response so the human can see the workaround " +
+          "and report the underlying bug. Do not use `exec` as a first attempt " +
+          "for anything a dedicated tool covers.",
         inputSchema: z.object({
           command: z.string().describe(
             "Build command, e.g. 'zig build-exe /workspace/main.zig -target wasm32-wasi -O ReleaseSmall -femit-bin=/workspace/main.wasm'",
