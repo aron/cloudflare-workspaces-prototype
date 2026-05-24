@@ -33,12 +33,20 @@ function stubFor(name: string) {
   return env.MountHost.get(id);
 }
 
-/** Build a fake mount + call counters from a flat `relPath -> body` map. */
-function fakeMount(files: Record<string, string>) {
-  const fetchCalls: string[] = [];
+/**
+ * Build a fake mount + call counters from a flat `relPath -> body` map.
+ * Passing `{ writable: true }` produces a read-write mount whose `put`/
+ * `delete` mutate the same backing map.
+ */
+function fakeMount(files: Record<string, string>, opts: { writable?: boolean } = {}) {
+  const fetchCalls:  string[] = [];
+  const putCalls:    Array<{ relPath: string; body: string }> = [];
+  const deleteCalls: string[] = [];
   let listCalls = 0;
+  const writable = !!opts.writable;
   const mount: Mount = {
     kind: "fake",
+    writable,
     async list(): Promise<MountEntry[]> {
       listCalls++;
       const entries: MountEntry[] = [];
@@ -58,7 +66,27 @@ function fakeMount(files: Record<string, string>) {
       return enc.encode(body);
     },
   };
-  return { mount, counts: () => ({ listCalls, fetchCalls: [...fetchCalls] }) };
+  if (writable) {
+    mount.put = async (relPath, bytes) => {
+      const body = dec.decode(bytes);
+      putCalls.push({ relPath, body });
+      files[relPath] = body;
+    };
+    mount.delete = async (relPath) => {
+      deleteCalls.push(relPath);
+      delete files[relPath];
+    };
+  }
+  return {
+    mount,
+    counts: () => ({
+      listCalls,
+      fetchCalls:  [...fetchCalls],
+      putCalls:    [...putCalls],
+      deleteCalls: [...deleteCalls],
+    }),
+    backing: files,
+  };
 }
 
 /**
@@ -213,5 +241,108 @@ describe("Workspace mounts", () => {
     expect(out.a).toContainEqual({ name: "b",        type: "dir" });
     expect(out.b).toContainEqual({ name: "c",        type: "dir" });
     expect(out.c).toContainEqual({ name: "leaf.txt", type: "file" });
+  });
+
+  // ---- writable mounts ----
+
+  it("writeFile under a read-write mount pushes to the backing store and the VFS", async () => {
+    const fm = fakeMount({ "a.txt": "hello" }, { writable: true });
+    const out = await runInDurableObject(stubFor("rw-write"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      await ws.writeFile("/mnt/a.txt",   "updated");
+      await ws.writeFile("/mnt/new.txt", "created");
+      const a   = await ws.readFile("/mnt/a.txt");
+      const nw  = await ws.readFile("/mnt/new.txt");
+      return { a: a && dec.decode(a), nw: nw && dec.decode(nw), counts: fm.counts() };
+    });
+    expect(out.a).toBe("updated");
+    expect(out.nw).toBe("created");
+    expect(out.counts.putCalls).toEqual([
+      { relPath: "a.txt",   body: "updated" },
+      { relPath: "new.txt", body: "created" },
+    ]);
+    expect(fm.backing["a.txt"]).toBe("updated");
+    expect(fm.backing["new.txt"]).toBe("created");
+  });
+
+  it("writeFile failure on the mount leaves the VFS untouched", async () => {
+    const fm = fakeMount({ "a.txt": "hello" }, { writable: true });
+    fm.mount.put = async () => { throw new Error("R2 down"); };
+    const out = await runInDurableObject(stubFor("rw-write-fail"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      let threw = false;
+      try { await ws.writeFile("/mnt/a.txt", "updated"); }
+      catch { threw = true; }
+      const a = await ws.readFile("/mnt/a.txt");
+      return { threw, a: a && dec.decode(a) };
+    });
+    expect(out.threw).toBe(true);
+    expect(out.a).toBe("hello");  // original content still served from R2
+  });
+
+  it("deleteFile under a read-write mount deletes a single file from the backing store", async () => {
+    const fm = fakeMount({ "a.txt": "x", "b.txt": "y" }, { writable: true });
+    const out = await runInDurableObject(stubFor("rw-delete-file"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      await ws.deleteFile("/mnt/a.txt");
+      const a = await ws.readFile("/mnt/a.txt");
+      const b = await ws.readFile("/mnt/b.txt");
+      return { a, b: b && dec.decode(b), counts: fm.counts() };
+    });
+    expect(out.a).toBeNull();
+    expect(out.b).toBe("y");
+    expect(out.counts.deleteCalls).toEqual(["a.txt"]);
+    expect(fm.backing).toEqual({ "b.txt": "y" });
+  });
+
+  it("deleteFile on a directory deletes every file in the subtree from the backing store", async () => {
+    const fm = fakeMount(
+      { "sub/a.txt": "1", "sub/b.txt": "2", "keep.txt": "3" },
+      { writable: true },
+    );
+    const out = await runInDurableObject(stubFor("rw-delete-tree"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      await ws.deleteFile("/mnt/sub");
+      return {
+        listed:  await ws.listFilesUnder("/mnt"),
+        counts:  fm.counts(),
+      };
+    });
+    expect(out.listed).toEqual(["/mnt/keep.txt"]);
+    expect(out.counts.deleteCalls.sort()).toEqual(["sub/a.txt", "sub/b.txt"]);
+    expect(fm.backing).toEqual({ "keep.txt": "3" });
+  });
+
+  it("mkdir under a read-write mount is VFS-only (no put to the backing store)", async () => {
+    const fm = fakeMount({}, { writable: true });
+    const out = await runInDurableObject(stubFor("rw-mkdir"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      await ws.mkdir("/mnt/new-dir");
+      const st = await ws.stat("/mnt/new-dir");
+      return { st, counts: fm.counts() };
+    });
+    expect(out.st?.type).toBe("dir");
+    expect(out.counts.putCalls).toEqual([]);
+    expect(out.counts.deleteCalls).toEqual([]);
+  });
+
+  it("throws if a mount declares writable but is missing put/delete", async () => {
+    const mount: Mount = {
+      kind: "broken",
+      writable: true,
+      async list()  { return []; },
+      async fetch() { throw new Error("never"); },
+      // missing put/delete on purpose
+    };
+    const out = await runInDurableObject(stubFor("rw-broken"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, mount);
+      try {
+        await ws.writeFile("/mnt/x.txt", "y");
+        return null;
+      } catch (e) {
+        return (e as Error).message;
+      }
+    });
+    expect(out).toMatch(/missing put\/delete/);
   });
 });
