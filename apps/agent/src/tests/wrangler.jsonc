@@ -15,8 +15,9 @@
   // No Sandbox container binding — tests never exercise exec/run.
   "durable_objects": {
     "bindings": [
-      { "class_name": "Agent", "name": "Agent" },
-      { "class_name": "SubAgent", "name": "SubAgent" }
+      { "class_name": "Agent",      "name": "Agent" },
+      { "class_name": "SubAgent",   "name": "SubAgent" },
+      { "class_name": "MountHost",  "name": "MountHost" }
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
@@ -24,7 +25,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Agent", "SubAgent"]
+      "new_sqlite_classes": ["Agent", "SubAgent", "MountHost"]
     }
   ],
   // Dummy key so webSearch tool registers under getTools(). Tests never
