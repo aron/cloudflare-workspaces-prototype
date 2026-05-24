@@ -15,6 +15,7 @@ import { switchPort } from "@cloudflare/containers";
 import { newWebSocketRpcSession } from "capnweb";
 
 import { Vfs } from "./vfs.js";
+import type { Mount } from "./mounts/index.js";
 import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
 
 export interface WorkspaceOptions {
@@ -33,12 +34,24 @@ export interface WorkspaceOptions {
    * Defaults to identity (sessionId itself names the Sandbox DO).
    */
   resolveSessionId?: (sessionId: string) => Promise<string> | string;
+  /**
+   * Read-only mounts keyed by absolute VFS path (the mount root).
+   * Index (directory tree + file metadata) is fetched lazily on first use;
+   * file content is fetched per-file the first time something reads it.
+   * Writes anywhere under a mount root throw EROFS.
+   */
+  mounts?: Record<string, Mount>;
 }
 
 const WATERMARK_TABLE = `
 CREATE TABLE IF NOT EXISTS _workspace_watermark (
   k TEXT PRIMARY KEY,
   v INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS _workspace_mounts (
+  root     TEXT PRIMARY KEY,
+  kind     TEXT NOT NULL,
+  indexed  INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -53,6 +66,17 @@ export class Workspace {
   private pushSeq     = 0;  // last VFS `seq` pushed to the container
   private pullSinceMs = 0;  // last container-side mtime seen on pull
 
+  // ---- mounts ----
+  /** Normalized mount roots (no trailing slash), sorted longest-first for prefix matching. */
+  private mountRoots: string[] = [];
+  /** Per-mount index state. Once indexed, stays indexed for the DO lifetime. */
+  private mountIndexed = new Map<string, boolean>();
+  private indexingPromise: Promise<void> | null = null;
+  /** Per-file in-flight fetches — dedupes concurrent reads of the same stub. */
+  private contentFetches = new Map<string, Promise<void>>();
+  /** Bounded concurrency for batch hydration during exec(). */
+  private static readonly FETCH_CONCURRENCY = 8;
+
   constructor(opts: WorkspaceOptions) {
     this.opts = { port: 4567, ...opts };
     this.sql = (opts.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
@@ -62,7 +86,52 @@ export class Workspace {
       if (r.k === "pushSeq")     this.pushSeq     = r.v;
       if (r.k === "pullSinceMs") this.pullSinceMs = r.v;
     }
+
+    // Normalize and reconcile configured mounts against the persisted state.
+    // Anything in the table that no longer matches the configured mount kind
+    // (or is no longer configured at all) gets its subtree wiped — we'll
+    // re-index on demand.
+    const configured = new Map<string, Mount>();
+    for (const [rawRoot, mount] of Object.entries(opts.mounts ?? {})) {
+      const root = normalizeMountRoot(rawRoot);
+      if (configured.has(root)) throw new Error(`duplicate mount root: ${root}`);
+      configured.set(root, mount);
+    }
+    // Reject overlapping mounts (one root being a prefix of another).
+    const roots = [...configured.keys()];
+    for (const a of roots) for (const b of roots) {
+      if (a !== b && (b + "/").startsWith(a + "/")) {
+        throw new Error(`mount root ${a} overlaps with ${b}`);
+      }
+    }
+    this.mountRoots = roots.sort((a, b) => b.length - a.length);
+
+    const persisted = [...this.sql.exec<{ root: string; kind: string; indexed: number }>(
+      `SELECT root, kind, indexed FROM _workspace_mounts`,
+    )];
+    for (const row of persisted) {
+      const m = configured.get(row.root);
+      if (!m || m.kind !== row.kind) {
+        // Configuration changed: purge stale subtree + row.
+        this.vfs.deleteFile(row.root);
+        this.sql.exec(`DELETE FROM _workspace_mounts WHERE root = ?`, row.root);
+      } else {
+        this.mountIndexed.set(row.root, row.indexed === 1);
+      }
+    }
+    for (const root of roots) {
+      if (!this.mountIndexed.has(root)) {
+        this.sql.exec(
+          `INSERT OR IGNORE INTO _workspace_mounts(root, kind, indexed) VALUES (?, ?, 0)`,
+          root, configured.get(root)!.kind,
+        );
+        this.mountIndexed.set(root, false);
+      }
+    }
+    this.configuredMounts = configured;
   }
+
+  private configuredMounts: Map<string, Mount> = new Map();
 
   /** Resolve and cache the sandbox DO name (UUID when using a warm pool). */
   private async sandboxName(): Promise<string> {
@@ -73,20 +142,56 @@ export class Workspace {
   }
 
   // ---- direct VFS (no container round-trip) ----
+  //
+  // All read/write methods are async: they may need to index a mount
+  // (one R2 list() call) or hydrate file content (one R2 get() call) on
+  // first use. After the index is built and content is cached, subsequent
+  // calls degrade to a couple of SQL statements — cheap, but still async
+  // for API consistency.
 
-  readFile(path: string): Uint8Array | null              { return this.vfs.readFile(path); }
-  writeFile(path: string, content: Uint8Array | string, mode?: number): void {
+  async readFile(path: string): Promise<Uint8Array | null> {
+    await this.ensureMountsIndexed();
+    await this.ensureContentLoaded(path);
+    return this.vfs.readFile(path);
+  }
+
+  async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
+    this.assertWritable(path);
+    await this.ensureMountsIndexed();
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
     this.vfs.writeFile(path, bytes, mode);
   }
-  readdir(path: string): Array<{ name: string; type: "file" | "dir" }> { return this.vfs.readdir(path); }
-  stat(path: string): FileStat | null                    { return this.vfs.stat(path); }
-  mkdir(path: string, mode?: number): void               { this.vfs.mkdir(path, mode); }
-  deleteFile(path: string): void                         { this.vfs.deleteFile(path); }
-  listFilesUnder(prefix: string): string[]               { return this.vfs.listFilesUnder(prefix); }
+
+  async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
+    await this.ensureMountsIndexed();
+    return this.vfs.readdir(path);
+  }
+
+  async stat(path: string): Promise<FileStat | null> {
+    await this.ensureMountsIndexed();
+    return this.vfs.stat(path);
+  }
+
+  async mkdir(path: string, mode?: number): Promise<void> {
+    this.assertWritable(path);
+    await this.ensureMountsIndexed();
+    this.vfs.mkdir(path, mode);
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    this.assertWritable(path);
+    await this.ensureMountsIndexed();
+    this.vfs.deleteFile(path);
+  }
+
+  async listFilesUnder(prefix: string): Promise<string[]> {
+    await this.ensureMountsIndexed();
+    return this.vfs.listFilesUnder(prefix);
+  }
 
   /** Search filenames under `directory` for `pattern` (substring match). */
-  findFiles(directory: string, pattern?: string): Array<{ path: string; type: "file" | "dir" }> {
+  async findFiles(directory: string, pattern?: string): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+    await this.ensureMountsIndexed();
     return this.vfs.snapshot().entries
       .filter(e => e.path.startsWith(directory))
       .filter(e => !pattern || e.path.includes(pattern))
@@ -94,10 +199,13 @@ export class Workspace {
   }
 
   /** Grep file contents for `pattern`. `path` may be a file or directory. */
-  grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): GrepHit[] {
+  async grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): Promise<GrepHit[]> {
+    await this.ensureMountsIndexed();
     const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
     const { entries } = this.vfs.snapshot();
     const files = entries.filter(e => e.type === "file" && e.path.startsWith(path));
+    // Hydrate any mount stubs in scope, bounded-concurrent.
+    await this.hydrateMany(files.map(f => f.path));
     const hits: GrepHit[] = [];
     for (const f of files) {
       const bytes = this.vfs.readFile(f.path);
@@ -123,8 +231,15 @@ export class Workspace {
    * load right after an applyChanges flush). Use absolute paths in `command`.
    */
   async exec(command: string, cwd?: string): Promise<ExecResult> {
+    await this.ensureMountsIndexed();
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
     using api = await this.connectContainer();
+
+    // Hydrate any mount stubs we're about to push — otherwise the container
+    // would receive empty files. We pre-fetch in bounded parallel before
+    // computing the change set so the freshly-written rows are included.
+    const stubs = this.vfs.listStubs().map(s => s.path);
+    if (stubs.length) await this.hydrateMany(stubs);
 
     // Push the delta since the last exec.
     const changes = this.vfs.getChangesSince(this.pushSeq);
@@ -135,8 +250,11 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    // Pull files the container touched.
-    const dirty = await api.getDirtyNodes(this.pullSinceMs);
+    // Pull files the container touched. Drop anything under a mount root —
+    // mounts are read-only end-to-end, so container-side writes there are
+    // discarded rather than persisted back to the VFS.
+    const dirtyRaw = await api.getDirtyNodes(this.pullSinceMs);
+    const dirty    = dirtyRaw.filter(c => this.mountRootOf(c.path) === null);
     if (dirty.length) {
       await this.vfs.applyChanges(dirty);
       this.pullSinceMs = Math.max(this.pullSinceMs, ...dirty.map(d => d.mtime ?? 0));
@@ -158,7 +276,108 @@ export class Workspace {
    * Use from `onStart()` in `ctx.waitUntil(...)` so the first exec is fast.
    */
   async warmup(): Promise<void> {
+    await this.ensureMountsIndexed();
     await this.ensureContainerProcess();
+  }
+
+  /**
+   * Eagerly hydrate file content under one mount root, or all mounts if
+   * omitted. Useful from `onStart()` if you want sync-ish reads immediately;
+   * otherwise content is fetched on first read.
+   */
+  async prefetch(root?: string): Promise<void> {
+    await this.ensureMountsIndexed();
+    const stubs = this.vfs.listStubs()
+      .filter(s => root === undefined || s.mountRoot === normalizeMountRoot(root))
+      .map(s => s.path);
+    if (stubs.length) await this.hydrateMany(stubs);
+  }
+
+  // ---- mount internals ----
+
+  /** Resolve the configured mount root that owns `path`, or null. */
+  private mountRootOf(path: string): string | null {
+    for (const r of this.mountRoots) {
+      if (path === r || path.startsWith(r + "/")) return r;
+    }
+    return null;
+  }
+
+  private assertWritable(path: string): void {
+    const root = this.mountRootOf(path);
+    if (root !== null) {
+      throw new Error(`EROFS: read-only mount at ${root}: ${path}`);
+    }
+  }
+
+  /**
+   * Build the directory index for every configured mount that hasn't been
+   * indexed yet. Concurrent callers share one promise; once resolved, the
+   * `indexed` flag is persisted in `_workspace_mounts` so DO reloads skip
+   * the re-list (stubs are already in `vfs_nodes`).
+   */
+  private ensureMountsIndexed(): Promise<void> {
+    if (this.indexingPromise) return this.indexingPromise;
+    const pending = this.mountRoots.filter(r => !this.mountIndexed.get(r));
+    if (pending.length === 0) return Promise.resolve();
+
+    this.indexingPromise = (async () => {
+      for (const root of pending) {
+        const mount = this.configuredMounts.get(root)!;
+        const entries = await mount.list();
+        // Ensure the root itself exists as a directory.
+        this.vfs.mkdir(root, 0o40555, root);
+        for (const entry of entries) {
+          const abs = root + "/" + entry.relPath;
+          if (entry.type === "dir") {
+            this.vfs.mkdir(abs, 0o40555, root);
+          } else {
+            this.vfs.writeStub(abs, 0o100444, entry.mtime ?? Date.now(), root, entry.size ?? null);
+          }
+        }
+        this.mountIndexed.set(root, true);
+        this.sql.exec(
+          `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`, root,
+        );
+      }
+    })().finally(() => { this.indexingPromise = null; });
+    return this.indexingPromise;
+  }
+
+  /**
+   * Ensure a single stub's content is loaded into the VFS. No-op for
+   * non-stub paths. Dedupes concurrent calls for the same path.
+   */
+  private ensureContentLoaded(path: string): Promise<void> {
+    if (!this.vfs.isStub(path)) return Promise.resolve();
+    const existing = this.contentFetches.get(path);
+    if (existing) return existing;
+    const root = this.vfs.getMountRoot(path);
+    if (!root) return Promise.resolve();
+    const mount = this.configuredMounts.get(root);
+    if (!mount) throw new Error(`mount not configured for root: ${root}`);
+    const relPath = path.slice(root.length + 1);
+    const p = (async () => {
+      const bytes = await mount.fetch(relPath);
+      this.vfs.writeFile(path, bytes, 0o100444, root);
+    })().finally(() => { this.contentFetches.delete(path); });
+    this.contentFetches.set(path, p);
+    return p;
+  }
+
+  /** Hydrate multiple paths with bounded concurrency. Skips non-stubs. */
+  private async hydrateMany(paths: string[]): Promise<void> {
+    const stubs = paths.filter(p => this.vfs.isStub(p));
+    if (stubs.length === 0) return;
+    const limit = Workspace.FETCH_CONCURRENCY;
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, stubs.length) }, async () => {
+      while (i < stubs.length) {
+        const idx = i++;
+        await this.ensureContentLoaded(stubs[idx]);
+      }
+    });
+    await Promise.all(workers);
   }
 
   // ---- internal: container process + capnweb session ----
@@ -209,4 +428,16 @@ export class Workspace {
       this.pushSeq, this.pullSinceMs,
     );
   }
+}
+
+/**
+ * Normalize a mount root: leading slash required, no trailing slash,
+ * collapse duplicate slashes. Rejects relative paths and the bare root "/".
+ */
+function normalizeMountRoot(p: string): string {
+  if (!p.startsWith("/")) throw new Error(`mount root must be absolute: ${p}`);
+  let out = p.replace(/\/+/g, "/");
+  if (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  if (out === "/") throw new Error(`mount root cannot be "/"`);
+  return out;
 }

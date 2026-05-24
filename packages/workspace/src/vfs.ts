@@ -24,11 +24,13 @@ CREATE TABLE IF NOT EXISTS vfs_seq (
 INSERT OR IGNORE INTO vfs_seq VALUES (1, 0);
 
 CREATE TABLE IF NOT EXISTS vfs_nodes (
-  path  TEXT    PRIMARY KEY,
-  type  TEXT    NOT NULL CHECK(type IN ('file','dir')),
-  mode  INTEGER NOT NULL DEFAULT 493,
-  mtime INTEGER NOT NULL,
-  seq   INTEGER NOT NULL DEFAULT 0
+  path        TEXT    PRIMARY KEY,
+  type        TEXT    NOT NULL CHECK(type IN ('file','dir')),
+  mode        INTEGER NOT NULL DEFAULT 493,
+  mtime       INTEGER NOT NULL,
+  seq         INTEGER NOT NULL DEFAULT 0,
+  mount_root  TEXT,
+  stub_size   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS vfs_chunks (
@@ -58,17 +60,19 @@ export class Vfs {
   // ---- reads ----
 
   stat(path: string): { type: "file" | "dir"; mode: number; mtime: number; size: number } | null {
-    const rows = [...this.sql.exec<{ type: string; mode: number; mtime: number }>(
-      `SELECT type, mode, mtime FROM vfs_nodes WHERE path = ?`, path
+    const rows = [...this.sql.exec<{ type: string; mode: number; mtime: number; stub_size: number | null }>(
+      `SELECT type, mode, mtime, stub_size FROM vfs_nodes WHERE path = ?`, path
     )];
     if (!rows.length) return null;
-    const { type, mode, mtime } = rows[0];
+    const { type, mode, mtime, stub_size } = rows[0];
     let size = 0;
     if (type === "file") {
       const d = [...this.sql.exec<{ size: number }>(
         `SELECT COALESCE(SUM(length(data)), 0) AS size FROM vfs_chunks WHERE path = ?`, path
       )];
       size = d[0]?.size ?? 0;
+      // Unhydrated stub — use the size recorded by the mount's index pass.
+      if (size === 0 && stub_size !== null) size = stub_size;
     }
     return { type: type as "file" | "dir", mode, mtime, size };
   }
@@ -158,13 +162,13 @@ export class Vfs {
 
   // ---- writes ----
 
-  writeFile(path: string, content: Uint8Array, mode = 0o100644): void {
+  writeFile(path: string, content: Uint8Array, mode = 0o100644, mountRoot: string | null = null): void {
     const seq = this.applying ? this.currentSeq() : this.nextSeq();
     const mtime = Date.now();
     this.ensureParentDirs(path);
     this.sql.exec(
-      `INSERT OR REPLACE INTO vfs_nodes(path, type, mode, mtime, seq) VALUES (?, 'file', ?, ?, ?)`,
-      path, mode, mtime, seq
+      `INSERT OR REPLACE INTO vfs_nodes(path, type, mode, mtime, seq, mount_root) VALUES (?, 'file', ?, ?, ?, ?)`,
+      path, mode, mtime, seq, mountRoot
     );
     this.sql.exec(`DELETE FROM vfs_chunks WHERE path = ?`, path);
     const numChunks = Math.max(1, Math.ceil(content.length / CHUNK_SIZE));
@@ -179,14 +183,59 @@ export class Vfs {
     this.writeFile(path, buf, mode);
   }
 
-  mkdir(path: string, mode = 0o40755): void {
+  /**
+   * Insert an unhydrated file stub: a `vfs_nodes` row with no `vfs_chunks`.
+   * Used by the mount index pass — readdir/stat see the file, but reading
+   * content triggers fetch on demand. The row is stamped with `mountRoot`
+   * so writes can be rejected and the change-set push knows to hydrate first.
+   */
+  writeStub(path: string, mode: number, mtime: number, mountRoot: string, size: number | null = null): void {
+    const seq = this.nextSeq();
+    this.ensureParentDirs(path);
+    this.sql.exec(
+      `INSERT OR REPLACE INTO vfs_nodes(path, type, mode, mtime, seq, mount_root, stub_size) VALUES (?, 'file', ?, ?, ?, ?, ?)`,
+      path, mode, mtime, seq, mountRoot, size,
+    );
+    this.sql.exec(`DELETE FROM vfs_chunks WHERE path = ?`, path);
+  }
+
+  mkdir(path: string, mode = 0o40755, mountRoot: string | null = null): void {
     if (path === "/") return;
     const seq = this.applying ? this.currentSeq() : this.nextSeq();
     this.ensureParentDirs(path);
     this.sql.exec(
-      `INSERT OR IGNORE INTO vfs_nodes(path, type, mode, mtime, seq) VALUES (?, 'dir', ?, ?, ?)`,
-      path, mode, Date.now(), seq
+      `INSERT OR IGNORE INTO vfs_nodes(path, type, mode, mtime, seq, mount_root) VALUES (?, 'dir', ?, ?, ?, ?)`,
+      path, mode, Date.now(), seq, mountRoot,
     );
+  }
+
+  /** Read the mount_root column for a path. null = regular file/dir. */
+  getMountRoot(path: string): string | null {
+    const rows = [...this.sql.exec<{ mount_root: string | null }>(
+      `SELECT mount_root FROM vfs_nodes WHERE path = ?`, path,
+    )];
+    return rows[0]?.mount_root ?? null;
+  }
+
+  /** True if `path` is a file stub (mount-managed, no chunks yet). */
+  isStub(path: string): boolean {
+    const rows = [...this.sql.exec<{ c: number }>(
+      `SELECT (SELECT COUNT(*) FROM vfs_chunks WHERE path = vfs_nodes.path) AS c
+         FROM vfs_nodes WHERE path = ? AND type = 'file' AND mount_root IS NOT NULL`,
+      path,
+    )];
+    return rows.length > 0 && rows[0].c === 0;
+  }
+
+  /** List all current stubs (mount file rows with zero chunks). */
+  listStubs(): Array<{ path: string; mountRoot: string }> {
+    return [...this.sql.exec<{ path: string; mount_root: string }>(
+      `SELECT n.path AS path, n.mount_root AS mount_root
+         FROM vfs_nodes n
+        WHERE n.type = 'file'
+          AND n.mount_root IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM vfs_chunks c WHERE c.path = n.path)`,
+    )].map(r => ({ path: r.path, mountRoot: r.mount_root }));
   }
 
   deleteFile(path: string): void {
