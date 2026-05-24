@@ -13,9 +13,9 @@
 export type ToolName =
   // common file-ops tools (always available)
   | "read" | "write" | "edit" | "listDirectory" | "stat" | "mkdir"
-  | "deleteFile" | "findFiles" | "grep" | "exec" | "webFetch" | "webSearch"
+  | "deleteFile" | "findFiles" | "grep" | "exec" | "webFetch"
   // optional, persona-gated
-  | "run"
+  | "run" | "webSearch"
   | "worker_deploy" | "worker_fetch";
 
 export interface Persona {
@@ -34,5 +34,5 @@ export interface Persona {
 /** Tools every persona gets. */
 export const COMMON_TOOLS: ToolName[] = [
   "read", "write", "edit", "listDirectory", "stat", "mkdir",
-  "deleteFile", "findFiles", "grep", "exec", "webFetch", "webSearch",
+  "deleteFile", "findFiles", "grep", "exec", "webFetch",
 ];
