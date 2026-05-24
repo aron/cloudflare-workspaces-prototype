@@ -47,6 +47,24 @@ CREATE TABLE IF NOT EXISTS vfs_changes (
 );
 `;
 
+/**
+ * Add columns that older deploys are missing. `CREATE TABLE IF NOT EXISTS`
+ * only creates the table on first run — it doesn't reconcile schema drift
+ * when columns are added later. We probe `PRAGMA table_info` and run
+ * `ALTER TABLE ADD COLUMN` for anything missing.
+ *
+ * `ALTER TABLE ADD COLUMN` requires that the new column either be NULLable
+ * or carry a constant default. Both of ours are NULLable, so this is safe
+ * to re-run on every DO boot.
+ */
+function migrate(sql: SqlStorage): void {
+  const cols = new Set(
+    [...sql.exec<{ name: string }>(`PRAGMA table_info(vfs_nodes)`)].map(r => r.name),
+  );
+  if (!cols.has("mount_root")) sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN mount_root TEXT`);
+  if (!cols.has("stub_size"))  sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN stub_size INTEGER`);
+}
+
 export class Vfs {
   // While true, mutating ops don't advance `seq` or record delete tombstones —
   // used by applyChanges() so remote-pushed rows don't echo back as new
@@ -55,6 +73,7 @@ export class Vfs {
 
   constructor(private sql: SqlStorage) {
     sql.exec(SCHEMA);
+    migrate(sql);
   }
 
   // ---- reads ----
