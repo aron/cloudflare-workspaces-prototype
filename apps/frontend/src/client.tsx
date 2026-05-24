@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 
-import { Mockup } from "./Mockup";
+import { App } from "./App";
 import "./styles.css";
 
 const root = createRoot(document.getElementById("root")!);
-root.render(<Mockup />);
+root.render(<App />);
