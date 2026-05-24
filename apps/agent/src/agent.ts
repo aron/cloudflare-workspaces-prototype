@@ -22,7 +22,7 @@ import { tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
-import { Workspace } from "@cloudflare/workspace";
+import { Workspace, R2Bucket as R2Mount } from "@cloudflare/workspace";
 
 import {
   createEditTool,
@@ -43,12 +43,14 @@ import { WorkerDeployer } from "./worker/deploy.js";
 import type { DeployResult } from "./worker/deploy.js";
 import { parseFetchCall, fetchAgainstWorker } from "./worker/fetch.js";
 import type { FetchToolResult, ParsedFetch } from "./worker/fetch.js";
-import { buildSystemPrompt } from "./system-prompt.js";
+import { buildSystemPrompt, type Skill } from "./system-prompt.js";
+import { discoverSkills } from "./skills.js";
 
 export { WorkerDeployer, parseFetchCall, fetchAgainstWorker };
 export type { DeployResult, FetchToolResult, ParsedFetch };
 
-const WORKSPACE = "/workspace";
+const WORKSPACE   = "/workspace";
+const SKILLS_PATH = "/workspace/.agents/skills";
 
 
 export class Agent extends Think<Env> {
@@ -73,6 +75,9 @@ export class Agent extends Think<Env> {
   /** Lazily-constructed deployer for worker_deploy. */
   private _deployer?: WorkerDeployer;
 
+  /** Cached skill metadata enumerated in the system prompt. */
+  private _skills: Skill[] = [];
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.workspace = new Workspace({
@@ -80,8 +85,24 @@ export class Agent extends Think<Env> {
       sandbox:   this.env.Sandbox,
       sessionId: this.name,
       resolveSessionId: (id) => resolveContainerId(this.env, id),
+      // R2-backed mount of the shared skills bucket. The agent reads
+      // SKILL.md bodies through this mount via the normal `read` tool;
+      // discovery below indexes the metadata for the system prompt.
+      mounts: this.env.SKILLS
+        ? { [SKILLS_PATH]: R2Mount(this.env.SKILLS) }
+        : {},
     });
-    this.ctx.blockConcurrencyWhile(async () => { await this.workspace.mkdir(WORKSPACE); });
+    this.ctx.blockConcurrencyWhile(async () => {
+      await this.workspace.mkdir(WORKSPACE);
+      // Index the skills mount once at construction so getSystemPrompt()
+      // stays synchronous and never serves an empty <available_skills>
+      // block after a cold start.
+      try {
+        this._skills = await discoverSkills(this.workspace);
+      } catch {
+        this._skills = [];
+      }
+    });
   }
 
   private get deployer(): WorkerDeployer {
@@ -105,7 +126,7 @@ export class Agent extends Think<Env> {
    * loaded on demand via the read tool.
    */
   override getSystemPrompt(): string {
-    return buildSystemPrompt({ cwd: WORKSPACE });
+    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills });
   }
 
   /**

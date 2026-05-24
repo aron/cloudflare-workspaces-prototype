@@ -7,6 +7,9 @@
 
   "ai": { "binding": "AI", "remote": true },
   "worker_loaders": [{ "binding": "LOADER" }],
+  "r2_buckets": [
+    { "binding": "SKILLS", "bucket_name": "hackspace-skills" }
+  ],
 
   "assets": {
     "directory": "../frontend/dist",

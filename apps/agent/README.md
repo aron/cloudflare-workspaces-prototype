@@ -41,6 +41,26 @@ cp .dev.vars.example .dev.vars
 Behind a TLS-intercepting corporate proxy? Drop your root CA into
 `sandbox/your-ca.crt` — see [`sandbox/README.md`](./sandbox/README.md).
 
+### Skills bucket
+
+The agent enumerates skills from an R2 bucket bound as `SKILLS` and
+mounts them at `/workspace/.agents/skills/`. Each skill is a directory
+containing a `SKILL.md` (Agent-Skills front-matter with `name` and
+`description`) plus any sibling files it references.
+
+Source-of-truth skills live in `apps/agent/skills/`. Sync them to R2
+with:
+
+```sh
+wrangler r2 bucket create hackspace-skills          # one-time, per env
+wrangler r2 bucket create hackspace-skills-test     # for the test suite
+npm run skills:sync                                  # remote prod bucket
+npm run skills:sync:local                            # local miniflare bucket
+```
+
+Add a new skill by creating `apps/agent/skills/<name>/SKILL.md` and
+re-running `npm run skills:sync`. No redeploy required.
+
 ## Run locally
 
 ```sh

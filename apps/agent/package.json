@@ -9,7 +9,9 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test":      "vitest run && vitest run --config tests/agent-suite/vitest.config.ts",
-    "test:e2e":  "vitest run --config vitest.e2e.config.ts"
+    "test:e2e":  "vitest run --config vitest.e2e.config.ts",
+    "skills:sync":       "node scripts/sync-skills.mjs",
+    "skills:sync:local": "node scripts/sync-skills.mjs --local"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.64",
