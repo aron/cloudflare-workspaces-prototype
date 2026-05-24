@@ -15,7 +15,8 @@ import { switchPort } from "@cloudflare/containers";
 import { newWebSocketRpcSession } from "capnweb";
 
 import { Vfs } from "./vfs.js";
-import type { Mount } from "./mounts/index.js";
+import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
+import { asFactory } from "./mounts/index.js";
 import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
 
 export interface WorkspaceOptions {
@@ -40,7 +41,7 @@ export interface WorkspaceOptions {
    * file content is fetched per-file the first time something reads it.
    * Writes anywhere under a mount root throw EROFS.
    */
-  mounts?: Record<string, Mount>;
+  mounts?: Record<string, MountInput>;
 }
 
 const WATERMARK_TABLE = `
@@ -91,11 +92,16 @@ export class Workspace {
     // Anything in the table that no longer matches the configured mount kind
     // (or is no longer configured at all) gets its subtree wiped — we'll
     // re-index on demand.
+    // Realize every factory once, with the session context, so the rest of
+    // the constructor (and the reconcile loop below) sees concrete Mounts.
+    // Factories are cheap — they just close over options; expensive work
+    // (list, fork, clone) is deferred to ensureMountsIndexed().
     const configured = new Map<string, Mount>();
-    for (const [rawRoot, mount] of Object.entries(opts.mounts ?? {})) {
+    for (const [rawRoot, input] of Object.entries(opts.mounts ?? {})) {
       const root = normalizeMountRoot(rawRoot);
       if (configured.has(root)) throw new Error(`duplicate mount root: ${root}`);
-      configured.set(root, mount);
+      const ctx: MountContext = { sessionId: opts.sessionId, root, vfs: this.vfs };
+      configured.set(root, asFactory(input)(ctx));
     }
     // Reject overlapping mounts (one root being a prefix of another).
     const roots = [...configured.keys()];
@@ -399,19 +405,36 @@ export class Workspace {
     this.indexingPromise = (async () => {
       for (const root of pending) {
         const mount = this.configuredMounts.get(root)!;
-        const entries = await mount.list();
         const dirMode  = mount.writable ? 0o40755  : 0o40555;
         const fileMode = mount.writable ? 0o100644 : 0o100444;
-        // Ensure the root itself exists as a directory.
+        // Ensure the root itself exists as a directory before any work begins.
         this.vfs.mkdir(root, dirMode, root);
-        for (const entry of entries) {
-          const abs = root + "/" + entry.relPath;
-          if (entry.type === "dir") {
-            this.vfs.mkdir(abs, dirMode, root);
-          } else {
-            this.vfs.writeStub(abs, fileMode, entry.mtime ?? Date.now(), root, entry.size ?? null);
+
+        if (mount.strategy === "eager") {
+          // Eager mount: hand the mount a write API and let it materialize the
+          // whole tree itself. The VFS holds real content (no stubs) when done.
+          const api: MountWriteApi = {
+            writeFile: (abs, bytes, mode) => {
+              this.vfs.writeFile(abs, bytes, mode ?? fileMode, root);
+            },
+            mkdir: (abs, mode) => {
+              this.vfs.mkdir(abs, mode ?? dirMode, root);
+            },
+          };
+          await mount.materialize(api);
+        } else {
+          // Lazy mount: list + write stubs. Content fetched per-file on read.
+          const entries = await mount.list();
+          for (const entry of entries) {
+            const abs = root + "/" + entry.relPath;
+            if (entry.type === "dir") {
+              this.vfs.mkdir(abs, dirMode, root);
+            } else {
+              this.vfs.writeStub(abs, fileMode, entry.mtime ?? Date.now(), root, entry.size ?? null);
+            }
           }
         }
+
         this.mountIndexed.set(root, true);
         this.sql.exec(
           `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`, root,
@@ -433,6 +456,11 @@ export class Workspace {
     if (!root) return Promise.resolve();
     const mount = this.configuredMounts.get(root);
     if (!mount) throw new Error(`mount not configured for root: ${root}`);
+    // Eager mounts materialize everything during indexing — a remaining stub
+    // here means the file was deleted from the backing store between indexing
+    // and this read, or the eager materialize() returned without writing it.
+    // Either way there's nothing left to fetch.
+    if (mount.strategy === "eager") return Promise.resolve();
     const relPath = path.slice(root.length + 1);
     const p = (async () => {
       const bytes = await mount.fetch(relPath);

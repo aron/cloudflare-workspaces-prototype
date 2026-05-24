@@ -30,6 +30,7 @@ import {
   createWriteTool,
   WorkspaceFileStore,
 } from "@cloudflare/fs-tools";
+import { createGitCloneTool } from "@cloudflare/git-tools";
 import {
   createBraveSearchProvider,
   createWebFetchTool,
@@ -367,6 +368,14 @@ export class Agent extends Think<Env> {
         },
       })),
 
+      ...pick("gitClone", createGitCloneTool({
+        workspace: {
+          sessionId: this.name,
+          vfs:       ws.vfs,
+          mkdir:     (p) => ws.mkdir(p),
+        },
+        artifacts: this.env.Artifacts,
+      })),
 
       ...pick("worker_deploy", tool({
         description:

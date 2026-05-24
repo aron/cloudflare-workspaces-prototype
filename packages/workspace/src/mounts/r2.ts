@@ -1,15 +1,16 @@
 /**
- * R2-backed implementation of `Mount`.
+ * R2-backed implementation of `Mount` (lazy strategy).
  *
  * Lists every object under `prefix` once (paginated via R2's `cursor`),
  * synthesizes a directory tree from the slash-delimited keys, and fetches
- * file bytes one object at a time via `binding.get(key)`.
+ * file bytes one object at a time via `binding.get(key)`. File content is
+ * stubbed into the VFS at index time and hydrated per-file on demand.
  *
  * The factory takes the live R2Bucket binding from the Worker's env, so the
  * caller is responsible for declaring the binding in wrangler.jsonc.
  */
 
-import type { Mount, MountEntry } from "./index.js";
+import type { LazyMount, MountEntry, MountFactory } from "./index.js";
 
 export interface R2MountOptions {
   /**
@@ -27,7 +28,7 @@ export interface R2MountOptions {
 }
 
 /**
- * Build a `Mount` backed by an R2 bucket binding.
+ * Build a mount factory backed by an R2 bucket binding.
  *
  * @example
  *   mounts: {
@@ -35,71 +36,74 @@ export interface R2MountOptions {
  *     "/workspace/scratch":        R2Bucket(env.SCRATCH,      { mode: "read-write" }),
  *   }
  */
-export function R2Bucket(binding: R2Bucket, opts: R2MountOptions = {}): Mount {
+export function R2Bucket(binding: R2Bucket, opts: R2MountOptions = {}): MountFactory {
   const prefix   = normalizePrefix(opts.prefix ?? "");
   const writable = opts.mode === "read-write";
 
-  const mount: Mount = {
-    kind: "r2",
-    writable,
+  return (_ctx) => {
+    const mount: LazyMount = {
+      kind: "r2",
+      strategy: "lazy",
+      writable,
 
-    async list(): Promise<MountEntry[]> {
-      const entries  = new Map<string, MountEntry>();   // relPath -> entry
-      const dirs     = new Set<string>();
-      let cursor: string | undefined;
+      async list(): Promise<MountEntry[]> {
+        const entries  = new Map<string, MountEntry>();   // relPath -> entry
+        const dirs     = new Set<string>();
+        let cursor: string | undefined;
 
-      // Paginate. R2's list() returns up to 1000 objects per page.
-      // `truncated` flips to false on the final page.
-      while (true) {
-        const page: R2Objects = await binding.list({ prefix, cursor, limit: 1000 });
-        for (const obj of page.objects) {
-          if (!obj.key.startsWith(prefix)) continue;
-          const relPath = obj.key.slice(prefix.length);
-          if (!relPath || relPath.endsWith("/")) continue;  // skip directory markers
+        // Paginate. R2's list() returns up to 1000 objects per page.
+        // `truncated` flips to false on the final page.
+        while (true) {
+          const page: R2Objects = await binding.list({ prefix, cursor, limit: 1000 });
+          for (const obj of page.objects) {
+            if (!obj.key.startsWith(prefix)) continue;
+            const relPath = obj.key.slice(prefix.length);
+            if (!relPath || relPath.endsWith("/")) continue;  // skip directory markers
 
-          entries.set(relPath, {
-            relPath,
-            type:  "file",
-            size:  obj.size,
-            mtime: obj.uploaded ? obj.uploaded.getTime() : undefined,
-          });
+            entries.set(relPath, {
+              relPath,
+              type:  "file",
+              size:  obj.size,
+              mtime: obj.uploaded ? obj.uploaded.getTime() : undefined,
+            });
 
-          // Synthesize parent directories from path segments.
-          const parts = relPath.split("/");
-          for (let i = 1; i < parts.length; i++) {
-            dirs.add(parts.slice(0, i).join("/"));
+            // Synthesize parent directories from path segments.
+            const parts = relPath.split("/");
+            for (let i = 1; i < parts.length; i++) {
+              dirs.add(parts.slice(0, i).join("/"));
+            }
           }
+          if (!page.truncated) break;
+          cursor = page.cursor;
+          if (!cursor) break;
         }
-        if (!page.truncated) break;
-        cursor = page.cursor;
-        if (!cursor) break;
-      }
 
-      for (const dir of dirs) {
-        if (!entries.has(dir)) entries.set(dir, { relPath: dir, type: "dir" });
-      }
-      return [...entries.values()];
-    },
+        for (const dir of dirs) {
+          if (!entries.has(dir)) entries.set(dir, { relPath: dir, type: "dir" });
+        }
+        return [...entries.values()];
+      },
 
-    async fetch(relPath: string): Promise<Uint8Array> {
-      const key  = prefix + relPath;
-      const obj  = await binding.get(key);
-      if (!obj) throw new Error(`R2 object not found: ${key}`);
-      const buf  = await obj.arrayBuffer();
-      return new Uint8Array(buf);
-    },
+      async fetch(relPath: string): Promise<Uint8Array> {
+        const key  = prefix + relPath;
+        const obj  = await binding.get(key);
+        if (!obj) throw new Error(`R2 object not found: ${key}`);
+        const buf  = await obj.arrayBuffer();
+        return new Uint8Array(buf);
+      },
+    };
+
+    if (writable) {
+      mount.put = async (relPath: string, bytes: Uint8Array): Promise<void> => {
+        await binding.put(prefix + relPath, bytes);
+      };
+      mount.delete = async (relPath: string): Promise<void> => {
+        await binding.delete(prefix + relPath);
+      };
+    }
+
+    return mount;
   };
-
-  if (writable) {
-    mount.put = async (relPath: string, bytes: Uint8Array): Promise<void> => {
-      await binding.put(prefix + relPath, bytes);
-    };
-    mount.delete = async (relPath: string): Promise<void> => {
-      await binding.delete(prefix + relPath);
-    };
-  }
-
-  return mount;
 }
 
 function normalizePrefix(p: string): string {

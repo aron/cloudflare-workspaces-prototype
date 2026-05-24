@@ -11,6 +11,10 @@
     { "binding": "SKILLS", "bucket_name": "hackspace-skills" }
   ],
 
+  "artifacts": [
+    { "binding": "Artifacts", "namespace": "default" }
+  ],
+
   "assets": {
     "directory": "../frontend/dist",
     "not_found_handling": "single-page-application",

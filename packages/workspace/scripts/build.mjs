@@ -34,6 +34,12 @@ const common = {
     "@cloudflare/sandbox",
     "@cloudflare/containers",
     "capnweb",
+    // isomorphic-git pulls in a small zoo of CommonJS transitive deps
+    // (crc-32, clean-git-ref, diff3, inherits, sha.js). Marking external
+    // means the consumer Worker gets one resolved copy via nodejs_compat
+    // instead of esbuild trying (and failing) to bundle them under
+    // platform:neutral.
+    "isomorphic-git",
   ],
 };
 
@@ -51,6 +57,11 @@ await build({
   ...common,
   entryPoints: [join(src, "shared/index.ts")],
   outfile:     join(dist, "shared.js"),
+});
+await build({
+  ...common,
+  entryPoints: [join(src, "git.ts")],
+  outfile:     join(dist, "git.js"),
 });
 
 // container-sandbox runs in Node inside the @cloudflare/sandbox image —

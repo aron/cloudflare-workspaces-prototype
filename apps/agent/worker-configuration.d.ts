@@ -8,6 +8,7 @@ declare namespace Cloudflare {
     AI:             Ai;
     LOADER:         WorkerLoader;
     SKILLS:         R2Bucket;
+    Artifacts:      import("@cloudflare/workspace/git").ArtifactsBinding;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
     BRAVE_API_KEY?:  string;
