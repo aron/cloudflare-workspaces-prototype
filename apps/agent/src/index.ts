@@ -30,6 +30,12 @@ export default {
       return handleRoomRequest(request, env, identity);
     }
 
+    // /api/threads/:threadId/summary — proxied to the Agent DO that owns
+    // the thread. The DO uses Kimi to produce a one‑or‑two sentence recap.
+    if (url.pathname.startsWith("/api/threads/")) {
+      return handleThreadRequest(request, env, identity);
+    }
+
 
     // /debug/<sessionId>/exec|env|logs
     if (url.pathname.startsWith("/debug/")) {
@@ -158,5 +164,27 @@ function handleRoomRequest(
   const inner = new URL(request.url);
   inner.pathname = "/" + parts.slice(1).join("/");
   const stub = env.Room.get(env.Room.idFromName(id));
+  return stub.fetch(withIdentity(new Request(inner, request), identity));
+}
+
+/**
+ * Forward to the Agent DO that owns a thread. URL shape:
+ * `/api/threads/:threadId/<path>` → `/<path>` on the DO. The threadId is
+ * also the Agent DO's name, so we resolve it directly.
+ */
+function handleThreadRequest(
+  request:  Request,
+  env:      Env,
+  identity: AccessIdentity,
+): Promise<Response> {
+  const url   = new URL(request.url);
+  const parts = url.pathname.slice("/api/threads/".length).split("/");
+  const id    = parts[0];
+  if (!id) {
+    return Promise.resolve(new Response("missing thread id", { status: 400 }));
+  }
+  const inner = new URL(request.url);
+  inner.pathname = "/" + parts.slice(1).join("/");
+  const stub = env.Agent.get(env.Agent.idFromName(id));
   return stub.fetch(withIdentity(new Request(inner, request), identity));
 }

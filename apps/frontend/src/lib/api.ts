@@ -104,3 +104,18 @@ export function openRoomSocket(roomId: string): WebSocket {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(`${proto}//${window.location.host}/api/rooms/${roomId}/ws`);
 }
+
+// ---- /api/threads/:id ----
+
+/**
+ * Fetch a one‑or‑two sentence Kimi‑generated recap of a thread. The Agent
+ * DO caches by message count, so calling this repeatedly is cheap.
+ * Returns an empty string when the thread has nothing summarisable yet.
+ */
+export async function fetchThreadSummary(threadId: string): Promise<string> {
+  const body = await jsonOrThrow<{ summary: string }>(
+    await fetch(`/api/threads/${threadId}/summary`, OPTS),
+    `GET /api/threads/${threadId}/summary`,
+  );
+  return body.summary;
+}

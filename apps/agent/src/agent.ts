@@ -18,7 +18,7 @@
  * set by default — fill in per use case).
  */
 import { Think } from "@cloudflare/think";
-import { tool } from "ai";
+import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
@@ -210,8 +210,20 @@ export class Agent extends Think<Env> {
     if (typeof message === "string") {
       const author = (connection.state as { author?: ChatAuthor } | null)?.author ?? null;
       message = stampChatFrame(message, author);
+      // A user reply arrived — arm the background summary tick. Idempotent,
+      // so multiple frames in quick succession collapse onto one schedule.
+      this.ctx.waitUntil(this.kickSummary());
     }
     return super.onMessage(connection, message);
+  }
+
+  /**
+   * Fires after a chat turn completes and the assistant message has been
+   * persisted. We use it to refresh the thread summary so the room view's
+   * preview reflects what the agent just said.
+   */
+  override onChatResponse(): void {
+    this.ctx.waitUntil(this.kickSummary());
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -231,6 +243,10 @@ export class Agent extends Think<Env> {
         entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
+    }
+
+    if (request.method === "GET" && url.pathname.endsWith("/summary")) {
+      return this.handleSummary();
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/reset")) {
@@ -258,6 +274,9 @@ export class Agent extends Think<Env> {
         // we trust the caller (Room) to send a well-formed AppMessage.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await this.saveMessages([message as any]);
+        // Seeding counts as a new message — arm the summary tick. The
+        // assistant's reply will arm another one when its turn completes.
+        this.ctx.waitUntil(this.kickSummary());
       }
       return Response.json({ ok: true, seeded: !alreadySeeded });
     }
@@ -469,6 +488,101 @@ export class Agent extends Think<Env> {
       parts: [{ type: "text", text }]
     });
   }
+
+  // ── Thread summary (background) ────────────────────────────────
+  //
+  // The room view renders a one- or two-sentence summary under each
+  // threaded message so users can skim discussions without opening the
+  // thread. We always use the Workers AI Kimi model for this so summaries
+  // stay consistent (and cheap) even when the chat model is OpenAI.
+  //
+  // The summary is produced by a *background* scheduled task, not on the
+  // request hot path. New activity (user message, assistant turn, seed)
+  // calls `kickSummary()`, which idempotently schedules a debounced tick.
+  // The tick generates a summary if messages have changed and then
+  // exits — it does *not* reschedule itself. Old threads that nobody
+  // touches simply stop ticking. The `/summary` endpoint is a pure read
+  // of the cached value.
+
+  /** Debounce window between a new message and the summary tick. */
+  private static readonly SUMMARY_DEBOUNCE_SEC = 8;
+
+  /** Cached summary blob persisted to storage so it survives eviction. */
+  private static readonly SUMMARY_STORAGE_KEY = "thread-summary";
+
+  /** Returns the cached summary. Pure read — never calls the model. */
+  private async handleSummary(): Promise<Response> {
+    const cached = await this.ctx.storage.get<{ count: number; text: string }>(
+      Agent.SUMMARY_STORAGE_KEY,
+    );
+    return Response.json({
+      summary: cached?.text ?? "",
+      count:   cached?.count ?? 0,
+    }, { headers: { "cache-control": "no-store" } });
+  }
+
+  /**
+   * Mark the thread as active and (re)arm the background summary tick.
+   * Idempotent: rapid-fire messages collapse onto the same scheduled row,
+   * so a burst of replies still produces one summary run.
+   */
+  private async kickSummary(): Promise<void> {
+    try {
+      await this.schedule(
+        Agent.SUMMARY_DEBOUNCE_SEC,
+        "runSummary" as keyof this,
+        undefined,
+        { idempotent: true },
+      );
+    } catch {
+      // Scheduling is best-effort. A missed tick just delays the
+      // summary until the next message kicks it again.
+    }
+  }
+
+  /**
+   * Scheduled callback: generate a summary if the message count has
+   * advanced since the last run. Exits without rescheduling — the next
+   * message will arm a fresh tick via `kickSummary()`. This is how
+   * idle threads stop consuming model calls.
+   */
+  async runSummary(): Promise<void> {
+    const count = this.messages.length;
+    if (count === 0) return;
+
+    const cached = await this.ctx.storage.get<{ count: number; text: string }>(
+      Agent.SUMMARY_STORAGE_KEY,
+    );
+    if (cached && cached.count === count) return;
+
+    const transcript = renderTranscriptForSummary(this.messages);
+    if (!transcript) {
+      await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, { count, text: "" });
+      return;
+    }
+
+    try {
+      const kimi = createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+      const { text } = await generateText({
+        model: kimi,
+        system:
+          "You summarise short chat threads for a sidebar preview. Reply with one " +
+          "or two plain sentences. The first sentence states the overall topic. " +
+          "Add a second sentence only if the current status (resolved, blocked, " +
+          "in progress, awaiting input) is worth surfacing. No greetings, no " +
+          "bullet points, no markdown.",
+        prompt: transcript,
+      });
+      await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, {
+        count,
+        text: text.trim(),
+      });
+    } catch {
+      // Swallow — the next message will trigger another attempt. We
+      // intentionally don't overwrite the cached summary on failure so
+      // a transient model error doesn't blank out a usable preview.
+    }
+  }
 }
 /**
  * SubAgent — a Think DO that the top-level `Agent` can spawn via
@@ -496,4 +610,37 @@ export class SubAgent extends Think<Env> {
     // Agent) so the child can read it without any extra glue.
     return parent.whoAmI();
   }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Render a thread's chat history as a plain transcript for summarisation.
+ *
+ * Strips reasoning/thinking parts and tool calls/results — the summary
+ * cares about what the humans and the agent *said*, not the machinery
+ * the agent used to get there. Only `text` parts survive.
+ *
+ * Returns an empty string when there is nothing substantive to summarise.
+ */
+export function renderTranscriptForSummary(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  messages: ReadonlyArray<any>,
+): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    if (m?.role !== "user" && m?.role !== "assistant") continue;
+    const parts = Array.isArray(m.parts) ? m.parts : [];
+    const text = parts
+      .filter((p: { type?: unknown }) => p && p.type === "text")
+      .map((p: { text?: unknown }) => (typeof p.text === "string" ? p.text : ""))
+      .join("")
+      .trim();
+    if (!text) continue;
+    const speaker = m.role === "user"
+      ? (m.metadata?.author?.name ?? "User")
+      : "Agent";
+    lines.push(`${speaker}: ${text}`);
+  }
+  return lines.join("\n");
 }

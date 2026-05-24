@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ChevronRight,
+  Sparkles,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import { MentionTextarea } from "@/components/MentionTextarea";
 import {
   fetchRoomMeta,
   fetchRoomMessages,
+  fetchThreadSummary,
   openRoomSocket,
   postRoomMessage,
 } from "@/lib/api";
@@ -231,7 +233,28 @@ function TopLevelMessage({
   const name = authorName(message);
   const idx  = authorIdx(authorKey(message));
   const text = message.parts.filter(p => p.type === "text").map(p => p.text).join("\n");
-  const hasThread = Boolean(message.metadata.threadId);
+  const threadId = message.metadata.threadId;
+  const hasThread = Boolean(threadId);
+  const [summary, setSummary] = useState<string>("");
+
+  // The summary is produced by a background task on the Agent DO, so the
+  // UI is purely a reader of the cached value. We fetch on mount, refetch
+  // when `active` flips (user navigated back from the thread), and poll
+  // slowly so a freshly-generated summary appears without a page reload.
+  // The endpoint is a cheap storage read — no model call — so the poll is
+  // effectively free.
+  useEffect(() => {
+    if (!threadId) return;
+    let cancelled = false;
+    const load = () => {
+      fetchThreadSummary(threadId)
+        .then(s => { if (!cancelled) setSummary(s); })
+        .catch(() => { /* swallow — summary is best-effort */ });
+    };
+    load();
+    const id = window.setInterval(load, 15_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [threadId, active]);
 
   return (
     <div className={`group rounded-lg px-3 py-3 transition-colors ${
@@ -249,10 +272,16 @@ function TopLevelMessage({
           <div className="mt-1 whitespace-pre-wrap text-base leading-6 text-kumo-default">
             <MentionText text={text} />
           </div>
+          {hasThread && summary && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-kumo-line/60 bg-kumo-base/40 px-3 py-2 text-sm leading-5 text-kumo-default">
+              <Sparkles size={13} strokeWidth={2} className="mt-0.5 flex-shrink-0 text-kumo-brand" />
+              <span className="min-w-0">{summary}</span>
+            </div>
+          )}
           {hasThread && (
             <button
               onClick={onOpenThread}
-              className={`mt-3 flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+              className={`mt-2 flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
                 active
                   ? "border-kumo-line bg-kumo-base"
                   : "border-transparent hover:border-kumo-line hover:bg-kumo-base"
