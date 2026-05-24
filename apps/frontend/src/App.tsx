@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 
 import { RoomPicker } from "./components/RoomPicker";
 import { RoomShell } from "./components/RoomShell";
-import { RoomTimelinePlaceholder } from "./components/RoomTimelinePlaceholder";
+import { RoomTimeline } from "./components/RoomTimeline";
 import { fetchMe, type Me } from "./lib/api";
 import { useRoute } from "./lib/nav";
 
@@ -48,7 +48,7 @@ export function App() {
     case "room":
       return (
         <RoomShell me={me} roomId={route.roomId}
-                   centre={<RoomTimelinePlaceholder roomId={route.roomId} />} />
+                   centre={<RoomTimeline roomId={route.roomId} />} />
       );
 
     case "thread":
@@ -57,7 +57,7 @@ export function App() {
           me={me}
           roomId={route.roomId}
           threadId={route.threadId}
-          centre={<RoomTimelinePlaceholder roomId={route.roomId} />}
+          centre={<RoomTimeline roomId={route.roomId} activeThreadId={route.threadId} />}
           thread={(
             <div className="flex h-full items-center justify-center text-sm text-kumo-inactive">
               Thread panel coming online — next commit wires useAgentChat.
