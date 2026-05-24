@@ -27,6 +27,7 @@
     "bindings": [
       { "class_name": "Agent",    "name": "Agent"    },
       { "class_name": "AppDO",    "name": "AppDO"    },
+      { "class_name": "RoomDO",   "name": "RoomDO"   },
       { "class_name": "Sandbox",  "name": "Sandbox"  },
       { "class_name": "WarmPool", "name": "WarmPool" }
     ]
@@ -35,7 +36,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Agent", "Sandbox"] },
     { "tag": "v2", "new_sqlite_classes": ["WarmPool"] },
-    { "tag": "v3", "new_sqlite_classes": ["AppDO"] }
+    { "tag": "v3", "new_sqlite_classes": ["AppDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["RoomDO"] }
   ],
 
   // Cron trigger — primes the warm pool so its alarm loop starts on deploy.

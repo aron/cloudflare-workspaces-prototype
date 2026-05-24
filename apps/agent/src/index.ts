@@ -5,9 +5,10 @@ import { PERSONAS, DEFAULT_PERSONA } from "./personas/index.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { AppDO, APP_DO_NAME } from "./app-do.js";
-import { resolveIdentity, withIdentity } from "./identity.js";
+import { RoomDO } from "./room-do.js";
+import { resolveIdentity, withIdentity, type AccessIdentity } from "./identity.js";
 
-export { Agent, AppDO, Sandbox, WarmPool };
+export { Agent, AppDO, RoomDO, Sandbox, WarmPool };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -22,13 +23,12 @@ export default {
 
     // /api/app/* — proxied to the singleton AppDO with identity attached.
     if (url.pathname.startsWith("/api/app/")) {
-      const id   = env.AppDO.idFromName(APP_DO_NAME);
-      const stub = env.AppDO.get(id);
-      // Rewrite path so the DO sees a clean URL (drop the /api/app prefix).
-      const innerUrl = new URL(request.url);
-      innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
-      const inner = new Request(innerUrl, request);
-      return stub.fetch(withIdentity(inner, identity));
+      return handleAppRequest(request, env, identity);
+    }
+
+    // /api/rooms/:id/...  — proxied to the per-room DO.
+    if (url.pathname.startsWith("/api/rooms/")) {
+      return handleRoomRequest(request, env, identity);
     }
 
 
@@ -96,6 +96,7 @@ export default {
     }
 
     // Agent WebSocket connections and RPC calls
+
     const agentResponse = await routeAgentRequest(request, env);
     if (agentResponse) return agentResponse;
 
@@ -110,3 +111,63 @@ export default {
     await primePool(env);
   },
 } satisfies ExportedHandler<Env>;
+
+// ---- helpers ----
+
+/**
+ * Forward to the singleton AppDO. When a room is created we also seed the
+ * corresponding RoomDO so the client can talk to it immediately.
+ */
+async function handleAppRequest(
+  request:  Request,
+  env:      Env,
+  identity: AccessIdentity,
+): Promise<Response> {
+  const url      = new URL(request.url);
+  const innerUrl = new URL(request.url);
+  innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
+  const inner = new Request(innerUrl, request);
+  const stub  = env.AppDO.get(env.AppDO.idFromName(APP_DO_NAME));
+  const res   = await stub.fetch(withIdentity(inner, identity));
+
+  // Side-effect: when AppDO creates a room, init the RoomDO so /api/rooms/:id
+  // is immediately usable. We don't fail the response if init fails — the
+  // room row exists, the client can retry.
+  if (res.status === 201 && url.pathname.endsWith("/rooms") && request.method === "POST") {
+    const cloned = res.clone();
+    const body   = await cloned.json().catch(() => null) as { room?: { id: string; name: string; createdBy: string } } | null;
+    if (body?.room) {
+      const roomStub = env.RoomDO.get(env.RoomDO.idFromName(body.room.id));
+      await roomStub.fetch(withIdentity(
+        new Request("https://room/init", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          body:    JSON.stringify(body.room),
+        }),
+        identity,
+      )).catch(() => undefined);
+    }
+  }
+  return res;
+}
+
+/**
+ * Forward to a per-room DO. URL shape: `/api/rooms/:id/<path>` → `/<path>`.
+ * WebSocket upgrades are passed through transparently.
+ */
+function handleRoomRequest(
+  request:  Request,
+  env:      Env,
+  identity: AccessIdentity,
+): Promise<Response> {
+  const url   = new URL(request.url);
+  const parts = url.pathname.slice("/api/rooms/".length).split("/");
+  const id    = parts[0];
+  if (!id) {
+    return Promise.resolve(new Response("missing room id", { status: 400 }));
+  }
+  const inner = new URL(request.url);
+  inner.pathname = "/" + parts.slice(1).join("/");
+  const stub = env.RoomDO.get(env.RoomDO.idFromName(id));
+  return stub.fetch(withIdentity(new Request(inner, request), identity));
+}

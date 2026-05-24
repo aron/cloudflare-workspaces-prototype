@@ -2,6 +2,7 @@ declare namespace Cloudflare {
   interface Env {
     Agent:          DurableObjectNamespace<import("./src/agent").Agent>;
     AppDO:          DurableObjectNamespace<import("./src/app-do").AppDO>;
+    RoomDO:         DurableObjectNamespace<import("./src/room-do").RoomDO>;
     Sandbox:        DurableObjectNamespace<import("@cloudflare/sandbox").Sandbox>;
     WarmPool:       DurableObjectNamespace<import("./src/warm-pool").WarmPool>;
     AI:             Ai;

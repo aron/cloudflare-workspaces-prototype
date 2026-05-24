@@ -1,0 +1,20 @@
+{
+  // Stripped-down wrangler config for vitest-pool-workers. Only the bindings
+  // that test fixtures actually need — no containers, no AI, no LOADER.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-workspaces-prototype-test",
+  "main": "tests/_worker.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "AppDO",  "name": "AppDO"  },
+      { "class_name": "RoomDO", "name": "RoomDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AppDO", "RoomDO"] }
+  ]
+}
