@@ -8,9 +8,9 @@
     "predeploy": "bash sandbox/sync-host-ca.sh && npm run build --workspace=@cloudflare/workspace && npm run build --workspace=@app/frontend",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test":      "vitest run && vitest run --config tests/agent-suite/vitest.config.ts",
-    "test:e2e":  "vitest run --config vitest.e2e.config.ts",
-    "skills:sync":       "node scripts/sync-skills.mjs",
+    "test": "vitest run && vitest run --config tests/agent-suite/vitest.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "skills:sync": "node scripts/sync-skills.mjs",
     "skills:sync:local": "node scripts/sync-skills.mjs --local"
   },
   "dependencies": {
@@ -28,6 +28,7 @@
     "acorn": "^8.16.0",
     "agents": "^0.13.2",
     "ai": "^6.0.188",
+    "hono": "^4.12.22",
     "jose": "^6.2.3",
     "workers-ai-provider": "^3.1.14",
     "zod": "^4.4.3"

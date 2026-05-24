@@ -1,3 +1,4 @@
+import { Hono } from "hono";
 import { routeAgentRequest } from "agents";
 import { Agent, SubAgent } from "./agent.js";
 import { Sandbox, getSandbox } from "@cloudflare/sandbox";
@@ -9,120 +10,36 @@ import { resolveIdentity, withIdentity, type AccessIdentity } from "./identity.j
 
 export { Agent, SubAgent, App, Room, Sandbox, WarmPool };
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    // Resolve identity for every request. Access is required in prod; local
-    // dev falls back to ACCESS_DEV_USER (or a hardcoded local identity).
-    const identity = await resolveIdentity(request, env);
-    if (!identity) {
-      return new Response("Access denied", { status: 401 });
-    }
+type Variables = { identity: AccessIdentity };
 
-    const url = new URL(request.url);
+const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-    // /api/app/* — proxied to the singleton App with identity attached.
-    if (url.pathname.startsWith("/api/app/")) {
-      return handleAppRequest(request, env, identity);
-    }
+// ---- middleware ----------------------------------------------------------
+//
+// Resolve Access identity once per request. Access is required in prod;
+// local dev falls back to ACCESS_DEV_USER (or a hardcoded local identity).
+app.use("*", async (c, next) => {
+  const identity = await resolveIdentity(c.req.raw, c.env);
+  if (!identity) {
+    return c.text("Access denied", 401);
+  }
+  c.set("identity", identity);
+  await next();
+});
 
-    // /api/rooms/:id/...  — proxied to the per-room DO.
-    if (url.pathname.startsWith("/api/rooms/")) {
-      return handleRoomRequest(request, env, identity);
-    }
-
-    // /api/threads/:threadId/summary — proxied to the Agent DO that owns
-    // the thread. The DO uses Kimi to produce a one‑or‑two sentence recap.
-    if (url.pathname.startsWith("/api/threads/")) {
-      return handleThreadRequest(request, env, identity);
-    }
-
-
-    // /debug/<sessionId>/exec|env|logs
-    if (url.pathname.startsWith("/debug/")) {
-      const parts = url.pathname.slice("/debug/".length).split("/");
-      const sessionId = parts[0];
-      const cmd       = parts[1];
-      if (!sessionId) return new Response("missing session id", { status: 400 });
-
-      // Resolve the caller-provided session id through the warm pool so we
-      // hit the same container the agent uses.
-      const containerId = await resolveContainerId(env, sessionId);
-      const sb = getSandbox(env.Sandbox, containerId);
-
-      if (cmd === "exec" && request.method === "POST") {
-        const { command, cwd } = await request.json() as { command: string; cwd?: string };
-        const result = await sb.exec(command, { cwd });
-        return Response.json(result);
-      }
-
-      if (cmd === "env") {
-        const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] = await Promise.all([
-          sb.exec("zig version"),
-          sb.exec("go version"),
-          sb.exec("node --version"),
-          sb.exec("esbuild --version"),
-          sb.exec("wrangler --version"),
-          sb.exec("uname -a"),
-          sb.exec("cat /proc/mounts | grep fuse || echo no-fuse"),
-          sb.exec("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
-        ]);
-        return Response.json({ zig, go, node, esbuild, wrangler, uname, mounts, fuse });
-      }
-
-      if (cmd === "logs") {
-        const file = await sb.readFile("/tmp/server.log");
-        return new Response(file?.content ?? "(no log file yet)", { headers: { "content-type": "text/plain" } });
-      }
-
-      // Forward agent-level debug routes (messages, vfs, reset) to the DO's onRequest().
-      if (cmd === "messages" || cmd === "vfs" || cmd === "reset") {
-        const id   = env.Agent.idFromName(sessionId);
-        const stub = env.Agent.get(id);
-        return stub.fetch(withIdentity(request, identity));
-      }
-
-      if (cmd === "pool") {
-        return Response.json(await poolStats(env));
-      }
-
-      return new Response("not found", { status: 404 });
-    }
-
-    // Agent WebSocket connections and RPC calls
-    // Attach worker-trusted identity headers so the Agent DO can stamp
-    // user messages with the correct author metadata even when the connection
-    // is shared by multiple humans (the WS frame itself carries no identity).
-    const agentResponse = await routeAgentRequest(withIdentity(request, identity), env);
-    if (agentResponse) return agentResponse;
-
-    return new Response("not found", { status: 404 });
-  },
-
-  /**
-   * Cron-triggered: prime the warm pool so its alarm loop is running.
-   * Wrangler config wires this up to `* * * * *` (every minute).
-   */
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await primePool(env);
-  },
-} satisfies ExportedHandler<Env>;
-
-// ---- helpers ----
-
-/**
- * Forward to the singleton App. When a room is created we also seed the
- * corresponding Room so the client can talk to it immediately.
- */
-async function handleAppRequest(
-  request:  Request,
-  env:      Env,
-  identity: AccessIdentity,
-): Promise<Response> {
+// ---- /api/app/* ----------------------------------------------------------
+//
+// Proxy to the singleton App DO. When a room is created we also seed the
+// corresponding Room DO so the client can talk to it immediately.
+app.all("/api/app/*", async (c) => {
+  const identity = c.get("identity");
+  const request  = c.req.raw;
   const url      = new URL(request.url);
+
   const innerUrl = new URL(request.url);
   innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
   const inner = new Request(innerUrl, request);
-  const stub  = env.App.get(env.App.idFromName(APP_DO_NAME));
+  const stub  = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
   const res   = await stub.fetch(withIdentity(inner, identity));
 
   // Side-effect: when App creates a room, init the Room so /api/rooms/:id
@@ -132,7 +49,7 @@ async function handleAppRequest(
     const cloned = res.clone();
     const body   = await cloned.json().catch(() => null) as { room?: { id: string; name: string; createdBy: string } } | null;
     if (body?.room) {
-      const roomStub = env.Room.get(env.Room.idFromName(body.room.id));
+      const roomStub = c.env.Room.get(c.env.Room.idFromName(body.room.id));
       await roomStub.fetch(withIdentity(
         new Request("https://room/init", {
           method:  "POST",
@@ -144,47 +61,116 @@ async function handleAppRequest(
     }
   }
   return res;
-}
+});
+
+// ---- /api/rooms/:id/* ----------------------------------------------------
+//
+// Forward to a per-room DO. WebSocket upgrades pass through transparently.
+app.all("/api/rooms/:id/*", (c) => {
+  const id = c.req.param("id");
+  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), `/${c.req.param("*") ?? ""}`);
+});
+app.all("/api/rooms/:id", (c) => {
+  const id = c.req.param("id");
+  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), "/");
+});
+
+// ---- /api/threads/:threadId/* -------------------------------------------
+//
+// Forward to the Agent DO that owns a thread (threadId == Agent DO name).
+// The DO uses Kimi to produce a one-or-two sentence recap on /summary.
+app.all("/api/threads/:id/*", (c) => {
+  const id = c.req.param("id");
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), `/${c.req.param("*") ?? ""}`);
+});
+app.all("/api/threads/:id", (c) => {
+  const id = c.req.param("id");
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), "/");
+});
+
+// ---- /debug/:sessionId/:cmd ---------------------------------------------
+//
+// Debug routes hit the same warm-pool container the agent uses, plus a
+// passthrough to the Agent DO for messages/vfs/reset.
+app.post("/debug/:sessionId/exec", async (c) => {
+  const sb = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
+  const { command, cwd } = await c.req.json() as { command: string; cwd?: string };
+  return Response.json(await sb.exec(command, { cwd }));
+});
+
+app.get("/debug/:sessionId/env", async (c) => {
+  const sb = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
+  const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] = await Promise.all([
+    sb.exec("zig version"),
+    sb.exec("go version"),
+    sb.exec("node --version"),
+    sb.exec("esbuild --version"),
+    sb.exec("wrangler --version"),
+    sb.exec("uname -a"),
+    sb.exec("cat /proc/mounts | grep fuse || echo no-fuse"),
+    sb.exec("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
+  ]);
+  return Response.json({ zig, go, node, esbuild, wrangler, uname, mounts, fuse });
+});
+
+app.get("/debug/:sessionId/logs", async (c) => {
+  const sb   = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
+  const file = await sb.readFile("/tmp/server.log");
+  return new Response(file?.content ?? "(no log file yet)", { headers: { "content-type": "text/plain" } });
+});
+
+app.get("/debug/:sessionId/pool", async (c) => Response.json(await poolStats(c.env)));
+
+// Forward agent-level debug routes (messages, vfs, reset) to the DO's onRequest().
+app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
+  const sessionId = c.req.param("sessionId");
+  const id        = c.env.Agent.idFromName(sessionId);
+  const stub      = c.env.Agent.get(id);
+  return stub.fetch(withIdentity(c.req.raw, c.get("identity")));
+});
+
+// ---- Agent WebSocket / RPC fallthrough -----------------------------------
+//
+// Anything we didn't match is offered to the agents SDK router. It owns the
+// WebSocket upgrade path and RPC calls. Attach worker-trusted identity so
+// the Agent DO can stamp user messages even when the connection is shared.
+app.all("*", async (c) => {
+  const res = await routeAgentRequest(withIdentity(c.req.raw, c.get("identity")), c.env);
+  return res ?? c.text("not found", 404);
+});
+
+// ---- helpers -------------------------------------------------------------
 
 /**
- * Forward to a per-room DO. URL shape: `/api/rooms/:id/<path>` → `/<path>`.
- * WebSocket upgrades are passed through transparently.
+ * Strip our /api/<prefix>/:id from the URL and forward the remainder to the
+ * named Durable Object stub with identity attached.
  */
-function handleRoomRequest(
-  request:  Request,
-  env:      Env,
-  identity: AccessIdentity,
+function forwardToDO<T extends Rpc.DurableObjectBranded | undefined>(
+  ns:        DurableObjectNamespace<T>,
+  id:        string | undefined,
+  request:   Request,
+  identity:  AccessIdentity,
+  innerPath: string,
 ): Promise<Response> {
-  const url   = new URL(request.url);
-  const parts = url.pathname.slice("/api/rooms/".length).split("/");
-  const id    = parts[0];
   if (!id) {
-    return Promise.resolve(new Response("missing room id", { status: 400 }));
+    return Promise.resolve(new Response("missing id", { status: 400 }));
   }
   const inner = new URL(request.url);
-  inner.pathname = "/" + parts.slice(1).join("/");
-  const stub = env.Room.get(env.Room.idFromName(id));
+  inner.pathname = innerPath;
+  const stub = ns.get(ns.idFromName(id));
   return stub.fetch(withIdentity(new Request(inner, request), identity));
 }
 
-/**
- * Forward to the Agent DO that owns a thread. URL shape:
- * `/api/threads/:threadId/<path>` → `/<path>` on the DO. The threadId is
- * also the Agent DO's name, so we resolve it directly.
- */
-function handleThreadRequest(
-  request:  Request,
-  env:      Env,
-  identity: AccessIdentity,
-): Promise<Response> {
-  const url   = new URL(request.url);
-  const parts = url.pathname.slice("/api/threads/".length).split("/");
-  const id    = parts[0];
-  if (!id) {
-    return Promise.resolve(new Response("missing thread id", { status: 400 }));
-  }
-  const inner = new URL(request.url);
-  inner.pathname = "/" + parts.slice(1).join("/");
-  const stub = env.Agent.get(env.Agent.idFromName(id));
-  return stub.fetch(withIdentity(new Request(inner, request), identity));
-}
+// ---- export --------------------------------------------------------------
+
+export default {
+  fetch: app.fetch,
+
+  /**
+   * Cron-triggered: prime the warm pool so its alarm loop is running.
+   * Wrangler config wires this up to `* * * * *` (every minute).
+   */
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await primePool(env);
+  },
+} satisfies ExportedHandler<Env>;
