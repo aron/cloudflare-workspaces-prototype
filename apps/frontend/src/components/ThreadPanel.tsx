@@ -93,14 +93,48 @@ export function ThreadPanel({
     onClose: useCallback(() => setStatus("disconnected"), []),
   });
 
-  const { messages, sendMessage, isStreaming, stop } = useAgentChat({ agent });
+  const { messages, sendMessage, isStreaming, isServerStreaming, stop } = useAgentChat({ agent });
+
+  // Show the stop button whenever a turn is in progress from *either* the
+  // client's vantage (an in-flight sendMessage call) or the server's (a
+  // tool round-trip pushing the next continuation). `isStreaming` alone
+  // misses the gap between tool calls where the model is wedged on the
+  // server — exactly the case where users need a stop button.
+  const turnInFlight = isStreaming || isServerStreaming;
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || turnInFlight) return;
     setInput("");
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
-  }, [input, isStreaming, sendMessage]);
+  }, [input, turnInFlight, sendMessage]);
+
+  // ── Steering ──────────────────────────────────────────────────────────
+  //
+  // While a turn is in flight (tool round-trip, streaming, etc.) the main
+  // composer is disabled because `sendMessage` would race the active turn.
+  // Steering messages let the user nudge the agent without waiting: they're
+  // buffered locally and drained as soon as the current turn finishes, so
+  // they show up as user turns in the queue rather than mid-stream
+  // interruptions.
+  const [steerInput, setSteerInput] = useState("");
+  const [steerQueue, setSteerQueue] = useState<string[]>([]);
+
+  const enqueueSteer = useCallback(() => {
+    const text = steerInput.trim();
+    if (!text) return;
+    setSteerInput("");
+    setSteerQueue(q => [...q, text]);
+  }, [steerInput]);
+
+  useEffect(() => {
+    if (turnInFlight || steerQueue.length === 0) return;
+    // Drain one message per render so each goes through `sendMessage`'s own
+    // queueing and we don't fire a burst of WS frames at the agent.
+    const [next, ...rest] = steerQueue;
+    setSteerQueue(rest);
+    sendMessage({ role: "user", parts: [{ type: "text", text: next }] });
+  }, [turnInFlight, steerQueue, sendMessage]);
 
   // Download a tar archive of the agent's session state (messages + VFS +
   // metadata). Useful for filing bug reports — drop it next to a repro.
@@ -275,11 +309,49 @@ export function ThreadPanel({
             return null;
           })}
 
-          {isStreaming && (
+          {turnInFlight && (
             <div className="text-sm text-kumo-inactive">●●●</div>
           )}
         </div>
       </div>
+
+      {(turnInFlight || steerQueue.length > 0) && (
+        <div className="flex-shrink-0 border-t border-kumo-line bg-kumo-elevated px-4 pb-2 pt-2">
+          <div className="mb-1 flex items-center justify-between text-2xs font-medium uppercase tracking-wide text-kumo-inactive">
+            <span>Steer the agent</span>
+            {steerQueue.length > 0 && (
+              <span title="Will be sent when the current turn finishes">
+                {steerQueue.length} queued
+              </span>
+            )}
+          </div>
+          <div className="prompt-input flex items-end gap-2 rounded-xl border px-3 py-2">
+            <MentionTextarea
+              rows={1}
+              value={steerInput}
+              onChange={setSteerInput}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  enqueueSteer();
+                }
+              }}
+              placeholder="Inject a note for the next turn…"
+              disabled={status !== "connected"}
+              className="block w-full resize-none border-0 bg-transparent p-0 text-sm leading-5 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
+            />
+            <Button
+              size="icon-sm"
+              aria-label="Queue steer"
+              onClick={enqueueSteer}
+              disabled={status !== "connected" || !steerInput.trim()}
+              className="h-7 w-7 bg-kumo-brand/70 text-white hover:bg-kumo-brand"
+            >
+              <ArrowUp size={13} strokeWidth={2.5} />
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="flex-shrink-0 bg-kumo-base px-4 pb-3 pt-2">
         <div className="prompt-input rounded-2xl border px-3.5 pb-2 pt-3">
@@ -296,7 +368,7 @@ export function ThreadPanel({
             <span className="text-2xs font-medium text-kumo-inactive" title="current model">
               {model}
             </span>
-            {isStreaming ? (
+            {turnInFlight ? (
               <Button
                 size="sm"
                 onClick={stop}
