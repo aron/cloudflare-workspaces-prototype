@@ -171,12 +171,12 @@ export function ThreadPanel({
               const name = author?.name ?? "You";
               const idx  = authorIdx(author?.id ?? name);
               return (
-                <div key={m.id} className="flex items-start gap-2.5">
+                <div key={m.id} className="flex flex-row-reverse items-start gap-2.5">
                   <div className={`flex size-7 flex-shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white ${AVATAR_PALETTE[idx]}`}>
                     {initials(name).slice(0, 1)}
                   </div>
                   <Message from="user" className="ml-0 max-w-full flex-1">
-                    <div className="mb-1 text-2xs text-kumo-inactive">{name}</div>
+                    <div className="mb-1 text-right text-2xs text-kumo-inactive">{name}</div>
                     <MessageContent>
                       <div className="whitespace-pre-wrap"><MentionText text={text} /></div>
                     </MessageContent>
