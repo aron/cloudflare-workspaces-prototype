@@ -4,7 +4,7 @@
  * deterministic parser that maps pathname → route variant.
  */
 import { describe, it, expect } from "vitest";
-import { parseRoute, formatRoute, type Route } from "../src/client/route.js";
+import { parseRoute, formatRoute, type Route } from "../src/lib/route.js";
 
 describe("parseRoute", () => {
   it("maps / to the room picker", () => {

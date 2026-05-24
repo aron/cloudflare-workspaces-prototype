@@ -5,7 +5,7 @@
  * worth its weight.
  */
 import { describe, it, expect } from "vitest";
-import { initials, relTime } from "../src/client/styles.js";
+import { initials, relTime } from "../src/lib/utils.js";
 
 describe("initials", () => {
   it("returns two-letter initials for a two-part name", () => {

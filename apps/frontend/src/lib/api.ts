@@ -6,12 +6,12 @@
  * cookie is sent on cross-handler navigations.
  */
 
-import type { AppMessage, RoomMeta, ThreadRow } from "../room-do.js";
+import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow } from "@app/shared";
+export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow };
 
 const OPTS: RequestInit = { credentials: "same-origin" };
 
-export interface Me { userId: string; email: string; name: string }
-export interface RoomSummary { id: string; name: string; createdBy: string; createdAt: number }
+
 
 async function jsonOrThrow<T>(res: Response, label: string): Promise<T> {
   if (!res.ok) {
