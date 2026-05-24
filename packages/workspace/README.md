@@ -69,8 +69,22 @@ await workspace.grep(pattern, path);
 
 ### Mounts
 
-Mounts are read-only. Writes anywhere under a mount root throw `EROFS`,
-and container-side writes under the same path are dropped on the pull.
+Mounts default to `mode: "read-only"`. Writes anywhere under a read-only
+mount root throw `EROFS`, and container-side writes under the same path
+are dropped on the pull.
+
+Pass `mode: "read-write"` to opt a mount into write-through. `writeFile`
+and `deleteFile` are mirrored to R2 (R2 first, then the VFS — a failed
+`put`/`delete` leaves the VFS untouched). `mkdir` is VFS-only since R2
+has no directory concept. Container-side writes pulled back via `exec()`
+are applied to the VFS *and* mirrored to R2 with bounded concurrency.
+
+```ts
+mounts: {
+  "/workspace/.agents/skills": R2Bucket(env.SHARED_FILES, { prefix: ".agents/skills" }),
+  "/workspace/scratch":        R2Bucket(env.SCRATCH,      { mode: "read-write" }),
+}
+```
 
 On first call to any `Workspace` read/write/`exec`/`warmup`, the index for
 every configured mount is built (one `list()` per mount). File rows appear

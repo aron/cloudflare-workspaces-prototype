@@ -156,10 +156,16 @@ export class Workspace {
   }
 
   async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
-    this.assertWritable(path);
     await this.ensureMountsIndexed();
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    this.vfs.writeFile(path, bytes, mode);
+    const m = this.resolveMountForWrite(path);
+    if (m) {
+      // Push to the backing store first — if it fails, the VFS stays clean.
+      await m.mount.put!(m.relPath, bytes);
+      this.vfs.writeFile(path, bytes, mode ?? 0o100644, m.root);
+    } else {
+      this.vfs.writeFile(path, bytes, mode);
+    }
   }
 
   async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
@@ -173,14 +179,24 @@ export class Workspace {
   }
 
   async mkdir(path: string, mode?: number): Promise<void> {
-    this.assertWritable(path);
     await this.ensureMountsIndexed();
-    this.vfs.mkdir(path, mode);
+    // mkdir is VFS-only even under writable mounts: R2 has no directories,
+    // and synthesizing zero-byte directory markers would surface as files.
+    const m = this.resolveMountForWrite(path);
+    this.vfs.mkdir(path, mode, m ? m.root : null);
   }
 
   async deleteFile(path: string): Promise<void> {
-    this.assertWritable(path);
     await this.ensureMountsIndexed();
+    const m = this.resolveMountForWrite(path);
+    if (m) {
+      // Collect every file under `path` (could be a single file or a subtree)
+      // and delete each from the backing store before touching the VFS.
+      const subtree = this.vfs.listFilesUnder(path);
+      const files   = subtree.length ? subtree : (this.vfs.stat(path)?.type === "file" ? [path] : []);
+      const rels    = files.map(f => f.slice(m.root.length + 1));
+      await this.runBounded(rels, r => m.mount.delete!(r));
+    }
     this.vfs.deleteFile(path);
   }
 
@@ -250,14 +266,42 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    // Pull files the container touched. Drop anything under a mount root —
-    // mounts are read-only end-to-end, so container-side writes there are
-    // discarded rather than persisted back to the VFS.
+    // Pull files the container touched. Three cases per change, by the
+    // mount root of its path:
+    //   - outside any mount: applied to the VFS normally.
+    //   - under a read-only mount: dropped (mounts are read-only end-to-end).
+    //   - under a writable mount: applied to the VFS, then mirrored to R2.
     const dirtyRaw = await api.getDirtyNodes(this.pullSinceMs);
-    const dirty    = dirtyRaw.filter(c => this.mountRootOf(c.path) === null);
-    if (dirty.length) {
-      await this.vfs.applyChanges(dirty);
-      this.pullSinceMs = Math.max(this.pullSinceMs, ...dirty.map(d => d.mtime ?? 0));
+    const accepted: VfsChange[] = [];
+    const mirrors: Array<{ change: VfsChange; root: string; mount: Mount; relPath: string }> = [];
+    for (const c of dirtyRaw) {
+      const root = this.mountRootOf(c.path);
+      if (root === null) {
+        accepted.push(c);
+        continue;
+      }
+      const mount = this.configuredMounts.get(root)!;
+      if (!mount.writable) continue;  // read-only mount: drop
+      accepted.push(c);
+      const relPath = c.path.slice(root.length + 1);
+      mirrors.push({ change: c, root, mount, relPath });
+    }
+    if (accepted.length) {
+      await this.vfs.applyChanges(accepted);
+      this.pullSinceMs = Math.max(this.pullSinceMs, ...accepted.map(d => d.mtime ?? 0));
+    }
+    // Mirror writable-mount changes to R2 *after* the VFS has the new bytes,
+    // so we can read them back chunk-by-chunk rather than buffering streams.
+    if (mirrors.length) {
+      await this.runBounded(mirrors, async (m) => {
+        if (m.change.op === "delete") {
+          await m.mount.delete!(m.relPath);
+        } else if (m.change.type === "file") {
+          const bytes = this.vfs.readFile(m.change.path);
+          if (bytes) await m.mount.put!(m.relPath, bytes);
+        }
+        // dir entries are VFS-only; nothing to mirror.
+      });
     }
 
     this.saveWatermarks();
@@ -267,7 +311,7 @@ export class Workspace {
       stdout:   result.stdout,
       stderr:   result.stderr,
       pushed:   changes.length,
-      pulled:   dirty.length,
+      pulled:   accepted.length,
     };
   }
 
@@ -303,10 +347,41 @@ export class Workspace {
     return null;
   }
 
-  private assertWritable(path: string): void {
+  /**
+   * Resolve `path` to its writable mount (root + mount + relPath) or null
+   * if `path` is outside any mount. Throws EROFS if `path` is under a
+   * read-only mount.
+   */
+  private resolveMountForWrite(path: string): { root: string; mount: Mount; relPath: string } | null {
     const root = this.mountRootOf(path);
-    if (root !== null) {
+    if (root === null) return null;
+    const mount = this.configuredMounts.get(root)!;
+    if (!mount.writable) {
       throw new Error(`EROFS: read-only mount at ${root}: ${path}`);
+    }
+    if (!mount.put || !mount.delete) {
+      throw new Error(`mount ${root} is writable but missing put/delete`);
+    }
+    const relPath = path === root ? "" : path.slice(root.length + 1);
+    return { root, mount, relPath };
+  }
+
+  /** Run `fn` over `items` with bounded concurrency. Aggregates errors. */
+  private async runBounded<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+    if (items.length === 0) return;
+    const limit = Workspace.FETCH_CONCURRENCY;
+    const errors: unknown[] = [];
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) {
+        const idx = i++;
+        try { await fn(items[idx]); } catch (e) { errors.push(e); }
+      }
+    });
+    await Promise.all(workers);
+    if (errors.length) {
+      const messages = errors.map(e => (e instanceof Error ? e.message : String(e))).join("; ");
+      throw new Error(`bounded operation failed: ${messages}`);
     }
   }
 
@@ -325,14 +400,16 @@ export class Workspace {
       for (const root of pending) {
         const mount = this.configuredMounts.get(root)!;
         const entries = await mount.list();
+        const dirMode  = mount.writable ? 0o40755  : 0o40555;
+        const fileMode = mount.writable ? 0o100644 : 0o100444;
         // Ensure the root itself exists as a directory.
-        this.vfs.mkdir(root, 0o40555, root);
+        this.vfs.mkdir(root, dirMode, root);
         for (const entry of entries) {
           const abs = root + "/" + entry.relPath;
           if (entry.type === "dir") {
-            this.vfs.mkdir(abs, 0o40555, root);
+            this.vfs.mkdir(abs, dirMode, root);
           } else {
-            this.vfs.writeStub(abs, 0o100444, entry.mtime ?? Date.now(), root, entry.size ?? null);
+            this.vfs.writeStub(abs, fileMode, entry.mtime ?? Date.now(), root, entry.size ?? null);
           }
         }
         this.mountIndexed.set(root, true);
@@ -359,7 +436,8 @@ export class Workspace {
     const relPath = path.slice(root.length + 1);
     const p = (async () => {
       const bytes = await mount.fetch(relPath);
-      this.vfs.writeFile(path, bytes, 0o100444, root);
+      const mode = mount.writable ? 0o100644 : 0o100444;
+      this.vfs.writeFile(path, bytes, mode, root);
     })().finally(() => { this.contentFetches.delete(path); });
     this.contentFetches.set(path, p);
     return p;

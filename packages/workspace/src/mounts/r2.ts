@@ -18,21 +18,30 @@ export interface R2MountOptions {
    * and the prefix is non-empty.
    */
   prefix?: string;
+  /**
+   * Access mode. Defaults to `"read-only"`. When `"read-write"`, writes
+   * to the VFS under the mount root are propagated to R2 via put/delete;
+   * container-side writes pulled back via `exec()` are also mirrored.
+   */
+  mode?: "read-only" | "read-write";
 }
 
 /**
- * Build a read-only `Mount` backed by an R2 bucket binding.
+ * Build a `Mount` backed by an R2 bucket binding.
  *
  * @example
  *   mounts: {
  *     "/workspace/.agents/skills": R2Bucket(env.SHARED_FILES, { prefix: ".agents/skills" }),
+ *     "/workspace/scratch":        R2Bucket(env.SCRATCH,      { mode: "read-write" }),
  *   }
  */
 export function R2Bucket(binding: R2Bucket, opts: R2MountOptions = {}): Mount {
-  const prefix = normalizePrefix(opts.prefix ?? "");
+  const prefix   = normalizePrefix(opts.prefix ?? "");
+  const writable = opts.mode === "read-write";
 
-  return {
+  const mount: Mount = {
     kind: "r2",
+    writable,
 
     async list(): Promise<MountEntry[]> {
       const entries  = new Map<string, MountEntry>();   // relPath -> entry
@@ -80,6 +89,17 @@ export function R2Bucket(binding: R2Bucket, opts: R2MountOptions = {}): Mount {
       return new Uint8Array(buf);
     },
   };
+
+  if (writable) {
+    mount.put = async (relPath: string, bytes: Uint8Array): Promise<void> => {
+      await binding.put(prefix + relPath, bytes);
+    };
+    mount.delete = async (relPath: string): Promise<void> => {
+      await binding.delete(prefix + relPath);
+    };
+  }
+
+  return mount;
 }
 
 function normalizePrefix(p: string): string {
