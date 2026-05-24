@@ -23,9 +23,7 @@
 
 import { Server } from "partyserver";
 import { requireIdentity } from "./identity.js";
-import { PERSONAS } from "./personas/index.js";
-
-const VALID_PERSONA_IDS: ReadonlySet<string> = new Set(PERSONAS.map(p => p.id));
+import { firstMention } from "./mentions.js";
 
 
 
@@ -162,7 +160,7 @@ export class RoomDO extends Server<Env> {
     }
 
     const text       = parts.map(p => p.text).join("\n");
-    const mentioned  = extractMention(text);
+    const mentioned  = firstMention(text);
     const messageId  = crypto.randomUUID();
     const createdAt  = Date.now();
     const author: Author = {
@@ -195,6 +193,30 @@ export class RoomDO extends Server<Env> {
                      ${createdAt}, ${threadId ?? null})`;
     // Fan out to WS subscribers so other clients see the message live.
     this.broadcast(JSON.stringify({ type: "message", message }));
+
+    // Seed the Agent DO when a thread was minted. The thread id is also the
+    // Agent DO id, so the client can connect to the same DO later.
+    if (threadId && mentioned) {
+      const meta = this.loadMeta();
+      const seedBody = {
+        personaId: mentioned,
+        roomId:    meta?.id ?? "",
+        threadId,
+        message,
+      };
+      const agentStub = this.env.Agent.get(this.env.Agent.idFromName(threadId));
+      // Inline-await so the thread is fully seeded before the client gets
+      // its threadId back — simpler than racing the client's navigation.
+      // We still swallow errors so a hiccup in the Agent DO doesn't lose
+      // the room message (which is already persisted).
+      try {
+        await agentStub.fetch(new Request("https://agent/seed", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          body:    JSON.stringify(seedBody),
+        }));
+      } catch { /* swallow */ }
+    }
 
     return Response.json({ message, threadId }, { status: 201 });
   }
@@ -262,17 +284,3 @@ function sanitizeParts(raw: unknown): Array<{ type: "text"; text: string }> | nu
 }
 
 
-
-/**
- * Find the first `@persona` mention in text that refers to a known persona.
- * Returns the persona id, or null if none match. Multiple mentions in one
- * message produce one combined thread, so we only need the first hit.
- */
-export function extractMention(text: string): string | null {
-  const re = /@([a-z0-9][a-z0-9_-]{0,63})/gi;
-  for (const match of text.matchAll(re)) {
-    const candidate = match[1]?.toLowerCase();
-    if (candidate && VALID_PERSONA_IDS.has(candidate)) return candidate;
-  }
-  return null;
-}

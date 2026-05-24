@@ -13,6 +13,7 @@ import { z } from "zod";
 import { Workspace } from "@cloudflare/workspace";
 import { runWasm } from "@cloudflare/workspace/worker-sandbox";
 import { resolveContainerId } from "./pool.js";
+import { resolvePersonaForTurn } from "./mentions.js";
 import {
   COMMON_TOOLS,
   DEFAULT_PERSONA,
@@ -126,6 +127,39 @@ export class Agent extends AIChatAgent<Env> {
       return Response.json({ ok: true, persona: p });
     }
 
+    // POST /seed { personaId, roomId, threadId, message } — called by RoomDO
+    // when a `@persona` mention mints a thread. Sets the thread's default
+    // persona and persists the originating user message as the first turn.
+    // Idempotent: re-seeding a thread that already exists is a no-op so the
+    // client can safely retry on transient failures.
+    if (request.method === "POST" && url.pathname.endsWith("/seed")) {
+      const body = await request.json().catch(() => ({})) as {
+        personaId?: unknown; roomId?: unknown; threadId?: unknown; message?: unknown;
+      };
+      const personaId = typeof body.personaId === "string" ? body.personaId : "";
+      const message   = body.message;
+      if (!personaId || !message || typeof message !== "object") {
+        return Response.json({ error: "personaId and message are required" }, { status: 400 });
+      }
+      const persona = lookupPersona(personaId);
+      if (persona.id !== personaId) {
+        return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
+      }
+      // Idempotency: if the seed message id is already in history, treat as
+      // already-seeded and just confirm the current persona.
+      const messageId = (message as { id?: unknown }).id;
+      const alreadySeeded = typeof messageId === "string"
+        && this.messages.some(m => m.id === messageId);
+      if (!alreadySeeded) {
+        this.savePersonaId(persona.id);
+        // Cast through `any` — saveMessages accepts the AI SDK UIMessage shape;
+        // we trust the caller (RoomDO) to send a well-formed AppMessage.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await this.saveMessages([message as any]);
+      }
+      return Response.json({ ok: true, seeded: !alreadySeeded, personaId: persona.id });
+    }
+
     return new Response("not found", { status: 404 });
   }
 
@@ -133,6 +167,8 @@ export class Agent extends AIChatAgent<Env> {
     const model = this.env.OPENAI_API_KEY
       ? createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(this.env.OPENAI_MODEL ?? "gpt-4o-mini")
       : createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+
+    const activePersona = lookupPersona(resolvePersonaForTurn(this.messages, this.personaId));
 
     const result = streamText({
       abortSignal: options?.abortSignal,
@@ -147,14 +183,17 @@ export class Agent extends AIChatAgent<Env> {
           include: ["reasoning.encrypted_content"],
         },
       },
-      system:   this.persona.systemPrompt,
+      // Per-turn persona resolution: the most recent user `@mention` wins,
+      // falling back to the thread's default persona. Both system prompt
+      // and tool surface follow the same persona for the current turn.
+      system:   activePersona.systemPrompt,
       messages: pruneMessages({
         messages:  await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message",
       }),
       stopWhen: stepCountIs(20),
-      tools:    this.buildTools(this.persona),
+      tools:    this.buildTools(activePersona),
     });
 
     return result.toUIMessageStreamResponse();

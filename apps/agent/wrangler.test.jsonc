@@ -9,12 +9,13 @@
 
   "durable_objects": {
     "bindings": [
-      { "class_name": "AppDO",  "name": "AppDO"  },
-      { "class_name": "RoomDO", "name": "RoomDO" }
+      { "class_name": "AppDO",     "name": "AppDO"  },
+      { "class_name": "RoomDO",    "name": "RoomDO" },
+      { "class_name": "FakeAgent", "name": "Agent"  }
     ]
   },
 
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["AppDO", "RoomDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["AppDO", "RoomDO", "FakeAgent"] }
   ]
 }
