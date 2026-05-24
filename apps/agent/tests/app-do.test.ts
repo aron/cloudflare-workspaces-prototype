@@ -11,11 +11,15 @@ function appStub() {
 }
 
 describe("AppDO /me", () => {
-  it("echoes the caller's identity", async () => {
+  it("echoes the caller's identity and current model", async () => {
     const res = await appStub().fetch(asUser("https://app/me", ARON));
     expect(res.status).toBe(200);
-    const body = await res.json() as { userId: string; email: string; name: string };
-    expect(body).toEqual({ userId: ARON.userId, email: ARON.email, name: ARON.name });
+    const body = await res.json() as { userId: string; email: string; name: string; model: string };
+    expect(body.userId).toBe(ARON.userId);
+    expect(body.email).toBe(ARON.email);
+    expect(body.name).toBe(ARON.name);
+    // Test env has no OPENAI_API_KEY, so we fall back to the Workers AI default.
+    expect(body.model).toBe("kimi-k2.6");
   });
 
   it("rejects requests without identity headers with 401", async () => {

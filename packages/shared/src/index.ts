@@ -26,6 +26,8 @@ export interface Me {
   userId: string;
   email:  string;
   name:   string;
+  /** Human-readable label for the model currently in use. Display-only. */
+  model:  string;
 }
 
 // ---- messages / rooms / threads ----

@@ -9,6 +9,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { requireIdentity } from "./identity.js";
+import { currentModelLabel } from "./model.js";
 import type { RoomSummary } from "@app/shared";
 
 /** Stable singleton id used by the worker to address this DO. */
@@ -60,6 +61,7 @@ export class AppDO extends DurableObject<Env> {
         userId: identity.userId,
         email:  identity.email,
         name:   identity.name,
+        model:  currentModelLabel(this.env),
       });
     }
 

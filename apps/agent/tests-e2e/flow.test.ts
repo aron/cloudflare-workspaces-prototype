@@ -33,13 +33,14 @@ beforeAll(async () => {
 });
 
 describe("E2E: identity + rooms", () => {
-  it("returns the local dev identity", async () => {
+  it("returns the local dev identity and the current model", async () => {
     const res = await fetch(`${BASE_URL}/api/app/me`);
     expect(res.status).toBe(200);
-    const me = await res.json() as { userId: string; email: string; name: string };
+    const me = await res.json() as { userId: string; email: string; name: string; model: string };
     expect(me.userId).toBeTruthy();
     expect(me.email).toBeTruthy();
     expect(me.name).toBeTruthy();
+    expect(me.model).toBeTruthy();
   });
 
   it("lists the created room", async () => {

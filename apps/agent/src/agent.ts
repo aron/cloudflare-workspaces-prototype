@@ -14,6 +14,7 @@ import { Workspace } from "@cloudflare/workspace";
 import { runWasm } from "@cloudflare/workspace/worker-sandbox";
 import { resolveContainerId } from "./pool.js";
 import { resolvePersonaForTurn } from "./mentions.js";
+import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import {
@@ -185,9 +186,10 @@ export class Agent extends AIChatAgent<Env> {
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
+    const modelId = currentModelId(this.env);
     const model = this.env.OPENAI_API_KEY
-      ? createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(this.env.OPENAI_MODEL ?? "gpt-4o-mini")
-      : createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+      ? createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(modelId)
+      : createWorkersAI({ binding: this.env.AI })(modelId);
 
     const activePersona = lookupPersona(resolvePersonaForTurn(this.messages, this.personaId));
     const result = streamText({
