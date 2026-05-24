@@ -14,6 +14,8 @@ import { Workspace } from "@cloudflare/workspace";
 import { runWasm } from "@cloudflare/workspace/worker-sandbox";
 import { resolveContainerId } from "./pool.js";
 import { resolvePersonaForTurn } from "./mentions.js";
+import { readIdentity } from "./identity.js";
+import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import {
   COMMON_TOOLS,
   DEFAULT_PERSONA,
@@ -77,15 +79,34 @@ export class Agent extends AIChatAgent<Env> {
     this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
   }
 
+  /**
+   * Capture the human's identity from the WS upgrade request and stash it
+   * on the connection. We read it back in `onMessage` to stamp incoming
+   * user messages with the right `author` metadata — multiple humans can
+   * share a thread, so the connection (not the DO) owns the identity.
+   *
+   * `connection.setState()` is persisted by the agents SDK and survives
+   * hibernation, so we don't need to re-resolve on every wake.
+   */
+  async onConnect(connection: any, ctx: any) {
+    const author = extractAuthorFromUpgradeRequest(ctx.request as Request, readIdentity);
+    if (author) connection.setState({ author });
+    return super.onConnect(connection, ctx);
+  }
+
   async onMessage(connection: any, message: any) {
     // First user chat request — defensively prime the container so it's
     // warm by the time the model finishes and calls exec.
-    try {
-      const data = JSON.parse(typeof message === "string" ? message : message.text ?? "{}");
-      if (data?.type === "cf_agent_use_chat_request") {
-        this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
-      }
-    } catch { /* ignore */ }
+    if (typeof message === "string") {
+      try {
+        const data = JSON.parse(message);
+        if (data?.type === "cf_agent_use_chat_request") {
+          this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+        }
+      } catch { /* ignore */ }
+      const author = (connection.state as { author?: ChatAuthor } | null)?.author ?? null;
+      message = stampChatFrame(message, author);
+    }
     return super.onMessage(connection, message);
   }
 
@@ -169,7 +190,6 @@ export class Agent extends AIChatAgent<Env> {
       : createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
 
     const activePersona = lookupPersona(resolvePersonaForTurn(this.messages, this.personaId));
-
     const result = streamText({
       abortSignal: options?.abortSignal,
       model,

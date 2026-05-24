@@ -85,7 +85,7 @@ export default {
       if (cmd === "messages" || cmd === "vfs" || cmd === "reset" || cmd === "persona") {
         const id   = env.Agent.idFromName(sessionId);
         const stub = env.Agent.get(id);
-        return stub.fetch(request);
+        return stub.fetch(withIdentity(request, identity));
       }
 
       if (cmd === "pool") {
@@ -96,8 +96,10 @@ export default {
     }
 
     // Agent WebSocket connections and RPC calls
-
-    const agentResponse = await routeAgentRequest(request, env);
+    // Attach worker-trusted identity headers so the Agent DO can stamp
+    // user messages with the correct author metadata even when the connection
+    // is shared by multiple humans (the WS frame itself carries no identity).
+    const agentResponse = await routeAgentRequest(withIdentity(request, identity), env);
     if (agentResponse) return agentResponse;
 
     return new Response("not found", { status: 404 });
