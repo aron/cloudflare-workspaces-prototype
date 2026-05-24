@@ -11,8 +11,9 @@
  *   - rmdir(path)
  *   - stat(path)              → { isFile, isDirectory, isSymbolicLink, size, mtimeMs, ctimeMs, mode }
  *   - lstat(path)             → same (we don't model symlinks)
- *   - readlink(path)          → always throws EINVAL (no symlinks)
- *   - symlink(target, path)   → always throws EPERM (no symlinks)
+ *   - readlink(path)          → always throws EINVAL (VFS has no symlinks)
+ *   - symlink(target, path)   → writes the target path as a regular file,
+ *                              emulating Git's `core.symlinks=false` mode
  *
  * Two extras on top of the standard surface that matter for clone safety:
  *
@@ -204,16 +205,32 @@ export function createVfsFs(vfs: Vfs, opts: VfsFsOptions): { promises: VfsFsProm
 
     // isomorphic-git's `bindFs` walks a fixed list of fs methods and
     // `.bind()`s each one. If any method is undefined the bind throws
-    // 'Cannot read properties of undefined (reading \'bind\')' before
-    // the clone even starts. We don't model symlinks, so these stubs
-    // exist solely to keep that bind loop happy — readlink claims the
-    // path isn't a symlink, symlink refuses to create one.
+    // before the clone even starts, so these stubs always exist.
+    //
+    // We don't model symlinks in the VFS, so `symlink(target, path)`
+    // emulates Git's `core.symlinks=false` mode: write the target path
+    // as a regular file's contents. That's how Git checks out repos on
+    // filesystems that can't represent symlinks (Windows by default)
+    // and matches the on-disk shape after a non-symlink-aware checkout.
     async readlink(p: string): Promise<string> {
+      // Reading a symlink doesn't make sense when we materialize them
+      // as regular files — nothing in the working tree actually IS a
+      // symlink. isomorphic-git treats EINVAL as 'not a symlink'.
       throw fsError("EINVAL", resolve(p), "readlink");
     },
 
-    async symlink(_target: string, p: string): Promise<void> {
-      throw fsError("EPERM", resolve(p), "symlink");
+    async symlink(target: string, p: string): Promise<void> {
+      const abs = resolve(p);
+      const bytes = enc.encode(target);
+      if (bytesWritten + bytes.length > maxBytes) {
+        throw fsError("EFBIG", abs, "symlink");
+      }
+      const parent = parentOf(abs);
+      if (parent && parent !== root && !vfs.stat(parent)) {
+        mkdirRecursive(parent);
+      }
+      vfs.writeFile(abs, bytes, 0o100644, provenance);
+      bytesWritten += bytes.length;
     },
   };
 
