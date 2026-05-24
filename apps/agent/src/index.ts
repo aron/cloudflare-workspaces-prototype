@@ -4,27 +4,34 @@ import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { PERSONAS, DEFAULT_PERSONA } from "./personas/index.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
-import { verifyAccessJwt } from "./access.js";
+import { AppDO, APP_DO_NAME } from "./app-do.js";
+import { resolveIdentity, withIdentity } from "./identity.js";
 
-export { Agent, Sandbox, WarmPool };
+export { Agent, AppDO, Sandbox, WarmPool };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Cloudflare Access gate. Set ACCESS_TEAM_DOMAIN + ACCESS_AUD in
-    // wrangler.jsonc vars (or as secrets) to enable. Skip when not
-    // configured so local `wrangler dev` still works.
-    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
-      try {
-        await verifyAccessJwt(request, {
-          teamDomain: env.ACCESS_TEAM_DOMAIN,
-          aud:        env.ACCESS_AUD,
-        });
-      } catch (err) {
-        return new Response(`Access denied: ${(err as Error).message}`, { status: 401 });
-      }
+    // Resolve identity for every request. Access is required in prod; local
+    // dev falls back to ACCESS_DEV_USER (or a hardcoded local identity).
+    const identity = await resolveIdentity(request, env);
+    if (!identity) {
+      return new Response("Access denied", { status: 401 });
     }
 
     const url = new URL(request.url);
+
+    // /api/app/* — proxied to the singleton AppDO with identity attached.
+    if (url.pathname.startsWith("/api/app/")) {
+      const id   = env.AppDO.idFromName(APP_DO_NAME);
+      const stub = env.AppDO.get(id);
+      // Rewrite path so the DO sees a clean URL (drop the /api/app prefix).
+      const innerUrl = new URL(request.url);
+      innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
+      const inner = new Request(innerUrl, request);
+      return stub.fetch(withIdentity(inner, identity));
+    }
+
+
 
     // Top-level persona registry — used by the chat UI to populate the
     // "New session" dropdown. Stateless, no session required.

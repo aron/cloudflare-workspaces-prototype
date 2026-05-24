@@ -1,3 +1,6 @@
+# Local secrets (developer-supplied)
+.env
+
 node_modules/
 .wrangler/
 *.sqlite
