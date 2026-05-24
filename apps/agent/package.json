@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --ip 0.0.0.0",
     "build:ui": "vite build",
-    "predeploy": "npm run build --workspace=@cloudflare/workspace && npm run build:ui",
+    "predeploy": "bash sandbox/sync-host-ca.sh && npm run build --workspace=@cloudflare/workspace && npm run build:ui",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run --config src/tests/vitest.config.ts"
