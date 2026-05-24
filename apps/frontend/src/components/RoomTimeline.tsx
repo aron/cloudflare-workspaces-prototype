@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { MentionText } from "@/components/MentionText";
+import { MentionTextarea } from "@/components/MentionTextarea";
 
 
 import {
@@ -163,9 +165,8 @@ export function RoomTimeline({
         <div className="space-y-1 px-4 py-5">
           {messages.length === 0 && !error && (
             <div className="px-2 py-12 text-center text-sm text-kumo-inactive">
-              No messages yet. Say hi 👋 — mention <code className="rounded bg-kumo-recessed px-1 py-0.5">@go</code>,{" "}
-              <code className="rounded bg-kumo-recessed px-1 py-0.5">@zig</code>, or{" "}
-              <code className="rounded bg-kumo-recessed px-1 py-0.5">@cloudflare-worker</code>{" "}
+              No messages yet. Say hi 👋 — mention{" "}
+              <code className="rounded bg-kumo-recessed px-1 py-0.5">@agent</code>{" "}
               to start a thread.
             </div>
           )}
@@ -187,10 +188,10 @@ export function RoomTimeline({
 
       <div className="flex-shrink-0 bg-kumo-base px-5 pb-4 pt-2">
         <div className="prompt-input rounded-2xl border px-4 pb-2 pt-3">
-          <textarea
+          <MentionTextarea
             rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={setInput}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); }
             }}
@@ -246,7 +247,7 @@ function TopLevelMessage({
             <span className="text-xs text-kumo-inactive tabular-nums">{relTime(message.metadata.createdAt)}</span>
           </div>
           <div className="mt-1 whitespace-pre-wrap text-base leading-6 text-kumo-default">
-            {text}
+            <MentionText text={text} />
           </div>
           {hasThread && (
             <button

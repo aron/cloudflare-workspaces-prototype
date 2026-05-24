@@ -15,6 +15,9 @@ import { isToolUIPart, getToolName } from "ai";
 import { ArrowUp, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { MentionText } from "@/components/MentionText";
+import { MentionTextarea } from "@/components/MentionTextarea";
+import { MentionHighlighter } from "@/components/MentionHighlighter";
 import {
   Message,
   MessageContent,
@@ -145,7 +148,7 @@ export function ThreadPanel({
                 <span className="text-sm font-semibold text-kumo-default">{rootInitial.name}</span>
                 <span className="text-2xs text-kumo-inactive tabular-nums">{rootInitial.time}</span>
               </div>
-              <p className="mt-1 whitespace-pre-wrap text-sm leading-5 text-kumo-default">{rootInitial.text}</p>
+              <p className="mt-1 whitespace-pre-wrap text-sm leading-5 text-kumo-default"><MentionText text={rootInitial.text} /></p>
             </div>
           </div>
         </div>
@@ -175,7 +178,7 @@ export function ThreadPanel({
                   <Message from="user" className="ml-0 max-w-full flex-1">
                     <div className="mb-1 text-2xs text-kumo-inactive">{name}</div>
                     <MessageContent>
-                      <MessageResponse>{text}</MessageResponse>
+                      <div className="whitespace-pre-wrap"><MentionText text={text} /></div>
                     </MessageContent>
                   </Message>
                 </div>
@@ -189,7 +192,9 @@ export function ThreadPanel({
                     if (part.type === "text") {
                       return (
                         <MessageContent key={i}>
-                          <MessageResponse>{part.text}</MessageResponse>
+                          <MentionHighlighter>
+                            <MessageResponse>{part.text}</MessageResponse>
+                          </MentionHighlighter>
                         </MessageContent>
                       );
                     }
@@ -236,10 +241,10 @@ export function ThreadPanel({
 
       <div className="flex-shrink-0 bg-kumo-base px-4 pb-3 pt-2">
         <div className="prompt-input rounded-2xl border px-3.5 pb-2 pt-3">
-          <textarea
+          <MentionTextarea
             rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={setInput}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder="Reply…"
             disabled={status !== "connected"}

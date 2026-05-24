@@ -10,19 +10,13 @@
 import { DurableObject } from "cloudflare:workers";
 import { requireIdentity } from "./identity.js";
 import { currentModelLabel } from "./model.js";
-import type { RoomSummary } from "@app/shared";
+import type { RoomSummary, UserSummary } from "@app/shared";
 
 /** Stable singleton id used by the worker to address this DO. */
 export const APP_DO_NAME = "app";
 
-export type { RoomSummary } from "@app/shared";
+export type { RoomSummary, UserSummary } from "@app/shared";
 
-export interface UserSummary {
-  id:        string;
-  email:     string;
-  name:      string;
-  lastSeen:  number;
-}
 
 export class App extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -63,6 +57,11 @@ export class App extends DurableObject<Env> {
         name:   identity.name,
         model:  currentModelLabel(this.env),
       });
+    }
+
+    // GET /users — directory of every user that has signed in.
+    if (request.method === "GET" && url.pathname.endsWith("/users")) {
+      return Response.json({ users: this.listUsers() });
     }
 
     // GET /rooms — list all rooms, newest first.
@@ -120,4 +119,28 @@ export class App extends DurableObject<Env> {
       createdAt: r.created_at,
     }));
   }
+
+  private listUsers(): UserSummary[] {
+    const rows = this.sql.exec<{
+      id: string; email: string; name: string; last_seen: number;
+    }>(`SELECT id, email, name, last_seen FROM users ORDER BY last_seen DESC LIMIT 500`);
+    return [...rows].map(r => ({
+      id:       r.id,
+      email:    r.email,
+      name:     r.name,
+      username: deriveUsername(r.email),
+      lastSeen: r.last_seen,
+    }));
+  }
+}
+
+/**
+ * Derive a stable mention handle from an email. The bit before `@`,
+ * lowercased, with anything outside `[a-z0-9._-]` stripped. Falls back to
+ * `"user"` for pathological inputs so we never produce an empty handle.
+ */
+export function deriveUsername(email: string): string {
+  const local = email.split("@")[0] ?? "";
+  const clean = local.toLowerCase().replace(/[^a-z0-9._-]+/g, "");
+  return clean || "user";
 }

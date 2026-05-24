@@ -30,6 +30,22 @@ export interface Me {
   model:  string;
 }
 
+/**
+ * Public-facing summary of a known user. Anyone who has signed in once is
+ * recorded by the App DO and may show up in mention autocomplete.
+ *
+ * `username` is the bit before the `@` of `email`, lowercased and stripped
+ * of anything outside `[a-z0-9._-]` — stable, display-only, never sent back
+ * to the server as an identifier.
+ */
+export interface UserSummary {
+  id:        string;
+  email:     string;
+  name:      string;
+  username:  string;
+  lastSeen:  number;
+}
+
 // ---- messages / rooms / threads ----
 
 /**

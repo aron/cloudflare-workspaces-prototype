@@ -6,8 +6,9 @@
  * cookie is sent on cross-handler navigations.
  */
 
-import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow } from "@app/shared";
-export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow };
+import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSummary } from "@app/shared";
+export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSummary };
+
 
 const OPTS: RequestInit = { credentials: "same-origin" };
 
@@ -26,6 +27,15 @@ async function jsonOrThrow<T>(res: Response, label: string): Promise<T> {
 export async function fetchMe(): Promise<Me> {
   return jsonOrThrow(await fetch("/api/app/me", OPTS), "GET /api/app/me");
 }
+
+export async function fetchUsers(): Promise<UserSummary[]> {
+  const body = await jsonOrThrow<{ users: UserSummary[] }>(
+    await fetch("/api/app/users", OPTS),
+    "GET /api/app/users",
+  );
+  return body.users;
+}
+
 
 export async function listRooms(): Promise<RoomSummary[]> {
   const body = await jsonOrThrow<{ rooms: RoomSummary[] }>(

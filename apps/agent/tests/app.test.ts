@@ -5,6 +5,7 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { asUser, ARON, BEA } from "./identity.js";
+import { deriveUsername } from "../src/app.js";
 
 function appStub() {
   return env.App.get(env.App.idFromName("app"));
@@ -75,5 +76,41 @@ describe("App /rooms", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("App /users", () => {
+  it("records every caller and returns them with derived usernames", async () => {
+    // Touch both users via /me so they're upserted.
+    await appStub().fetch(asUser("https://app/me", ARON));
+    await appStub().fetch(asUser("https://app/me", BEA));
+
+    const res = await appStub().fetch(asUser("https://app/users", ARON));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { users: Array<{ id: string; username: string; email: string }> };
+    const byId = new Map(body.users.map(u => [u.id, u]));
+    expect(byId.get(ARON.userId)?.username).toBe("aron");
+    expect(byId.get(BEA.userId)?.username).toBe("bea");
+  });
+
+  it("rejects requests without identity headers with 401", async () => {
+    const res = await appStub().fetch(new Request("https://app/users"));
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("deriveUsername", () => {
+  it("takes the bit before @, lowercased", () => {
+    expect(deriveUsername("Aron@example.com")).toBe("aron");
+  });
+  it("keeps dots, dashes, underscores", () => {
+    expect(deriveUsername("first.last_v2-beta@x")).toBe("first.last_v2-beta");
+  });
+  it("strips characters outside the safe set", () => {
+    expect(deriveUsername("a+b!c@x")).toBe("abc");
+  });
+  it("falls back to 'user' when the local part is empty after sanitization", () => {
+    expect(deriveUsername("+++@x")).toBe("user");
+    expect(deriveUsername("")).toBe("user");
   });
 });
