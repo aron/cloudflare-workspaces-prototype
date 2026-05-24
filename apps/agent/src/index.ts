@@ -4,27 +4,34 @@ import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { PERSONAS, DEFAULT_PERSONA } from "./personas/index.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
-import { verifyAccessJwt } from "./access.js";
+import { App, APP_DO_NAME } from "./app.js";
+import { Room } from "./room.js";
+import { resolveIdentity, withIdentity, type AccessIdentity } from "./identity.js";
 
-export { Agent, SubAgent, Sandbox, WarmPool };
+export { Agent, SubAgent, App, Room, Sandbox, WarmPool };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Cloudflare Access gate. Set ACCESS_TEAM_DOMAIN + ACCESS_AUD in
-    // wrangler.jsonc vars (or as secrets) to enable. Skip when not
-    // configured so local `wrangler dev` still works.
-    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
-      try {
-        await verifyAccessJwt(request, {
-          teamDomain: env.ACCESS_TEAM_DOMAIN,
-          aud:        env.ACCESS_AUD,
-        });
-      } catch (err) {
-        return new Response(`Access denied: ${(err as Error).message}`, { status: 401 });
-      }
+    // Resolve identity for every request. Access is required in prod; local
+    // dev falls back to ACCESS_DEV_USER (or a hardcoded local identity).
+    const identity = await resolveIdentity(request, env);
+    if (!identity) {
+      return new Response("Access denied", { status: 401 });
     }
 
     const url = new URL(request.url);
+
+    // /api/app/* — proxied to the singleton App with identity attached.
+    if (url.pathname.startsWith("/api/app/")) {
+      return handleAppRequest(request, env, identity);
+    }
+
+    // /api/rooms/:id/...  — proxied to the per-room DO.
+    if (url.pathname.startsWith("/api/rooms/")) {
+      return handleRoomRequest(request, env, identity);
+    }
+
+
 
     // Top-level persona registry — used by the chat UI to populate the
     // "New session" dropdown. Stateless, no session required.
@@ -78,7 +85,7 @@ export default {
       if (cmd === "messages" || cmd === "vfs" || cmd === "reset" || cmd === "persona") {
         const id   = env.Agent.idFromName(sessionId);
         const stub = env.Agent.get(id);
-        return stub.fetch(request);
+        return stub.fetch(withIdentity(request, identity));
       }
 
       if (cmd === "pool") {
@@ -89,7 +96,10 @@ export default {
     }
 
     // Agent WebSocket connections and RPC calls
-    const agentResponse = await routeAgentRequest(request, env);
+    // Attach worker-trusted identity headers so the Agent DO can stamp
+    // user messages with the correct author metadata even when the connection
+    // is shared by multiple humans (the WS frame itself carries no identity).
+    const agentResponse = await routeAgentRequest(withIdentity(request, identity), env);
     if (agentResponse) return agentResponse;
 
     return new Response("not found", { status: 404 });
@@ -103,3 +113,63 @@ export default {
     await primePool(env);
   },
 } satisfies ExportedHandler<Env>;
+
+// ---- helpers ----
+
+/**
+ * Forward to the singleton App. When a room is created we also seed the
+ * corresponding Room so the client can talk to it immediately.
+ */
+async function handleAppRequest(
+  request:  Request,
+  env:      Env,
+  identity: AccessIdentity,
+): Promise<Response> {
+  const url      = new URL(request.url);
+  const innerUrl = new URL(request.url);
+  innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
+  const inner = new Request(innerUrl, request);
+  const stub  = env.App.get(env.App.idFromName(APP_DO_NAME));
+  const res   = await stub.fetch(withIdentity(inner, identity));
+
+  // Side-effect: when App creates a room, init the Room so /api/rooms/:id
+  // is immediately usable. We don't fail the response if init fails — the
+  // room row exists, the client can retry.
+  if (res.status === 201 && url.pathname.endsWith("/rooms") && request.method === "POST") {
+    const cloned = res.clone();
+    const body   = await cloned.json().catch(() => null) as { room?: { id: string; name: string; createdBy: string } } | null;
+    if (body?.room) {
+      const roomStub = env.Room.get(env.Room.idFromName(body.room.id));
+      await roomStub.fetch(withIdentity(
+        new Request("https://room/init", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          body:    JSON.stringify(body.room),
+        }),
+        identity,
+      )).catch(() => undefined);
+    }
+  }
+  return res;
+}
+
+/**
+ * Forward to a per-room DO. URL shape: `/api/rooms/:id/<path>` → `/<path>`.
+ * WebSocket upgrades are passed through transparently.
+ */
+function handleRoomRequest(
+  request:  Request,
+  env:      Env,
+  identity: AccessIdentity,
+): Promise<Response> {
+  const url   = new URL(request.url);
+  const parts = url.pathname.slice("/api/rooms/".length).split("/");
+  const id    = parts[0];
+  if (!id) {
+    return Promise.resolve(new Response("missing room id", { status: 400 }));
+  }
+  const inner = new URL(request.url);
+  inner.pathname = "/" + parts.slice(1).join("/");
+  const stub = env.Room.get(env.Room.idFromName(id));
+  return stub.fetch(withIdentity(new Request(inner, request), identity));
+}

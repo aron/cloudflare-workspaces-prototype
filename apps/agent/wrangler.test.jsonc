@@ -1,0 +1,33 @@
+{
+  // Stripped-down wrangler config for vitest-pool-workers. Only the bindings
+  // that test fixtures actually need — no containers, no AI, no LOADER.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-workspaces-prototype-test",
+  "main": "tests/_worker.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "App",     "name": "App"  },
+      { "class_name": "Room",    "name": "Room" },
+      { "class_name": "FakeAgent", "name": "Agent"  }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["App", "Room", "FakeAgent"] }
+  ],
+
+  // Pin vars so dev secrets in .dev.vars can't leak into tests — vitest-pool-workers
+  // otherwise inherits the dev env. Tests must run with no OpenAI / Brave key so we
+  // exercise the Workers AI fallback model id ("kimi-k2.6").
+  "vars": {
+    "OPENAI_API_KEY":      "",
+    "OPENAI_MODEL":        "",
+    "BRAVE_API_KEY":       "",
+    "ACCESS_TEAM_DOMAIN":  "",
+    "ACCESS_AUD":          "",
+    "ACCESS_DEV_USER":     ""
+  }
+}

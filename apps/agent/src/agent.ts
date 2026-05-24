@@ -36,6 +36,10 @@ import {
   createWebSearchTool,
 } from "@cloudflare/web-tools";
 import { resolveContainerId } from "./pool.js";
+import { resolvePersonaForTurn } from "./mentions.js";
+import { currentModelId } from "./model.js";
+import { readIdentity } from "./identity.js";
+import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import {
   COMMON_TOOLS,
   DEFAULT_PERSONA,
@@ -113,11 +117,21 @@ export class Agent extends Think<Env> {
     this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
   }
 
-  // ── Think hooks ─────────────────────────────────────────────────────────
+  // ── Think hooks ───────────────────────────────────────
 
-  /** Active persona's system prompt. */
+  /**
+   * Active persona for this turn. Resolves the most-recent `@mention`
+   * in message history and falls back to the thread's stored persona.
+   * Shared by `getSystemPrompt()` and `getTools()` so the prompt and
+   * tool surface always agree.
+   */
+  private activePersona(): Persona {
+    return lookupPersona(resolvePersonaForTurn(this.messages, this.personaId));
+  }
+
+  /** Active persona's system prompt (per-turn, mention-aware). */
   override getSystemPrompt(): string {
-    return this.persona.systemPrompt;
+    return this.activePersona().systemPrompt;
   }
 
   /**
@@ -125,14 +139,11 @@ export class Agent extends Think<Env> {
    * the Workers AI fallback. Mirrors the old `onChatMessage` picker.
    */
   override getModel() {
+    const modelId = currentModelId(this.env);
     if (this.env.OPENAI_API_KEY) {
-      return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(
-        this.env.OPENAI_MODEL ?? "gpt-4o-mini"
-      );
+      return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(modelId);
     }
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
-    );
+    return createWorkersAI({ binding: this.env.AI })(modelId);
   }
 
   /**
@@ -179,6 +190,34 @@ export class Agent extends Think<Env> {
     };
   }
 
+  // ── Identity stamping (multi-human threads) ───────────────
+  //
+  // A single WS connection can be shared by multiple humans (the room view
+  // posts on behalf of whoever is signed in). Capture the upgrade-time
+  // identity on the connection and stamp incoming user messages with the
+  // right `author` metadata before Think persists them.
+
+  /**
+   * Capture the human's identity from the WS upgrade request and stash it
+   * on the connection. `connection.setState()` is persisted by the agents
+   * SDK and survives hibernation, so we don't re-resolve on every wake.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async onConnect(connection: any, ctx: any) {
+    const author = extractAuthorFromUpgradeRequest(ctx.request as Request, readIdentity);
+    if (author) connection.setState({ author });
+    return super.onConnect?.(connection, ctx);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async onMessage(connection: any, message: any) {
+    if (typeof message === "string") {
+      const author = (connection.state as { author?: ChatAuthor } | null)?.author ?? null;
+      message = stampChatFrame(message, author);
+    }
+    return super.onMessage(connection, message);
+  }
+
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -217,20 +256,53 @@ export class Agent extends Think<Env> {
       return Response.json({ ok: true, persona: p });
     }
 
+    // POST /seed { personaId, roomId, threadId, message } — called by Room
+    // when a `@persona` mention mints a thread. Sets the thread's default
+    // persona and persists the originating user message as the first turn.
+    // Idempotent: re-seeding a thread that already exists is a no-op so the
+    // client can safely retry on transient failures.
+    if (request.method === "POST" && url.pathname.endsWith("/seed")) {
+      const body = await request.json().catch(() => ({})) as {
+        personaId?: unknown; roomId?: unknown; threadId?: unknown; message?: unknown;
+      };
+      const personaId = typeof body.personaId === "string" ? body.personaId : "";
+      const message   = body.message;
+      if (!personaId || !message || typeof message !== "object") {
+        return Response.json({ error: "personaId and message are required" }, { status: 400 });
+      }
+      const persona = lookupPersona(personaId);
+      if (persona.id !== personaId) {
+        return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
+      }
+      // Idempotency: if the seed message id is already in history, treat as
+      // already-seeded and just confirm the current persona.
+      const messageId = (message as { id?: unknown }).id;
+      const alreadySeeded = typeof messageId === "string"
+        && this.messages.some(m => m.id === messageId);
+      if (!alreadySeeded) {
+        this.setPersonaId(persona.id);
+        // Cast through `any` — saveMessages accepts the AI SDK UIMessage shape;
+        // we trust the caller (Room) to send a well-formed AppMessage.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await this.saveMessages([message as any]);
+      }
+      return Response.json({ ok: true, seeded: !alreadySeeded, personaId: persona.id });
+    }
+
     return new Response("not found", { status: 404 });
   }
 
   // ---- tools ----
 
   /**
-   * Tools the agentic loop sees this turn. Gated by the active persona:
-   * COMMON_TOOLS plus whatever `extraTools` the persona declares. The
-   * old `buildTools(persona)` helper was called from a manual
-   * `onChatMessage`; under Think this IS the public override Think's
-   * loop calls every turn.
+   * Tools the agentic loop sees this turn. Gated by the active persona
+   * (per-turn, mention-aware): COMMON_TOOLS plus the persona's
+   * `extraTools`. The old `buildTools(persona)` helper was called from a
+   * manual `onChatMessage`; under Think this IS the public override
+   * Think's loop calls every turn.
    */
   override getTools() {
-    return this.buildTools(this.persona);
+    return this.buildTools(this.activePersona());
   }
 
   /** Introspection RPC: the set of tool names visible to the LLM. */

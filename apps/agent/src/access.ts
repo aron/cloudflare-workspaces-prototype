@@ -11,9 +11,13 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 export interface AccessIdentity {
-  email: string;
-  sub:   string;          // unique user id from the IdP
-  raw:   JWTPayload;      // full claims, useful for debugging
+  /** Stable user id from the IdP. Use this as the canonical key. */
+  userId: string;
+  email:  string;
+  /** Display name. Derived from the JWT, falling back to the email local-part. */
+  name:   string;
+  /** Full claims, useful for debugging. */
+  raw:    JWTPayload;
 }
 
 export interface AccessConfig {
@@ -60,7 +64,9 @@ export async function verifyAccessJwt(
   const email = (payload.email ?? payload["custom:email"]) as string | undefined;
   if (!email) throw new Error("Access JWT has no email claim");
 
-  return { email, sub: payload.sub ?? "unknown", raw: payload };
+  const userId = payload.sub ?? email;
+  const name   = deriveName(payload, email);
+  return { userId, email, name, raw: payload };
 }
 
 /** Convenience: returns null on failure instead of throwing. */
@@ -80,4 +86,20 @@ function readCookie(header: string | null, name: string): string | null {
     if (part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
   }
   return null;
+}
+
+/**
+ * Derive a display name from common JWT claims. Falls back to the local-part
+ * of the email if nothing else is available.
+ */
+function deriveName(payload: JWTPayload, email: string): string {
+  const name = payload.name as string | undefined;
+  if (name && name.trim()) return name.trim();
+
+  const given  = payload.given_name as string | undefined;
+  const family = payload.family_name as string | undefined;
+  const joined = [given, family].filter(Boolean).join(" ").trim();
+  if (joined) return joined;
+
+  return email.split("@")[0] ?? email;
 }

@@ -1,0 +1,147 @@
+/**
+ * Left rail rendered whenever the user is inside a room (or thread).
+ * Lists the live set of rooms from the AppDO, highlights the active one,
+ * and shows the signed-in user at the bottom.
+ *
+ * Visual structure is straight from Mockup.tsx — search box, RoomListItem
+ * cards, identity pill — wired against `listRooms()` and `navigate()`.
+ */
+
+import { useEffect, useState } from "react";
+import { Plus, Search } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { listRooms } from "@/lib/api";
+import type { Me, RoomSummary } from "@/lib/api";
+import { navigate } from "@/lib/nav";
+import { initials, relTime } from "@/lib/utils";
+
+const AVATAR_PALETTE = [
+  "bg-[#ea7d3a]",
+  "bg-[#3f8f7a]",
+  "bg-[#a85f3d]",
+  "bg-[#5a5a5a]",
+  "bg-[#c89f5b]",
+];
+
+function avatarIdx(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h % AVATAR_PALETTE.length;
+}
+
+export function RoomSidebar({
+  me,
+  activeRoomId,
+}: {
+  me:            Me;
+  activeRoomId?: string;
+}) {
+  const [rooms, setRooms] = useState<RoomSummary[]>([]);
+  const [filter, setFilter] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    void listRooms().then(rs => { if (!cancelled) setRooms(rs); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const visible = filter.trim()
+    ? rooms.filter(r => r.name.toLowerCase().includes(filter.trim().toLowerCase()))
+    : rooms;
+
+  return (
+    <aside className="flex h-full flex-col border-r border-kumo-line bg-kumo-base">
+      <div className="flex h-14 flex-shrink-0 items-center justify-between px-5">
+        <h2 className="text-md font-semibold">Rooms</h2>
+        <Button
+          size="sm"
+          onClick={() => navigate({ kind: "picker" })}
+          className="h-8 gap-1.5 rounded-lg bg-kumo-brand px-2.5 text-sm font-medium text-white hover:bg-kumo-brand-hover"
+        >
+          <Plus className="size-3" strokeWidth={2.5} />
+          New
+        </Button>
+      </div>
+
+      <div className="px-4 pb-3">
+        <div className="flex h-9 items-center gap-2 rounded-lg border border-kumo-line bg-kumo-elevated px-3 focus-within:border-kumo-ring focus-within:bg-kumo-base">
+          <Search size={14} className="text-kumo-inactive" />
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Search rooms…"
+            className="block w-full border-0 bg-transparent p-0 text-sm outline-none placeholder:text-kumo-inactive"
+          />
+        </div>
+      </div>
+
+      <div className="chat-panel flex-1 space-y-1 overflow-y-auto px-3 pb-4">
+        {visible.map(r => (
+          <RoomListItem
+            key={r.id}
+            letter={initials(r.name).slice(0, 1)}
+            title={r.name}
+            meta={relTime(r.createdAt)}
+            active={r.id === activeRoomId}
+            idx={avatarIdx(r.id)}
+            onClick={() => navigate({ kind: "room", roomId: r.id })}
+          />
+        ))}
+        {visible.length === 0 && (
+          <div className="mt-4 px-2 text-center text-xs text-kumo-inactive">
+            {filter ? "no matches" : "no rooms yet"}
+          </div>
+        )}
+      </div>
+
+      <div className="flex h-12 flex-shrink-0 items-center gap-2.5 border-t border-kumo-line px-4">
+        <div className={`flex size-8 flex-shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white ${AVATAR_PALETTE[avatarIdx(me.userId)]}`}>
+          {initials(me.name)}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{me.email}</div>
+        </div>
+
+      </div>
+    </aside>
+  );
+}
+
+function RoomListItem({
+  letter,
+  title,
+  meta,
+  active = false,
+  idx = 0,
+  onClick,
+}: {
+  letter:  string;
+  title:   string;
+  meta:    string;
+  active?: boolean;
+  idx?:    number;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`group flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+        active
+          ? "border-kumo-line bg-kumo-elevated"
+          : "border-transparent hover:border-kumo-line hover:bg-kumo-elevated"
+      }`}
+    >
+      <div
+        className={`flex size-9 flex-shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white shadow-sm ring-1 ring-black/5 ${AVATAR_PALETTE[idx % AVATAR_PALETTE.length]}`}
+      >
+        {letter}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-base font-medium text-kumo-default">{title}</div>
+        <div className="truncate text-xs text-kumo-inactive">{meta}</div>
+      </div>
+    </button>
+  );
+}

@@ -1,6 +1,8 @@
 declare namespace Cloudflare {
   interface Env {
     Agent:          DurableObjectNamespace<import("./src/agent").Agent>;
+    App:          DurableObjectNamespace<import("./src/app").App>;
+    Room:         DurableObjectNamespace<import("./src/room").Room>;
     Sandbox:        DurableObjectNamespace<import("@cloudflare/sandbox").Sandbox>;
     WarmPool:       DurableObjectNamespace<import("./src/warm-pool").WarmPool>;
     AI:             Ai;
@@ -12,6 +14,7 @@ declare namespace Cloudflare {
     ACCESS_TEAM_DOMAIN?:         string;  // e.g. "yourteam.cloudflareaccess.com"
     ACCESS_AUD?:                 string;  // Application AUD tag from Access settings
     WARM_POOL_REFRESH_INTERVAL?: string;
+    ACCESS_DEV_USER?:            string;  // JSON identity for local dev
   }
 }
 interface Env extends Cloudflare.Env {}

@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "agent-tests",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  // No AI binding — tests never trigger model turns.
+  // No Sandbox container binding — tests never exercise exec/run.
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "Agent", "name": "Agent" },
+      { "class_name": "SubAgent", "name": "SubAgent" }
+    ]
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "main": "_worker.ts",
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Agent", "SubAgent"]
+    }
+  ],
+  // Pin vars so dev secrets in .dev.vars can't leak into tests — vitest-pool-workers
+  // otherwise inherits the dev env. BRAVE_API_KEY is a dummy so the webSearch tool
+  // registers under getTools() (tests inspect tool-name visibility, no network).
+  // OpenAI key is force-cleared so the Workers AI fallback model is selected.
+  "vars": {
+    "BRAVE_API_KEY":  "test-key",
+    "OPENAI_API_KEY": "",
+    "OPENAI_MODEL":   ""
+  }
+}

@@ -9,9 +9,9 @@
   "worker_loaders": [{ "binding": "LOADER" }],
 
   "assets": {
-    "directory": "./dist",
+    "directory": "../frontend/dist",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/debug/*", "/personas"]
+    "run_worker_first": ["/agents/*", "/api/*", "/debug/*", "/personas"]
   },
   "containers": [
     {
@@ -25,17 +25,20 @@
 
   "durable_objects": {
     "bindings": [
-      { "class_name": "Agent", "name": "Agent" },
-      { "class_name": "Sandbox", "name": "Sandbox" },
-      { "class_name": "WarmPool", "name": "WarmPool" },
-      { "class_name": "SubAgent", "name": "SubAgent" }
+      { "class_name": "Agent",    "name": "Agent"    },
+      { "class_name": "SubAgent", "name": "SubAgent" },
+      { "class_name": "App",      "name": "App"      },
+      { "class_name": "Room",     "name": "Room"     },
+      { "class_name": "Sandbox",  "name": "Sandbox"  },
+      { "class_name": "WarmPool", "name": "WarmPool" }
     ]
   },
 
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Agent", "Sandbox"] },
     { "tag": "v2", "new_sqlite_classes": ["WarmPool"] },
-    { "tag": "v3", "new_sqlite_classes": ["SubAgent"] }
+    { "tag": "v3", "new_sqlite_classes": ["SubAgent"] },
+    { "tag": "v4", "new_sqlite_classes": ["App", "Room"] }
   ],
 
   // Cron trigger — primes the warm pool so its alarm loop starts on deploy.

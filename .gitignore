@@ -1,16 +1,25 @@
+# Local secrets (developer-supplied)
+.env
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+
 node_modules/
 .wrangler/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.screenshots/
 
 # Build artifacts
 packages/workspace/dist/
 apps/agent/dist/
+apps/frontend/dist/
+ui-prototype/
 **/node_modules.host-backup.*/
 
 # Local secrets / certs (developer-supplied)
-apps/agent/.dev.vars
 apps/agent/sandbox/*.crt
 
 # container-go spike build artifacts
