@@ -7,7 +7,7 @@
  * so this component is layout-only.
  */
 
-import { Hexagon, Settings, Share2 } from "lucide-react";
+import { Hexagon } from "lucide-react";
 
 import {
   ResizableHandle,
@@ -15,7 +15,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 
-import { Button } from "@/components/ui/button";
+
 import { RoomSidebar } from "@/components/RoomSidebar";
 import type { Me } from "@/lib/api";
 
@@ -41,14 +41,7 @@ export function RoomShell({
           <Hexagon size={20} strokeWidth={2.5} className="text-kumo-brand" />
           <span className="text-md font-semibold tracking-tight">hackspace</span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="icon-sm" aria-label="Share">
-            <Share2 className="size-4" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" aria-label="Settings">
-            <Settings className="size-4" />
-          </Button>
-        </div>
+
       </header>
 
       <ResizablePanelGroup

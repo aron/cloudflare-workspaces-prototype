@@ -10,19 +10,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
-  ChevronDown,
   ChevronRight,
-  MoreVertical,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+
 
 import {
   fetchRoomMeta,
@@ -61,9 +53,12 @@ function authorKey(msg: AppMessage): string {
 export function RoomTimeline({
   roomId,
   activeThreadId,
+  model,
 }: {
   roomId:          string;
   activeThreadId?: string;
+  /** Human-readable label for the current model. Display-only. */
+  model:           string;
 }) {
   const [meta,     setMeta]     = useState<RoomMeta | null>(null);
   const [messages, setMessages] = useState<AppMessage[]>([]);
@@ -155,19 +150,7 @@ export function RoomTimeline({
             </div>
           )}
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Room actions">
-              <MoreVertical className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-[160px]">
-            <DropdownMenuItem>Rename room</DropdownMenuItem>
-            <DropdownMenuItem>Room settings</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem destructive>Delete room</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+
       </header>
 
       {error && (
@@ -216,10 +199,9 @@ export function RoomTimeline({
             className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
           />
           <div className="flex items-end justify-between gap-2 pt-2">
-            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-sm font-medium" disabled>
-              Claude Sonnet 4.6
-              <ChevronDown size={11} />
-            </Button>
+            <span className="text-xs font-medium text-kumo-inactive" title="current model">
+              {model}
+            </span>
             <Button
               size="icon-sm"
               aria-label="Send"

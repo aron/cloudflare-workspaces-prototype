@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
-import { ArrowUp, ChevronDown, MoreVertical, X } from "lucide-react";
+import { ArrowUp, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -55,9 +55,12 @@ function authorIdx(seed: string): number {
 export function ThreadPanel({
   roomId,
   threadId,
+  model,
 }: {
   roomId:   string;
   threadId: string;
+  /** Human-readable label for the current model. Display-only. */
+  model:    string;
 }) {
   const [root, setRoot] = useState<AppMessage | null>(null);
   const [input, setInput] = useState("");
@@ -120,9 +123,7 @@ export function ThreadPanel({
             <span>{status}</span>
           </div>
         </div>
-        <Button variant="ghost" size="icon-sm" aria-label="More">
-          <MoreVertical className="size-4" />
-        </Button>
+
         <Button
           variant="ghost"
           size="icon-sm"
@@ -245,10 +246,9 @@ export function ThreadPanel({
             className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
           />
           <div className="flex items-end justify-between gap-2 pt-2">
-            <Button variant="outline" size="sm" className="h-7 gap-1 text-xs font-medium" disabled>
-              Claude Sonnet 4.6
-              <ChevronDown size={10} />
-            </Button>
+            <span className="text-2xs font-medium text-kumo-inactive" title="current model">
+              {model}
+            </span>
             {isStreaming ? (
               <Button
                 size="sm"

@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { MoreVertical, Plus, Search } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { listRooms } from "@/lib/api";
@@ -103,9 +103,7 @@ export function RoomSidebar({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{me.email}</div>
         </div>
-        <Button variant="ghost" size="icon-sm" aria-label="Account">
-          <MoreVertical className="size-4" />
-        </Button>
+
       </div>
     </aside>
   );

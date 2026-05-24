@@ -49,7 +49,7 @@ export function App() {
     case "room":
       return (
         <RoomShell me={me} roomId={route.roomId}
-                   centre={<RoomTimeline roomId={route.roomId} />} />
+                   centre={<RoomTimeline roomId={route.roomId} model={me.model} />} />
       );
 
     case "thread":
@@ -58,8 +58,8 @@ export function App() {
           me={me}
           roomId={route.roomId}
           threadId={route.threadId}
-          centre={<RoomTimeline roomId={route.roomId} activeThreadId={route.threadId} />}
-          thread={<ThreadPanel roomId={route.roomId} threadId={route.threadId} />}
+          centre={<RoomTimeline roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
+          thread={<ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />}
         />
       );
   }
