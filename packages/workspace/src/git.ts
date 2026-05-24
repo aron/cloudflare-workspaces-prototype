@@ -19,9 +19,12 @@ export {
 export type {
   ArtifactsBinding,
   ArtifactsCreateOptions,
-  ArtifactsCreateResult,
+  ArtifactsCreateRepoResult,
+  ArtifactsCreateTokenResult,
+  ArtifactsRepoInfo,
+  ArtifactsRepoListResult,
   ArtifactsImportParams,
-  ArtifactsRepoHandle,
+  ArtifactsRepo,
   EnsureBaselineOptions,
   CloneOptions,
 } from "./mounts/artifacts.js";

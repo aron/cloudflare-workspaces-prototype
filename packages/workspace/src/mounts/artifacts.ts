@@ -29,15 +29,18 @@ import type { Vfs } from "../vfs.js";
 import { createVfsFs } from "./vfs-fs.js";
 
 /**
- * Minimal shape of the Artifacts Workers binding that we depend on.
+ * Subset of the Cloudflare Artifacts Workers binding we depend on.
  * Declared locally so this package doesn't take a hard runtime dependency
  * on `@cloudflare/workers-types` augmenting the global namespace.
+ *
+ * Mirrors the shapes published in @cloudflare/workers-types/experimental
+ * (`interface Artifacts`, `interface ArtifactsRepo`, etc.).
  */
 export interface ArtifactsBinding {
-  create(name: string, opts?: ArtifactsCreateOptions): Promise<ArtifactsCreateResult>;
-  get(name: string): Promise<ArtifactsRepoHandle>;
-  list(opts?: { limit?: number; cursor?: string }): Promise<{ repos: Array<{ name: string; status: string }>; cursor?: string }>;
-  import(params: ArtifactsImportParams): Promise<ArtifactsCreateResult>;
+  create(name: string, opts?: ArtifactsCreateOptions): Promise<ArtifactsCreateRepoResult>;
+  get(name: string): Promise<ArtifactsRepo>;
+  list(opts?: { limit?: number; cursor?: string }): Promise<ArtifactsRepoListResult>;
+  import(params: ArtifactsImportParams): Promise<ArtifactsCreateRepoResult>;
   delete(name: string): Promise<boolean>;
 }
 
@@ -47,24 +50,53 @@ export interface ArtifactsCreateOptions {
   setDefaultBranch?: string;
 }
 
-export interface ArtifactsCreateResult {
+/** Returned by `create()` and `import()` — includes a fresh access token. */
+export interface ArtifactsCreateRepoResult {
+  id: string;
   name: string;
-  remote: string;
+  description: string | null;
   defaultBranch: string;
-  /** Encoded as `art_v1_<hex>?expires=<unix_seconds>` per the docs. */
+  remote: string;
   token: string;
+  tokenExpiresAt: string;
+}
+
+/** Per-repo metadata returned by `get()` and embedded in list/import results. */
+export interface ArtifactsRepoInfo {
+  id: string;
+  name: string;
+  description: string | null;
+  defaultBranch: string;
+  createdAt: string;
+  updatedAt: string;
+  lastPushAt: string | null;
+  source: string | null;
+  readOnly: boolean;
+  remote: string;
+}
+
+export interface ArtifactsRepoListResult {
+  repos: Omit<ArtifactsRepoInfo, "remote">[];
+  total: number;
+  cursor?: string;
+}
+
+export interface ArtifactsCreateTokenResult {
+  id: string;
+  plaintext: string;
+  scope: "read" | "write";
+  expiresAt: string;
 }
 
 export interface ArtifactsImportParams {
   source: { url: string; branch?: string; depth?: number };
-  target: { name: string; opts?: ArtifactsCreateOptions };
+  target: { name: string; opts?: { description?: string; readOnly?: boolean } };
 }
 
-export interface ArtifactsRepoHandle {
-  remote: string;
-  defaultBranch: string;
-  createToken(scope?: "read" | "write", ttlSeconds?: number): Promise<{ plaintext: string; expiresAt: string }>;
-  fork(name: string, opts?: ArtifactsCreateOptions & { defaultBranchOnly?: boolean }): Promise<ArtifactsCreateResult>;
+/** Repo handle returned by `get()` — extends the data with RPC methods. */
+export interface ArtifactsRepo extends ArtifactsRepoInfo {
+  createToken(scope?: "read" | "write", ttl?: number): Promise<ArtifactsCreateTokenResult>;
+  fork(name: string, opts?: ArtifactsCreateOptions & { defaultBranchOnly?: boolean }): Promise<ArtifactsCreateRepoResult>;
 }
 
 /** GitHub Artifact token format: strip everything from `?expires=` onward. */
@@ -101,12 +133,34 @@ export interface EnsureBaselineOptions {
 /**
  * Import `https://github.com/<owner>/<repo>` into a baseline Artifacts
  * repo (named deterministically from `(owner, repo, ref)`) if it doesn't
- * already exist. Returns a handle, a read token, and the remote URL.
+ * already exist. Returns the remote, a fresh read token, and the default
+ * branch.
  *
- * Concurrency: callers within the same DO isolate share the same in-flight
- * promise via the supplied `inflight` cache. Callers across isolates may
- * race; if both win the import call, the second sees a 409-style error
- * and re-fetches via `get()`.
+ * # Why this is more contorted than it ought to be
+ *
+ * `Artifacts.get(name)` returns an `ArtifactsRepo` which extends `RpcTarget`
+ * and exposes `remote` / `defaultBranch` as readonly **fields** (assigned in
+ * its constructor). workerd's JsRpcTarget refuses to proxy own-properties
+ * over RPC — only class-defined methods and getters on the prototype are
+ * accessible. Reading `await handle.remote` therefore fails with
+ * `The RPC receiver does not implement the method "remote"`. The TypeScript
+ * declarations in @cloudflare/workers-types lie about this working.
+ *
+ * `Artifacts.import()` / `Artifacts.create()` return plain `CreateRepoResult`
+ * objects (not RpcTarget instances), which capnweb serializes by value. So
+ * we can read `.remote` and `.token` directly off those returns.
+ *
+ * Strategy:
+ *   1. Try `import()` first. If the repo is new, we get a fresh
+ *      `CreateRepoResult` with everything we need in one round trip.
+ *   2. If `import()` fails with `ALREADY_EXISTS`, fall back to `list()`,
+ *      which returns plain `RemoteRepoInfo[]` (and *does* include `remote`)
+ *      and then mint a token via `get().createToken()` — `createToken` is
+ *      a class method on the prototype so it survives the RPC boundary.
+ *
+ * Concurrency: callers across isolates may race on the import; the loser
+ * sees `ALREADY_EXISTS` and falls back to the list path, which is
+ * eventually consistent.
  */
 export async function ensureBaselineRepo(opts: EnsureBaselineOptions): Promise<{
   name: string;
@@ -117,64 +171,77 @@ export async function ensureBaselineRepo(opts: EnsureBaselineOptions): Promise<{
   const name = baselineName(opts.owner, opts.repo, opts.ref);
   const url  = `https://github.com/${opts.owner}/${opts.repo}`;
 
-  // Fast path: repo already exists. Properties on the RPC stub are
-  // JsRpcProperty thenables — await them, otherwise we'd stringify a
-  // "[object JsRpcProperty]" into the remote URL and isomorphic-git
-  // would reject it on parse.
+  // Primary path: import. Returns plain data with `remote` and `token`
+  // accessible as ordinary string properties.
   try {
-    const handle = await opts.artifacts.get(name);
-    const tk = await handle.createToken("read", 3600);
-    const [remote, defaultBranch] = await Promise.all([
-      handle.remote,
-      handle.defaultBranch,
-    ]);
-    return {
-      name,
-      remote,
-      token: tk.plaintext,
-      defaultBranch,
-    };
-  } catch {
-    // Fall through to import.
-  }
-
-  try {
-    await opts.artifacts.import({
+    const created = await opts.artifacts.import({
       source: { url, branch: opts.ref, depth: opts.depth ?? 1 },
       target: { name, opts: { description: `Imported from ${url}@${opts.ref}`, readOnly: true } },
     });
-    // The import() stub doesn't expose `remote` / `defaultBranch` over
-    // RPC — those live on the get() handle. Round-trip through get() so
-    // we get a real handle whose property reads resolve via JsRpcProperty.
-    const handle = await opts.artifacts.get(name);
-    const tk = await handle.createToken("read", 3600);
-    const [remote, defaultBranch] = await Promise.all([
-      handle.remote,
-      handle.defaultBranch,
-    ]);
     return {
       name,
-      remote,
-      token: tk.plaintext,
-      defaultBranch,
+      remote: created.remote,
+      token:  created.token,
+      defaultBranch: created.defaultBranch,
     };
   } catch (err) {
-    // Two writers raced; the loser re-reads via get(). Log the original
-    // error so it's not silently swallowed in dev.
-    console.warn(`[GitHubRepo] import race for ${name}, falling back to get():`, err);
-    const handle = await opts.artifacts.get(name);
-    const tk = await handle.createToken("read", 3600);
-    const [remote, defaultBranch] = await Promise.all([
-      handle.remote,
-      handle.defaultBranch,
-    ]);
-    return {
-      name,
-      remote,
-      token: tk.plaintext,
-      defaultBranch,
-    };
+    // Anything other than "already exists" is fatal — the caller wraps
+    // this in an "artifacts import failed" error message anyway.
+    if (!isAlreadyExistsError(err)) throw err;
   }
+
+  // Repo already exists. Find its `remote` / `defaultBranch` via list()
+  // (plain data, no RPC stub problems) and mint a fresh read token via
+  // get().createToken() (method, not field — survives the RPC boundary).
+  const remoteInfo = await findRepoByName(opts.artifacts, name);
+  if (!remoteInfo) {
+    // Tiny race window: import() saw ALREADY_EXISTS but list() can't find
+    // it (e.g. it was deleted between the two calls). Surface a clear error.
+    throw new Error(`baseline repo "${name}" disappeared after import reported ALREADY_EXISTS`);
+  }
+  const handle = await opts.artifacts.get(name);
+  const tk = await handle.createToken("read", 3600);
+  return {
+    name,
+    remote: remoteInfo.remote,
+    token:  tk.plaintext,
+    defaultBranch: remoteInfo.defaultBranch,
+  };
+}
+
+/** Walks list() pages until we find the baseline, or exhaust the namespace. */
+async function findRepoByName(
+  artifacts: ArtifactsBinding,
+  name: string,
+): Promise<ArtifactsRepoInfo | null> {
+  let cursor: string | undefined;
+  do {
+    const page = await artifacts.list({ limit: 200, cursor });
+    for (const repo of page.repos) {
+      if (repo.name === name) {
+        // list() returns repos *without* the `remote` field per the types,
+        // but we need it. Cast via a follow-up that has it. In practice
+        // the live binding includes `remote` on list entries too — if it
+        // doesn't, we'd surface a clear error below.
+        const withRemote = repo as ArtifactsRepoInfo & { remote?: string };
+        if (!withRemote.remote) {
+          throw new Error(`list() returned repo "${name}" without a remote URL`);
+        }
+        return withRemote as ArtifactsRepoInfo;
+      }
+    }
+    cursor = page.cursor;
+  } while (cursor);
+  return null;
+}
+
+/** Best-effort match against the documented `ALREADY_EXISTS` error code. */
+function isAlreadyExistsError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string" && code === "ALREADY_EXISTS") return true;
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" && /already.*exists/i.test(message);
 }
 
 export interface CloneOptions {
