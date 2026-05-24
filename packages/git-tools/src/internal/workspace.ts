@@ -6,6 +6,7 @@
  */
 
 import type { Vfs } from "@cloudflare/workspace";
+import type { ForkRegistry } from "@cloudflare/workspace/git";
 
 export interface GitWorkspaceLike {
   /** Used to scope per-session Artifacts repo names. */
@@ -14,4 +15,10 @@ export interface GitWorkspaceLike {
   readonly vfs: Vfs;
   /** Workspace-level mkdir so the destination root is registered. */
   mkdir(path: string, mode?: number): Promise<void>;
+  /**
+   * Persistent storage for per-session fork records. Required by push +
+   * share tools so the same fork is reused across calls and DO restarts.
+   * Not consumed by `gitClone`, but tools that mutate need it.
+   */
+  forkRegistry?: ForkRegistry;
 }

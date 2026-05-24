@@ -31,7 +31,14 @@ import {
   createWriteTool,
   WorkspaceFileStore,
 } from "@cloudflare/fs-tools";
-import { createGitCloneTool } from "@cloudflare/git-tools";
+import {
+  createGitCloneTool,
+  createGitCommitTool,
+  createGitPushTool,
+  createGitShareTool,
+} from "@cloudflare/git-tools";
+import { createDoForkRegistry } from "./fork-registry.js";
+import type { ForkRegistry } from "@cloudflare/workspace/git";
 import {
   createBraveSearchProvider,
   createWebFetchTool,
@@ -123,6 +130,19 @@ export class Agent extends Think<Env> {
       this._deployer = new WorkerDeployer(this.workspace, this.env.LOADER);
     }
     return this._deployer;
+  }
+
+  /**
+   * Lazily-built SQL-backed `ForkRegistry`. Lives on the same DO storage
+   * the Workspace uses but in its own `_git_forks` table.
+   */
+  private _forks?: ForkRegistry;
+  private _forkRegistry(): ForkRegistry {
+    if (!this._forks) {
+      const sql = (this.ctx.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
+      this._forks = createDoForkRegistry(sql);
+    }
+    return this._forks;
   }
 
   onStart() {
@@ -337,6 +357,17 @@ export class Agent extends Think<Env> {
     const ws = this.workspace;
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
       ({ [name]: def });
+    // Shared shape for every git tool. Carries the session id (for
+    // per-session fork naming), the raw VFS (for isomorphic-git via the
+    // workspace fs adapter), an mkdir hook, and a SQLite-backed
+    // ForkRegistry so push/share calls remember which fork belongs to
+    // this session across DO restarts.
+    const gitWorkspace = {
+      sessionId: this.name,
+      vfs:       ws.vfs,
+      mkdir:     (p: string) => ws.mkdir(p),
+      forkRegistry: this._forkRegistry(),
+    };
 
     return {
       ...pick("read",  createReadTool({ store: new WorkspaceFileStore(ws) })),
@@ -431,11 +462,18 @@ export class Agent extends Think<Env> {
       })),
 
       ...pick("gitClone", createGitCloneTool({
-        workspace: {
-          sessionId: this.name,
-          vfs:       ws.vfs,
-          mkdir:     (p) => ws.mkdir(p),
-        },
+        workspace: gitWorkspace,
+        artifacts: this.env.Artifacts,
+      })),
+      ...pick("gitCommit", createGitCommitTool({
+        workspace: gitWorkspace,
+      })),
+      ...pick("gitPush", createGitPushTool({
+        workspace: gitWorkspace,
+        artifacts: this.env.Artifacts,
+      })),
+      ...pick("gitShare", createGitShareTool({
+        workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),
 

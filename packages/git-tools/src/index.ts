@@ -16,4 +16,14 @@
 
 export { createGitCloneTool } from "./tools/clone.js";
 export type { GitCloneToolOptions } from "./tools/clone.js";
+
+export { createGitCommitTool } from "./tools/commit.js";
+export type { GitCommitToolOptions } from "./tools/commit.js";
+
+export { createGitPushTool } from "./tools/push.js";
+export type { GitPushToolOptions } from "./tools/push.js";
+
+export { createGitShareTool } from "./tools/share.js";
+export type { GitShareToolOptions } from "./tools/share.js";
+
 export type { GitWorkspaceLike } from "./internal/workspace.js";

@@ -14,6 +14,13 @@ export {
   tokenSecret,
   baselineName,
   sanitizeForRepoName,
+  ensureSessionFork,
+  pushToRemote,
+  mintShareUrl,
+  commitWorkingTree,
+  sessionForkName,
+  sessionWipBranch,
+  parseRemoteForkName,
 } from "./mounts/artifacts.js";
 
 export type {
@@ -27,6 +34,12 @@ export type {
   ArtifactsRepo,
   EnsureBaselineOptions,
   CloneOptions,
+  ForkRecord,
+  ForkRegistry,
+  EnsureSessionForkOptions,
+  PushOptions,
+  MintShareUrlOptions,
+  CommitChangesOptions,
 } from "./mounts/artifacts.js";
 
 export { createVfsFs } from "./mounts/vfs-fs.js";
