@@ -1,0 +1,270 @@
+/*
+ * Frontend UI theme — single Kumo palette.
+ *
+ * Warm-orange tokens (backgrounds, borders, text, status colours) come
+ * from `@theme` below. AI Elements components have been re-skinned to
+ * use `bg-kumo-*` / `text-kumo-*` directly, so there is no shadcn
+ * `--background / --foreground / ...` bridge layer.
+ */
+
+@import "tailwindcss";
+
+@theme {
+  /* ===== FONTS ===== */
+  --font-sans: "FT Kunst Grotesk", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+  --font-mono: "Apercu Mono Pro", "SF Mono", Menlo, Monaco, Consolas, monospace;
+
+  /* Typography scale — 6 sizes between 11px and 16px, every screen pixel
+     accounted for. No arbitrary `text-[N.5px]` values in the app. */
+  --text-2xs: 0.6875rem;                /* 11px — captions, avatars */
+  --text-2xs--line-height: 0.875rem;    /* 14px */
+  --text-xs: 0.75rem;                   /* 12px — meta, tool name, timestamps */
+  --text-xs--line-height: 1rem;         /* 16px */
+  --text-sm: 0.8125rem;                 /* 13px — dense body, labels, thread reply */
+  --text-sm--line-height: 1.25rem;      /* 20px */
+  --text-base: 0.875rem;                /* 14px — primary body in centre pane */
+  --text-base--line-height: 1.375rem;   /* 22px */
+  --text-md: 0.9375rem;                 /* 15px — section heads, brand wordmark */
+  --text-md--line-height: 1.375rem;     /* 22px */
+  --text-lg: 1rem;                      /* 16px — reserved */
+  --text-lg--line-height: 1.5rem;       /* 24px */
+
+  /* ===== KUMO PALETTE (warm orange) ===== */
+
+  /* Backgrounds */
+  --color-kumo-base: #fffdfb;
+  --color-kumo-elevated: #fffbf5;
+  --color-kumo-tint: #fef7ed;
+  --color-kumo-overlay: #fff9f2;
+  --color-kumo-recessed: #fef0e0;
+  --color-kumo-contrast: #140400;
+  --color-kumo-fill: #ebd5c1;
+  --color-kumo-fill-hover: #e0c5aa;
+  --color-kumo-interact: #d4b08e;
+
+  /* Brand */
+  --color-kumo-brand: #ff4801;
+  --color-kumo-brand-hover: #e03f00;
+
+  /* Borders */
+  --color-kumo-line: #ebd5c180;
+  --color-kumo-ring: #d4b08e;
+
+  /* Status tints */
+  --color-kumo-info: oklch(62.3% 0.214 259.815);
+  --color-kumo-info-tint: oklch(90% 0.06 250);
+  --color-kumo-warning: oklch(79.5% 0.184 86.047);
+  --color-kumo-warning-tint: oklch(92% 0.08 85);
+  --color-kumo-danger: oklch(63.7% 0.237 25.331);
+  --color-kumo-danger-tint: oklch(92% 0.06 25);
+  --color-kumo-success: oklch(72.3% 0.219 149.579);
+  --color-kumo-success-tint: oklch(92% 0.08 150);
+
+  /* Text */
+  --text-color-kumo-default: #2a1d12;  /* warm near-black, ~85% darkness */
+  --text-color-kumo-inverse: #fffdfb;
+  --text-color-kumo-strong: #521000;
+  --text-color-kumo-subtle: oklch(55% 0.027 50);
+  --text-color-kumo-inactive: oklch(70% 0.015 50);
+  --text-color-kumo-brand: #ff4801;
+  --text-color-kumo-link: #ff4801;
+  --text-color-kumo-success: oklch(72.3% 0.219 149.579);
+  --text-color-kumo-danger: oklch(63.7% 0.237 25.331);
+  --text-color-kumo-warning: oklch(47.6% 0.114 61.907);
+
+  /* Selection */
+  --color-selection-bg: #ffe9e0;
+  --color-selection-text: #ff500a;
+
+  /* Radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+
+  /* Semantic surface ladder — use these for layering.
+     0 = page, 1 = cards/inputs (resting), 2 = highlights/hover, 3 = press. */
+  --surface-0: var(--color-kumo-base);
+  --surface-1: var(--color-kumo-elevated);
+  --surface-2: var(--color-kumo-tint);
+  --surface-3: var(--color-kumo-fill);
+
+  /* Shadow stack — prompt input + cards */
+  --shadow-stack: 1px 6px 6px 0 #fff3 inset, 0 0 0px 0 #ffffff59 inset,
+    0 4px 12px 0 #00000005, 0 0 0px 0 #00000005, 0 2px 12px 0 #00000008;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  @apply m-0 antialiased;
+  font-family: var(--font-sans);
+  background-color: var(--color-kumo-base);
+  color: var(--text-color-kumo-default);
+}
+
+::selection {
+  background-color: var(--color-selection-bg);
+  color: var(--color-selection-text);
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+/* Prompt input affordance */
+.prompt-input {
+  border-color: var(--color-kumo-line);
+  background: var(--color-kumo-base);
+  box-shadow: var(--shadow-stack);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.prompt-input:focus-within {
+  border-color: var(--color-kumo-brand);
+  box-shadow: var(--shadow-stack), 0 0 0 3px var(--color-selection-bg);
+}
+
+/* Chat panel scrollbar */
+.chat-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-kumo-line) transparent;
+}
+.chat-panel::-webkit-scrollbar { width: 4px; }
+.chat-panel::-webkit-scrollbar-thumb {
+  background: var(--color-kumo-line);
+  border-radius: 4px;
+}
+.chat-panel::-webkit-scrollbar-track { background: transparent; }
+
+[role="listbox"] [role="option"] {
+  font-size: 0.875rem !important;
+  line-height: 1.25rem !important;
+}
+
+html { scroll-behavior: smooth; }
+
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Streamdown code blocks — collapse the double-box look. The library
+   ships an outer wrapper (rounded-xl border bg-sidebar p-2) AND an
+   inner code body (rounded-md border bg-background p-4). We strip the
+   outer chrome and let only the inner box render. */
+[data-streamdown="code-block"] {
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 0.75rem 0 !important;
+  gap: 0 !important;
+}
+[data-streamdown="code-block-header"] {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  height: auto !important;
+  z-index: 5;
+  color: var(--text-color-kumo-inactive) !important;
+}
+[data-streamdown="code-block"] {
+  position: relative;
+}
+[data-streamdown="code-block-body"] {
+  border: 1px solid var(--color-kumo-line) !important;
+  background: var(--color-kumo-base) !important;
+  padding-top: 2.5rem !important;  /* room for the language label + actions */
+  border-radius: 8px !important;
+  overflow: hidden !important;
+}
+
+/* Streamdown action bar positioning. The library hangs it with -mt-10 to
+   overlap a 32px language header; with our flat layout we want it sitting
+   in the top-right of the code body instead. */
+[data-streamdown="code-block"] > div:has([data-streamdown="code-block-actions"]) {
+  position: absolute !important;
+  top: 4px;
+  right: 8px;
+  margin: 0 !important;
+  height: auto !important;
+  z-index: 6;
+}
+
+/* Streamdown action bars (table / code-block copy, download, fullscreen).
+   Override the default "floating chip" look so the buttons sit on a clean
+   light-orange surface, are evenly sized, and centre vertically. */
+[data-streamdown="code-block-actions"],
+[data-streamdown="mermaid-block-actions"] {
+  background: var(--color-kumo-tint) !important;
+  border-color: var(--color-kumo-line) !important;
+  backdrop-filter: none !important;
+  padding: 2px !important;
+  gap: 2px !important;
+  border-radius: 6px !important;
+  align-items: center !important;
+}
+[data-streamdown="code-block-actions"] > button,
+[data-streamdown="mermaid-block-actions"] > button,
+[data-streamdown="code-block-copy-button"],
+[data-streamdown="code-block-download-button"] {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 24px !important;
+  width: 24px !important;
+  padding: 0 !important;
+  border-radius: 4px !important;
+  color: var(--text-color-kumo-subtle) !important;
+  transition: background 0.12s ease, color 0.12s ease !important;
+}
+[data-streamdown="code-block-actions"] > button:hover,
+[data-streamdown="mermaid-block-actions"] > button:hover,
+[data-streamdown="code-block-copy-button"]:hover,
+[data-streamdown="code-block-download-button"]:hover {
+  background: var(--color-kumo-fill) !important;
+  color: var(--text-color-kumo-default) !important;
+}
+[data-streamdown="code-block-actions"] svg,
+[data-streamdown="mermaid-block-actions"] svg {
+  display: block;
+}
+
+/* Inline code inside Streamdown output — match the room UI's `InlineCode`
+   atom (warm tint background, brand orange text, monospace). */
+[data-streamdown="inline-code"] {
+  background: var(--color-kumo-tint) !important;
+  color: var(--text-color-kumo-brand) !important;
+  border-radius: 3px;
+  padding: 1px 5px !important;
+  font-family: var(--font-mono);
+  font-size: 0.85em !important;
+  font-weight: 500;
+}
+
+/* Streamdown tables — drop the double border. Outer wrapper loses its
+   border + sidebar fill; inner table keeps a single hairline. */
+[data-streamdown="table-wrapper"] {
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+[data-streamdown="table-wrapper"] > div:has([data-streamdown="table"]) {
+  border: 1px solid var(--color-kumo-line) !important;
+  border-radius: 8px;
+  background: var(--color-kumo-base) !important;
+}
+[data-streamdown="table"] {
+  border: 0 !important;
+}
+[data-streamdown="table"] th,
+[data-streamdown="table"] td {
+  border-color: var(--color-kumo-line) !important;
+}
