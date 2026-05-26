@@ -185,6 +185,11 @@ async function main() {
   log(`[boot] MOUNT=${MOUNT} PORT=${PORT}`);
 
   const vfs = new Vfs();
+  // Pre-create the mount root in the VFS so FUSE's getattr('/') — which maps
+  // to vfs.get(MOUNT) via the driver's path translation — doesn't return
+  // ENOENT for the FUSE root inode itself, which would make the mount appear
+  // empty / inaccessible to userspace (`ls /workspace` => No such file).
+  vfs.mkdir(MOUNT);
   fs.mkdirSync(MOUNT, { recursive: true });
   let fuseActive = false;
   try {
