@@ -34,6 +34,14 @@ const RoomFallback = (
   </div>
 );
 
+const ThreadFallback = (
+  <section className="flex h-full min-h-0 flex-col border-l border-kumo-line bg-kumo-panel">
+    <div className="flex h-14 flex-shrink-0 items-center border-b border-kumo-line px-4 text-sm text-kumo-inactive">
+      Loading thread…
+    </div>
+  </section>
+);
+
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +86,11 @@ export function App() {
             roomId={route.roomId}
             threadId={route.threadId}
             centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
-            thread={<ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />}
+            thread={
+              <Suspense fallback={ThreadFallback}>
+                <ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />
+              </Suspense>
+            }
           />
         </Suspense>
       );
