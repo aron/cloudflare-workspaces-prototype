@@ -11,10 +11,10 @@
  */
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { switchPort } from "@cloudflare/containers";
-import { newWebSocketRpcSession } from "capnweb";
 
 import { Vfs } from "./vfs.js";
+import { ContainerConnection } from "./container-connection.js";
+import { ensureWorkspaceServer } from "./container-startup.js";
 import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
 import { asFactory } from "./mounts/index.js";
 import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
@@ -77,6 +77,12 @@ export class Workspace {
   private contentFetches = new Map<string, Promise<void>>();
   /** Bounded concurrency for batch hydration during exec(). */
   private static readonly FETCH_CONCURRENCY = 8;
+
+  // ---- container connection ----
+  /** Cached connection to the container's workspace-server. Rebuilt lazily after close. */
+  private conn: ContainerConnection | null = null;
+  /** Memoised in-flight ensureContainerProcess promise; clears on rejection so callers can retry. */
+  private ensurePromise: Promise<void> | null = null;
 
   constructor(opts: WorkspaceOptions) {
     this.opts = { port: 4567, ...opts };
@@ -255,7 +261,7 @@ export class Workspace {
   async exec(command: string, cwd?: string): Promise<ExecResult> {
     await this.ensureMountsIndexed();
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    using api = await this.connectContainer();
+    const api = await this.getConnection();
 
     // Hydrate any mount stubs we're about to push — otherwise the container
     // would receive empty files. We pre-fetch in bounded parallel before
@@ -488,44 +494,43 @@ export class Workspace {
 
   // ---- internal: container process + capnweb session ----
 
+  /**
+   * Make sure `workspace-server` is running. Safe to call concurrently —
+   * the in-flight promise is shared, and clears on rejection so callers can
+   * retry. The orchestration logic lives in `container-startup.ts`; see the
+   * doc comment on `ensureWorkspaceServer` for the failure modes it defends
+   * against.
+   */
   private async ensureContainerProcess(): Promise<void> {
+    if (this.ensurePromise) return this.ensurePromise;
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    let proc;
-    try {
-      proc = await sb.getProcess("workspace-server");
-    } catch {
-      proc = null;
-    }
-    if (!proc) {
-      proc = await sb.startProcess("node /app/server.cjs", { processId: "workspace-server" });
-    }
-    await proc.waitForPort(this.opts.port);
+    this.ensurePromise = ensureWorkspaceServer(sb, this.opts.port).catch(err => {
+      this.ensurePromise = null;  // allow retry on next call
+      throw err;
+    });
+    return this.ensurePromise;
   }
 
-  async connectContainer(retries = 8, delayMs = 1500): Promise<ContainerRpc & Disposable> {
+  /**
+   * Get the active capnweb session, building a fresh one when the previous
+   * connection has been torn down (or never existed). Survives DO restarts
+   * because the container holds workspace-server across the gap; survives
+   * mid-life WS drops because `ContainerConnection.onClose` nulls `this.conn`
+   * synchronously and the next call rebuilds.
+   */
+  private async getConnection(): Promise<ContainerRpc> {
     await this.ensureContainerProcess();
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    const wsReq = new Request("http://container/rpc", {
-      headers: { Upgrade: "websocket", Connection: "upgrade" },
-    });
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const wsRes = await sb.fetch(switchPort(wsReq.clone(), this.opts.port));
-        const ws = (wsRes as unknown as { webSocket: WebSocket }).webSocket;
-        // Dispose the Response stub now that we've extracted the WS, so
-        // workerd doesn't warn at hibernate time.
-        try { (wsRes as unknown as Disposable)[Symbol.dispose]?.(); } catch { /* older runtimes */ }
-        if (!ws) throw new Error("no WebSocket in upgrade response");
-        ws.accept();
-        return newWebSocketRpcSession<ContainerRpc>(ws as unknown as WebSocket);
-      } catch (err) {
-        if (attempt === retries) {
-          throw new Error(`Container not ready after ${retries} attempts: ${err}`);
-        }
-        await new Promise(r => setTimeout(r, delayMs));
-      }
+    if (!this.conn) {
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      this.conn = new ContainerConnection({
+        // `containerFetch` is the documented path for HTTP, but WebSocket upgrades
+        // require `switchPort + fetch` (per @cloudflare/containers docs — see workerd #2319).
+        stub: { fetch: (req: Request) => sb.fetch(req) },
+        port: this.opts.port,
+        onClose: () => { this.conn = null; },
+      });
     }
-    throw new Error("unreachable");
+    return this.conn.rpc() as unknown as ContainerRpc;  // capnweb RpcStub<T> is structurally T at the call site
   }
 
   private saveWatermarks(): void {
