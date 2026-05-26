@@ -77,6 +77,7 @@ export function ThreadPanel({
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [steerQueue, setSteerQueue] = useState<string[]>([]);
 
   const doDeleteThread = useCallback(async () => {
     setDeleting(true);
@@ -141,8 +142,6 @@ export function ThreadPanel({
   // drained as soon as the current turn finishes, so they show up as user
   // turns in the queue rather than mid-stream interruptions. The drain
   // effect below feeds them to `sendMessage` one render at a time.
-  const [steerQueue, setSteerQueue] = useState<string[]>([]);
-
   useEffect(() => {
     if (turnInFlight || steerQueue.length === 0) return;
     // Drain one message per render so each goes through `sendMessage`'s own
