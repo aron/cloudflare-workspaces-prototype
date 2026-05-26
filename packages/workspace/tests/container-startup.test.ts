@@ -102,8 +102,18 @@ function makeSandbox(spec: FakeSandboxSpec): FakeSandbox {
         waitForPortBehavior: s.waitForPortBehavior ?? "resolve",
       });
     },
-    async containerFetch() {
+    // Track the port the SDK was asked to route to. Regression guard for
+    // the bug where `probePort` invoked `containerFetch(switchPort(req, port))`
+    // without passing the port as a second arg, causing wrangler-dev to route
+    // the probe to `defaultPort` (3000) instead of `port` and report the
+    // sandbox control plane's "Hello" response as a successful probe.
+    async containerFetch(_req: Request, port?: number) {
       calls.containerFetch++;
+      if (port !== PORT) {
+        // Wrong port — simulate the wrangler-dev behaviour where 3000 always
+        // answers with a 200 from the sandbox control plane.
+        return new Response("Hello from Bun server!", { status: 200 });
+      }
       const up = resolvePortUp();
       return new Response(
         up ? JSON.stringify({ status: "ok" }) : "",
@@ -170,6 +180,25 @@ describe("probePort", () => {
       async containerFetch() { throw new Error("ECONNREFUSED"); },
     };
     assert.equal(await probePort(sb, PORT), false);
+  });
+
+  test("passes the requested port as the second arg to containerFetch (not via header)", async () => {
+    // Regression: probePort used to call `sb.containerFetch(switchPort(req, port))`
+    // with no second arg. `containerFetch` ignores the cf-container-target-port
+    // header, so the probe landed on `defaultPort` (3000) and got a 200 OK from
+    // the sandbox control plane — a silent false positive that made
+    // ensureWorkspaceServer skip starting the server.
+    let observedPort: number | undefined;
+    const sb: SandboxLike = {
+      async getProcess() { return null; },
+      async startProcess() { throw new Error("unused"); },
+      async containerFetch(_req: Request, port?: number) {
+        observedPort = port;
+        return new Response("", { status: 503 });
+      },
+    };
+    await probePort(sb, 4567);
+    assert.equal(observedPort, 4567);
   });
 });
 

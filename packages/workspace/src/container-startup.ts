@@ -7,7 +7,8 @@
  */
 
 import type { Process, Sandbox } from "@cloudflare/sandbox";
-import { switchPort } from "@cloudflare/containers";
+// switchPort intentionally not imported — we pass the port to containerFetch's
+// second arg instead of via the cf-container-target-port header. See probePort.
 
 /**
  * Minimal surface of `@cloudflare/sandbox`'s `Sandbox` DO stub that we use.
@@ -16,7 +17,7 @@ import { switchPort } from "@cloudflare/containers";
 export interface SandboxLike {
   getProcess(id: string): Promise<Process | null>;
   startProcess(command: string, options?: { processId?: string }): Promise<Process>;
-  containerFetch(request: Request): Promise<Response>;
+  containerFetch(request: Request, port?: number): Promise<Response>;
 }
 
 export const WORKSPACE_SERVER_PROCESS_ID = "workspace-server";
@@ -47,7 +48,13 @@ export async function findRunningServer(sb: SandboxLike): Promise<Process | null
 export async function probePort(sb: SandboxLike, port: number): Promise<boolean> {
   try {
     const req = new Request("http://container/", { method: "GET" });
-    const res = await sb.containerFetch(switchPort(req, port));
+    // `containerFetch` only reads the port from the second arg — the
+    // `cf-container-target-port` header set by `switchPort` is read by
+    // `Container.fetch` but NOT by `containerFetch`. Passing the port
+    // explicitly avoids a false-positive probe that lands on `defaultPort`
+    // (3000) and gets back the sandbox control-plane's "Hello from Bun"
+    // response, making us skip starting workspace-server entirely.
+    const res = await sb.containerFetch(req, port);
     return res.ok;
   } catch {
     return false;
