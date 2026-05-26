@@ -21,6 +21,9 @@ ui-prototype/
 
 # Local secrets / certs (developer-supplied)
 apps/agent/sandbox/*.crt
+.env
+.env.*
+!.env.example
 
 # container-go spike build artifacts
 container-go/spike/spike
