@@ -30,7 +30,7 @@ describe("InMemoryFileStore", () => {
     const store = new InMemoryFileStore();
     await store.write("/a.txt", enc.encode("hello"));
     const s = await store.stat("/a.txt");
-    expect(s).toEqual({ size: 5, mtime: expect.any(Number) });
+    expect(s).toEqual({ size: 5, mtime: expect.any(Number), mode: 0o100644 });
     const buf = await store.readAll("/a.txt");
     expect(buf && dec.decode(buf)).toBe("hello");
   });

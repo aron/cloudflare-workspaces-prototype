@@ -131,7 +131,11 @@ export function createEditTool(options: EditToolOptions) {
         }
 
         const finalContent = bom + restoreLineEndings(newContent, ending);
-        await store.write(path, new TextEncoder().encode(finalContent));
+        // Round-trip the file's mode so editing an executable script (or any
+        // file with a non-default mode) doesn't silently drop bits. `stat.mode`
+        // is undefined for stores that don't track modes; pass `undefined` in
+        // that case so the store applies its own default.
+        await store.write(path, new TextEncoder().encode(finalContent), { mode: stat.mode });
 
         const diffResult = generateDiffString(baseContent, newContent);
         const patch = generateUnifiedPatch(path, baseContent, newContent);

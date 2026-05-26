@@ -43,4 +43,23 @@ describe("createWriteTool", () => {
     expect(result.error).toMatch(/edit/); // points the model at the edit tool
     expect(await store.stat("/big")).toBeNull(); // file not created
   });
+
+  it("preserves the existing file's mode when overwriting", async () => {
+    // Regression: write used to drop mode bits on overwrite, silently
+    // turning executable scripts into plain files (0o100755 → 0o100644).
+    const store = new InMemoryFileStore();
+    await store.write("/run.sh", new TextEncoder().encode("old"), { mode: 0o100755 });
+    const tool = createWriteTool({ store });
+    await exec(tool, { path: "/run.sh", content: "new" });
+    expect((await store.stat("/run.sh"))?.mode).toBe(0o100755);
+  });
+
+  it("creates new files with the store's default mode", async () => {
+    // No prior file means no mode to preserve — the store applies its own
+    // regular-file default rather than inheriting some unrelated file's mode.
+    const store = new InMemoryFileStore();
+    const tool = createWriteTool({ store });
+    await exec(tool, { path: "/new.txt", content: "hi" });
+    expect((await store.stat("/new.txt"))?.mode).toBe(0o100644);
+  });
 });

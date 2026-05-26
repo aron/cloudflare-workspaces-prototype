@@ -7,7 +7,7 @@ import type { FileStat, FileStore } from "./types.js";
  * streaming code paths with a configurable chunk size.
  */
 export class InMemoryFileStore implements FileStore {
-  private readonly files = new Map<string, { data: Uint8Array; mtime: number }>();
+  private readonly files = new Map<string, { data: Uint8Array; mtime: number; mode: number }>();
   private readonly chunkSize: number;
 
   constructor(opts: { chunkSize?: number } = {}) {
@@ -17,7 +17,7 @@ export class InMemoryFileStore implements FileStore {
   async stat(path: string): Promise<FileStat | null> {
     const f = this.files.get(path);
     if (!f) return null;
-    return { size: f.data.length, mtime: f.mtime };
+    return { size: f.data.length, mtime: f.mtime, mode: f.mode };
   }
 
   async readAll(path: string): Promise<Uint8Array | null> {
@@ -41,8 +41,13 @@ export class InMemoryFileStore implements FileStore {
     }
   }
 
-  async write(path: string, content: Uint8Array): Promise<void> {
+  async write(path: string, content: Uint8Array, opts?: { mode?: number }): Promise<void> {
+    const previous = this.files.get(path);
     // Copy so subsequent mutations to the caller's buffer don't leak in.
-    this.files.set(path, { data: new Uint8Array(content), mtime: Date.now() });
+    this.files.set(path, {
+      data:  new Uint8Array(content),
+      mtime: Date.now(),
+      mode:  opts?.mode ?? previous?.mode ?? 0o100644,
+    });
   }
 }

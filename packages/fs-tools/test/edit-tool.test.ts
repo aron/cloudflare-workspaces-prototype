@@ -147,4 +147,21 @@ describe("createEditTool", () => {
     const buf = await store.readAll("/a.txt");
     expect(dec.decode(buf!)).toBe("A2345678Z");
   });
+
+  it("preserves the existing file's mode when applying an edit", async () => {
+    // Regression: the agent's edit tool used to call store.write(path, bytes)
+    // with no mode, which silently downgraded executable scripts (0o100755)
+    // to the default regular-file mode (0o100644). The repo's two executable
+    // scripts (sync-host-ca.sh, sync-skills.mjs) lost their +x bit this way.
+    const store = new InMemoryFileStore();
+    await store.write("/script.sh", enc.encode("#!/bin/sh\necho hi\n"), { mode: 0o100755 });
+    const tool = createEditTool({ store });
+    const out = await exec(tool, {
+      path: "/script.sh",
+      edits: [{ oldText: "echo hi", newText: "echo hello" }],
+    });
+    expect(out.editsApplied).toBe(1);
+    const after = await store.stat("/script.sh");
+    expect(after?.mode).toBe(0o100755);
+  });
 });

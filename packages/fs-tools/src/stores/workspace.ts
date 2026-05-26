@@ -6,7 +6,7 @@ import type { FileStat, FileStore } from "./types.js";
  * type-time dependency on `@cloudflare/workspace`.
  */
 export interface WorkspaceLike {
-  stat(path: string): Promise<{ type: "file" | "dir"; size: number; mtime: number } | null>;
+  stat(path: string): Promise<{ type: "file" | "dir"; size: number; mtime: number; mode: number } | null>;
   readFile(path: string): Promise<Uint8Array | null>;
   writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void>;
   /**
@@ -34,15 +34,15 @@ export class WorkspaceFileStore implements FileStore {
   async stat(path: string): Promise<FileStat | null> {
     const s = await this.ws.stat(path);
     if (!s || s.type !== "file") return null;
-    return { size: s.size, mtime: s.mtime };
+    return { size: s.size, mtime: s.mtime, mode: s.mode };
   }
 
   async readAll(path: string): Promise<Uint8Array | null> {
     return this.ws.readFile(path);
   }
 
-  async write(path: string, content: Uint8Array): Promise<void> {
-    await this.ws.writeFile(path, content);
+  async write(path: string, content: Uint8Array, opts?: { mode?: number }): Promise<void> {
+    await this.ws.writeFile(path, content, opts?.mode);
   }
 
   async *readChunks(

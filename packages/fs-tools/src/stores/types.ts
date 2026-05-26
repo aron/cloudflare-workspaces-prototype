@@ -11,6 +11,12 @@ export interface FileStat {
   size: number;
   /** Last-modified epoch milliseconds. */
   mtime: number;
+  /**
+   * POSIX-style mode bits (e.g. 0o100644 for a regular file, 0o100755 for
+   * an executable). Omitted by stores that don't track modes; tools should
+   * fall through to their own default (regular file) in that case.
+   */
+  mode?: number;
 }
 
 export interface FileStore {
@@ -35,6 +41,13 @@ export interface FileStore {
    */
   readAll(path: string): Promise<Uint8Array | null>;
 
-  /** Overwrite (or create) a file with the given bytes. */
-  write(path: string, content: Uint8Array): Promise<void>;
+  /**
+   * Overwrite (or create) a file with the given bytes.
+   *
+   * `opts.mode` lets the caller pin the resulting file's POSIX mode — used
+   * by `edit` and `write` to preserve the executable bit across an
+   * overwrite. Stores that don't track modes may ignore it; stores that
+   * do must store the value verbatim (not OR/AND with the previous mode).
+   */
+  write(path: string, content: Uint8Array, opts?: { mode?: number }): Promise<void>;
 }

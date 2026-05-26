@@ -15,7 +15,7 @@ function makeFakeWorkspace(chunkSize = 8): WorkspaceLike & { _files: Map<string,
   const stat: WorkspaceLike["stat"] = async (path) => {
     const f = files.get(path);
     if (!f) return null;
-    return { type: "file", size: f.length, mtime: 1 };
+    return { type: "file", size: f.length, mtime: 1, mode: 0o100644 };
   };
   return {
     _files: files,
@@ -62,12 +62,12 @@ describe("WorkspaceFileStore", () => {
     const ws = makeFakeWorkspace();
     ws.writeFile("/a", enc.encode("hello"));
     const store = new WorkspaceFileStore(ws);
-    expect(await store.stat("/a")).toEqual({ size: 5, mtime: 1 });
+    expect(await store.stat("/a")).toEqual({ size: 5, mtime: 1, mode: 0o100644 });
   });
 
   it("returns null when stat reports a directory", async () => {
     const ws: WorkspaceLike = {
-      stat: async () => ({ type: "dir", size: 0, mtime: 1 }),
+      stat: async () => ({ type: "dir", size: 0, mtime: 1, mode: 0o40755 }),
       readFile: async () => null,
       writeFile: async () => {},
     };
@@ -116,7 +116,7 @@ describe("WorkspaceFileStore", () => {
     const files = new Map<string, Uint8Array>();
     files.set("/a", enc.encode("abcdefghij"));
     const ws: WorkspaceLike = {
-      stat: async (p) => (files.has(p) ? { type: "file" as const, size: files.get(p)!.length, mtime: 1 } : null),
+      stat: async (p) => (files.has(p) ? { type: "file" as const, size: files.get(p)!.length, mtime: 1, mode: 0o100644 } : null),
       readFile: async (p) => files.get(p) ?? null,
       writeFile: async () => {},
       // no vfs
