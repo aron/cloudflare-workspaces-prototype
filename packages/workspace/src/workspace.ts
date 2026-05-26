@@ -170,13 +170,18 @@ export class Workspace {
   async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
     await this.ensureMountsIndexed();
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    // Preserve the existing file's mode on overwrite when the caller didn't
+    // specify one — otherwise a plain `writeFile(path, bytes)` would silently
+    // downgrade an executable script (0o100755) to a regular file (0o100644).
+    // Callers that *want* to change the mode pass it explicitly.
+    const effectiveMode = mode ?? this.vfs.stat(path)?.mode ?? 0o100644;
     const m = this.resolveMountForWrite(path);
     if (m) {
       // Push to the backing store first — if it fails, the VFS stays clean.
       await m.mount.put!(m.relPath, bytes);
-      this.vfs.writeFile(path, bytes, mode ?? 0o100644, m.root);
+      this.vfs.writeFile(path, bytes, effectiveMode, m.root);
     } else {
-      this.vfs.writeFile(path, bytes, mode);
+      this.vfs.writeFile(path, bytes, effectiveMode);
     }
   }
 

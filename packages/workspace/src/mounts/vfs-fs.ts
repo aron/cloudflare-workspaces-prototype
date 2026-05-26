@@ -126,7 +126,7 @@ export function createVfsFs(vfs: Vfs, opts: VfsFsOptions): { promises: VfsFsProm
       return encoding ? dec.decode(bytes) : bytes;
     },
 
-    async writeFile(p: string, data: Uint8Array | ArrayBuffer | string, _options?: unknown): Promise<void> {
+    async writeFile(p: string, data: Uint8Array | ArrayBuffer | string, options?: unknown): Promise<void> {
       const abs = resolve(p);
       const bytes = typeof data === "string"
         ? enc.encode(data)
@@ -143,7 +143,17 @@ export function createVfsFs(vfs: Vfs, opts: VfsFsOptions): { promises: VfsFsProm
         // Lazily synthesize — git writes loose objects into nested dirs.
         mkdirRecursive(parent);
       }
-      vfs.writeFile(abs, bytes, 0o100644, provenance);
+      // Mode resolution mirrors Node's `fs.writeFile`:
+      //   1. honour an explicit `options.mode` (isomorphic-git's checkout
+      //      passes `{ mode: 0o777 }` for executable blobs);
+      //   2. otherwise preserve the existing file's mode so an overwrite
+      //      doesn't strip the +x bit off a script;
+      //   3. fall back to a regular-file default for new files.
+      const requestedMode = typeof options === "object" && options !== null
+        ? (options as { mode?: number }).mode
+        : undefined;
+      const mode = requestedMode ?? vfs.stat(abs)?.mode ?? 0o100644;
+      vfs.writeFile(abs, bytes, mode, provenance);
       bytesWritten += bytes.length;
     },
 

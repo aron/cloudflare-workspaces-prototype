@@ -279,6 +279,24 @@ describe("Workspace mounts", () => {
     expect(out.a).toBe("hello");  // original content still served from R2
   });
 
+  it("writeFile preserves the existing file's mode on overwrite", async () => {
+    // Regression: a plain writeFile(path, bytes) used to clobber the mode
+    // column with 0o100644, silently stripping the +x bit off any executable
+    // script that got rewritten by the edit / write tools.
+    const fm = fakeMount({ "run.sh": "#!/bin/sh\necho hi\n" }, { writable: true });
+    const out = await runInDurableObject(stubFor("rw-write-mode"), async (_o: MountHost, state: DurableObjectState) => {
+      const ws = workspaceWith(state.storage, fm.mount);
+      // Mark the file as executable up-front (mimicking a git checkout of an
+      // 0o100755 blob, or an explicit chmod via the workspace API).
+      await ws.writeFile("/mnt/run.sh", "#!/bin/sh\necho hi\n", 0o100755);
+      // Now overwrite without specifying a mode — must preserve 0o100755.
+      await ws.writeFile("/mnt/run.sh", "#!/bin/sh\necho hello\n");
+      const st = await ws.stat("/mnt/run.sh");
+      return { mode: st?.mode };
+    });
+    expect(out.mode).toBe(0o100755);
+  });
+
   it("deleteFile under a read-write mount deletes a single file from the backing store", async () => {
     const fm = fakeMount({ "a.txt": "x", "b.txt": "y" }, { writable: true });
     const out = await runInDurableObject(stubFor("rw-delete-file"), async (_o: MountHost, state: DurableObjectState) => {
