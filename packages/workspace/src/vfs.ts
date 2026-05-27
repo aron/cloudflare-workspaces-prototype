@@ -202,6 +202,44 @@ export class Vfs {
   }
 
   /**
+   * Apply a chunk-mode update: only the named chunks are written, the
+   * unchanged chunks remain in place from a prior pull.  Used by the
+   * chunk-sync apply path.
+   *
+   * The vfs_nodes row is upserted (mtime advances, seq advances unless
+   * we're in applying-mode) so stat() reflects the change, but the
+   * file's *size* is left unchanged: the caller doesn't know it, and
+   * the chunk update isn't allowed to shrink the file behind the
+   * caller's back.  A whole-file write or an explicit truncate (the
+   * size-hint case in step 4) is the path for that.
+   */
+  writeChunks(
+    path: string,
+    chunks: ReadonlyArray<{ idx: number; bytes: Uint8Array }>,
+    mode: number = 0o100644,
+    mountRoot: string | null = null,
+  ): void {
+    const seq = this.applying ? this.currentSeq() : this.nextSeq();
+    const mtime = Date.now();
+    this.ensureParentDirs(path);
+    // Upsert the metadata row.  We don't know the file's total size
+    // here — trust the caller to ship size-changing updates via
+    // writeFile() or an explicit truncate hint.
+    this.sql.exec(
+      `INSERT INTO vfs_nodes(path, type, mode, mtime, seq, mount_root) VALUES (?, 'file', ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET mode=excluded.mode, mtime=excluded.mtime, seq=excluded.seq`,
+      path, mode, mtime, seq, mountRoot,
+    );
+    for (const { idx, bytes } of chunks) {
+      this.sql.exec(
+        `INSERT INTO vfs_chunks(path, idx, data) VALUES (?, ?, ?)
+           ON CONFLICT(path, idx) DO UPDATE SET data=excluded.data`,
+        path, idx, bytes,
+      );
+    }
+  }
+
+  /**
    * Insert an unhydrated file stub: a `vfs_nodes` row with no `vfs_chunks`.
    * Used by the mount index pass — readdir/stat see the file, but reading
    * content triggers fetch on demand. The row is stamped with `mountRoot`
@@ -339,6 +377,7 @@ export class Vfs {
     type?:  "file" | "dir";
     mode?:  number;
     bytes?: Uint8Array;
+    chunks?: ReadonlyArray<{ idx: number; bytes: Uint8Array }>;
   }>): { seq: number } {
     this.applying = true;
     try {
@@ -347,6 +386,12 @@ export class Vfs {
           this.deleteFile(c.path);
         } else if (c.type === "dir") {
           this.mkdir(c.path, c.mode);
+        } else if (c.chunks) {
+          // Chunk-mode upsert: rewrite only the named chunk rows.
+          // Existing chunks for the path that aren't in `chunks` are
+          // left in place — they're the unchanged bytes the DO already
+          // has from a previous pull.
+          this.writeChunks(c.path, c.chunks, c.mode);
         } else {
           this.writeFile(c.path, c.bytes ?? new Uint8Array(0), c.mode);
         }

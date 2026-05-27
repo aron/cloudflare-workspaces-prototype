@@ -145,6 +145,13 @@ class ContainerRpc extends RpcTarget {
   async pullDirty(since = 0, ignore?: string[]): Promise<DirtyBulk> {
     if (this.fuseActive) {
       const { changes, blob } = computeBulkPull(this.vfs, since, ignore);
+      // Clear dirty state for every file we shipped.  Optimistic: if
+      // the DO's apply fails the file's mtime is still > since so the
+      // next pull catches it again — just in whole-file mode this time.
+      // Symmetric to the existing pullSinceMs-advances-on-success rule.
+      for (const c of changes) {
+        if (c.op === "upsert" && c.type === "file") this.vfs.dirty.clear(c.path);
+      }
       return { changes, blob: bufToStream(blob) };
     }
     // No-FUSE fallback: scan the real /workspace directory.  Same wire

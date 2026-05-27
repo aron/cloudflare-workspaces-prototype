@@ -190,3 +190,40 @@ describe("dirty-state lifecycle around pulls", () => {
     });
   });
 });
+
+describe("end-to-end: whole-file pull then chunk pull", () => {
+  test("after a whole-file pull, a later range write ships chunks-only", () => {
+    // This mimics the live flow: the container ships a whole file on
+    // the first pull, the DO commits it, then the container ships only
+    // the touched chunks on the next pull.  We don't have access to
+    // pullDirty's side-effect clear here (it's on the RPC class), so
+    // we simulate it by clearing dirty state explicitly between rounds.
+    const vfs = new Vfs();
+    vfs.mkdir("/workspace");
+    vfs.putFile("/workspace/big", BUF(CHUNK_SIZE * 2, 0xaa));
+
+    const r1 = computeBulkPull(vfs, 0);
+    const c1 = findChange(r1, "/workspace/big")!;
+    assert.equal(c1.contentSize, CHUNK_SIZE * 2);
+    assert.equal(c1.chunks, undefined);
+
+    // Imagine the RPC wrapper clears dirty state after compute (it does).
+    for (const c of r1.changes) {
+      if (c.op === "upsert" && c.type === "file") vfs.dirty.clear(c.path);
+    }
+    const since = c1.mtime!;
+
+    return new Promise<void>(r => setTimeout(r, 5)).then(() => {
+      vfs.write("/workspace/big", Buffer.from([0xff]), CHUNK_SIZE);
+
+      const r2 = computeBulkPull(vfs, since);
+      const c2 = findChange(r2, "/workspace/big")!;
+      // Chunk mode now.
+      assert.equal(c2.contentSize, undefined);
+      assert.ok(Array.isArray(c2.chunks));
+      assert.deepEqual(c2.chunks!.map(k => k.idx), [1]);
+      // Blob now holds only chunk 1's bytes, not the whole file.
+      assert.equal(r2.blob.length, CHUNK_SIZE);
+    });
+  });
+});

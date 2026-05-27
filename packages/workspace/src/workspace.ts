@@ -313,7 +313,15 @@ export class Workspace {
     // entry carries the file's bytes as a subarray view of `blobBytes`
     // so the sync apply loop and the mount mirror can both reuse them
     // without re-reading from SQLite.
-    type ApplyEntry = { path: string; op: "upsert" | "delete"; type?: "file" | "dir"; mode?: number; mtime?: number; bytes?: Uint8Array };
+    type ApplyEntry = {
+      path: string;
+      op:   "upsert" | "delete";
+      type?: "file" | "dir";
+      mode?: number;
+      mtime?: number;
+      bytes?: Uint8Array;
+      chunks?: Array<{ idx: number; bytes: Uint8Array }>;
+    };
     type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
     const applyEntries: ApplyEntry[] = [];
     const mirrors:      MirrorEntry[] = [];
@@ -323,9 +331,17 @@ export class Workspace {
       if (c.type  !== undefined) e.type  = c.type;
       if (c.mode  !== undefined) e.mode  = c.mode;
       if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
-      if (c.op === "upsert" && c.type === "file" && c.contentSize !== undefined) {
-        const off = c.contentOffset ?? 0;
-        e.bytes = blobBytes.subarray(off, off + c.contentSize);
+      if (c.op === "upsert" && c.type === "file") {
+        if (c.chunks) {
+          // Chunk-mode: each VfsChunkRef names a slice of the blob.
+          e.chunks = c.chunks.map(k => ({
+            idx:   k.idx,
+            bytes: blobBytes.subarray(k.offset, k.offset + k.size),
+          }));
+        } else if (c.contentSize !== undefined) {
+          const off = c.contentOffset ?? 0;
+          e.bytes = blobBytes.subarray(off, off + c.contentSize);
+        }
       }
       const root = this.mountRootOf(c.path);
       if (root === null) {
@@ -351,8 +367,12 @@ export class Workspace {
       await this.runBounded(mirrors, async (m) => {
         if (m.op === "delete") {
           await m.mount.delete!(m.relPath);
-        } else if (m.type === "file" && m.bytes) {
-          await m.mount.put!(m.relPath, m.bytes);
+        } else if (m.type === "file") {
+          // Chunk-mode files don't carry full bytes here — only the
+          // dirty chunks.  Read the merged file out of the VFS so
+          // the mount sees the complete content.
+          const bytes = m.bytes ?? this.vfs.readFile(m.path);
+          if (bytes) await m.mount.put!(m.relPath, bytes);
         }
         // dir entries are VFS-only; nothing to mirror.
       });
