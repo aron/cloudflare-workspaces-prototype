@@ -60,25 +60,9 @@ async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Uint8
   return out;
 }
 
-// ---- ignore matcher (shared by getDirtyNodes and pullDirty) ----
-// Match any path that contains `/<seg>/` or ends with `/<seg>` for any
-// segment in the list. Cheap substring scan, no glob library.
-function makeIgnore(ignore?: string[]): (p: string) => boolean {
-  const segs = (ignore ?? []).filter(s => s.length > 0);
-  if (segs.length === 0) return _p => false;
-  return (p: string) => {
-    for (const s of segs) {
-      const needle = '/' + s;
-      let i = p.indexOf(needle);
-      while (i !== -1) {
-        const after = i + needle.length;
-        if (after === p.length || p.charCodeAt(after) === 0x2f /* '/' */) return true;
-        i = p.indexOf(needle, after);
-      }
-    }
-    return false;
-  };
-}
+// Pull-scope matcher used by getDirtyNodes / pullDirty.  See ./ignore.ts.
+import { makeIgnore } from './ignore.js';
+import { computeBulkPull, computeDirtyNodes } from './pull.js';
 
 // ---- RpcTarget served to the DO ----
 
@@ -159,71 +143,44 @@ class ContainerRpc extends RpcTarget {
    * old protocol at 1000+ file scale).
    */
   async pullDirty(since = 0, ignore?: string[]): Promise<DirtyBulk> {
+    if (this.fuseActive) {
+      const { changes, blob } = computeBulkPull(this.vfs, since, ignore);
+      return { changes, blob: bufToStream(blob) };
+    }
+    // No-FUSE fallback: scan the real /workspace directory.  Same wire
+    // shape as the FUSE path so the DO doesn't need to know which side
+    // produced the result.
     const isIgnored = makeIgnore(ignore);
     type Entry = { ts: number; change: VfsChangeLite; buf?: Buffer };
-    let entries: Entry[] = [];
-
-    if (this.fuseActive) {
-      for (const { path, node } of this.vfs.allFiles()) {
-        if (node.type === 'symlink') continue;
-        if (node.mtime <= since) continue;
-        if (isIgnored(path)) continue;
-        if (node.type === 'file') {
-          const buf = node.buf.slice(0, node.size);
-          entries.push({
-            ts: node.mtime,
-            change: { seq: 0, path, op: 'upsert', type: 'file', mode: node.mode, mtime: node.mtime, contentOffset: 0, contentSize: buf.length },
-            buf,
-          });
-        } else {
-          entries.push({
-            ts: node.mtime,
-            change: { seq: 0, path, op: 'upsert', type: 'dir', mode: node.mode, mtime: node.mtime },
-          });
-        }
-      }
-      for (const { path, ts } of this.vfs.getTombstones(since)) {
-        if (isIgnored(path)) continue;
-        entries.push({ ts, change: { seq: 0, path, op: 'delete', mtime: ts } });
-      }
-      entries.sort((a, b) => a.ts - b.ts);
-    } else {
-      // No-FUSE fallback: scan the real filesystem.  We don't carry an
-      // mtime per dir entry because mkdir is cheap on the DO side.
-      const scanRoot = MOUNT;
-      const stack: string[] = [scanRoot];
-      while (stack.length) {
-        const dir = stack.pop()!;
-        let dirents: fs.Dirent[];
-        try { dirents = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-        for (const ent of dirents) {
-          const abs = dir + '/' + ent.name;
-          if (isIgnored(abs)) continue;
-          if (ent.isDirectory()) {
-            const st = fs.statSync(abs);
-            if (st.mtimeMs > since) {
-              entries.push({ ts: st.mtimeMs, change: { seq: 0, path: abs, op: 'upsert', type: 'dir', mode: 0o40755, mtime: st.mtimeMs } });
-            }
-            stack.push(abs);
-          } else if (ent.isFile()) {
-            const st = fs.statSync(abs);
-            if (st.mtimeMs > since) {
-              const buf = fs.readFileSync(abs);
-              entries.push({
-                ts: st.mtimeMs,
-                change: { seq: 0, path: abs, op: 'upsert', type: 'file', mode: 0o100644, mtime: st.mtimeMs, contentOffset: 0, contentSize: buf.length },
-                buf,
-              });
-            }
+    const entries: Entry[] = [];
+    const stack: string[] = [MOUNT];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let dirents: fs.Dirent[];
+      try { dirents = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const ent of dirents) {
+        const abs = dir + '/' + ent.name;
+        if (isIgnored(abs)) continue;
+        if (ent.isDirectory()) {
+          const st = fs.statSync(abs);
+          if (st.mtimeMs > since) {
+            entries.push({ ts: st.mtimeMs, change: { seq: 0, path: abs, op: 'upsert', type: 'dir', mode: 0o40755, mtime: st.mtimeMs } });
+          }
+          stack.push(abs);
+        } else if (ent.isFile()) {
+          const st = fs.statSync(abs);
+          if (st.mtimeMs > since) {
+            const buf = fs.readFileSync(abs);
+            entries.push({
+              ts: st.mtimeMs,
+              change: { seq: 0, path: abs, op: 'upsert', type: 'file', mode: 0o100644, mtime: st.mtimeMs, contentOffset: 0, contentSize: buf.length },
+              buf,
+            });
           }
         }
       }
-      entries.sort((a, b) => a.ts - b.ts);
     }
-
-    // Lay out the blob: walk entries in order, assign offsets, accumulate
-    // a single Buffer.  Files >0 bytes carry their slice; dirs/deletes
-    // contribute nothing.
+    entries.sort((a, b) => a.ts - b.ts);
     const fileEntries = entries.filter(e => e.buf !== undefined);
     const totalBytes = fileEntries.reduce((n, e) => n + (e.buf!.length), 0);
     const blob = Buffer.allocUnsafe(totalBytes);
@@ -234,36 +191,18 @@ class ContainerRpc extends RpcTarget {
       e.buf!.copy(blob, off);
       off += e.buf!.length;
     }
-
     const changes: VfsChangeLite[] = entries.map((e, i) => ({ ...e.change, seq: i }));
     return { changes, blob: bufToStream(blob) };
   }
 
   async getDirtyNodes(since = 0, ignore?: string[]): Promise<VfsChange[]> {
-    const isIgnored = makeIgnore(ignore);
-
     if (this.fuseActive) {
-      // Interleave upserts (live nodes with mtime > since) and tombstones
-      // (path,ts pairs with ts > since), sorted by their effective timestamp.
-      const upserts = this.vfs.allFiles()
-        .filter(({ path, node }) => node.type !== 'symlink' && node.mtime > since && !isIgnored(path))
-        .map(({ path, node }) => ({
-          ts: node.mtime,
-          change: {
-            seq: 0, path, op: 'upsert' as const, type: node.type as 'file' | 'dir',
-            mode: node.mode, mtime: node.mtime,
-            content: node.type === 'file' ? bufToStream(node.buf.slice(0, node.size)) : undefined,
-          } as VfsChange,
-        }));
-      const tombs = this.vfs.getTombstones(since)
-        .filter(({ path }) => !isIgnored(path))
-        .map(({ path, ts }) => ({
-          ts,
-          change: { seq: 0, path, op: 'delete' as const, mtime: ts } as VfsChange,
-        }));
-      const merged = [...upserts, ...tombs].sort((a, b) => a.ts - b.ts);
-      return merged.map((m, i) => ({ ...m.change, seq: i }));
+      return computeDirtyNodes(this.vfs, since, ignore).map(({ change, bytes }) => ({
+        ...change,
+        content: bytes ? bufToStream(bytes) : undefined,
+      }));
     }
+    const isIgnored = makeIgnore(ignore);
     // No FUSE: scan real /workspace, filter by mtime
     const results: VfsChange[] = [];
     let seq = 0;

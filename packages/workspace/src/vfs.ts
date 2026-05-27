@@ -259,7 +259,12 @@ export class Vfs {
 
   deleteFile(path: string): void {
     const subtree = path + "/";
+    // Drop the node rows.
     this.sql.exec(`DELETE FROM vfs_nodes WHERE path = ? OR (path >= ? AND path < ?)`,
+      path, subtree, rangeEnd(subtree));
+    // Drop their chunk content too — otherwise readFile() of a deleted
+    // path would still return the orphaned chunks.
+    this.sql.exec(`DELETE FROM vfs_chunks WHERE path = ? OR (path >= ? AND path < ?)`,
       path, subtree, rangeEnd(subtree));
     if (!this.applying) {
       const seq = this.nextSeq();
