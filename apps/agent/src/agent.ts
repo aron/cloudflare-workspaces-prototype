@@ -17,6 +17,9 @@
  * of this file with the same Think baseline (chatRecovery on, empty tool
  * set by default — fill in per use case).
  */
+import type { StepContext, TurnContext } from "@cloudflare/think";
+import { LoopTracker } from "./loop-tracker.js";
+
 import { Think } from "@cloudflare/think";
 import { callable } from "agents";
 import { generateText, tool } from "ai";
@@ -100,6 +103,26 @@ export class Agent extends Think<Env> {
    */
   private _toolAborts = new Map<string, AbortController>();
 
+  /** Tools that read state but never mutate it — free in the budget. */
+  private static readonly READ_ONLY_TOOLS = new Set<string>([
+    "read", "listDirectory", "stat", "findFiles", "grep",
+    "webFetch", "webSearch", "gitListRepos",
+  ]);
+
+  /**
+   * Per-turn reflection budget + duplicate-call tracker. Think's flat
+   * `maxSteps` counts every model round-trip equally; this lets cheap
+   * exploration (read/grep) run free while still catching agents that
+   * thrash on edit/exec or repeat the same call. See loop-tracker.ts.
+   */
+  private _loop = new LoopTracker({
+    readOnlyTools: Agent.READ_ONLY_TOOLS,
+    reflectionBudget: 12,
+    loopWindow: 30,
+    loopThreshold: 3,
+    maxReflectionsPerTurn: 1,
+  });
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.workspace = new Workspace({
@@ -107,6 +130,14 @@ export class Agent extends Think<Env> {
       sandbox:   this.env.Sandbox,
       sessionId: this.name,
       resolveSessionId: (id) => resolveContainerId(this.env, id),
+      // Drop regenerable subtrees from the post-exec pull so we don't
+      // ship megabytes of node_modules through capnweb after every
+      // npm install. The bytes still exist on the container side for
+      // the next exec() to use; we just don't persist them into the
+      // DO's VFS.  Workspace defaults to ['node_modules'] already —
+      // listed explicitly here so the policy is visible at the call
+      // site and survives a default change.
+      pullIgnore: ["node_modules"],
       // R2-backed mount of the shared skills bucket. The agent reads
       // SKILL.md bodies through this mount via the normal `read` tool;
       // discovery below indexes the metadata for the system prompt.
@@ -185,9 +216,17 @@ export class Agent extends Think<Env> {
    *     `store: false` + `include: reasoning.encrypted_content` so
    *     reasoning is round-tripped inline rather than referenced by id.
    */
-  override beforeTurn() {
+  override beforeTurn(ctx?: TurnContext) {
     this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+    // Reset per-turn budget/loop state at the start of a fresh user
+    // turn. Continuation turns (auto-continue after tool result, or
+    // our injected reflection itself) keep the counters so the guard
+    // works across the whole logical turn.
+    if (!ctx?.continuation) this._loop.reset();
     return {
+      // Hard ceiling well above the soft budget — the LoopTracker
+      // decides when to fire a reflection.
+      maxSteps: 60,
       providerOptions: {
         openai: {
           reasoningEffort:
@@ -198,6 +237,15 @@ export class Agent extends Think<Env> {
         }
       }
     };
+  }
+
+  /** Feed the LoopTracker after every model step. */
+  override onStepFinish(ctx: StepContext): void {
+    const calls = (ctx.toolCalls ?? []).map(c => ({
+      toolName: c.toolName,
+      input: c.input,
+    }));
+    this._loop.recordStep(calls);
   }
 
   /**
@@ -258,6 +306,28 @@ export class Agent extends Think<Env> {
    */
   override onChatResponse(): void {
     this.ctx.waitUntil(this.kickSummary());
+    this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
+      console.warn("[Agent] reflection injection failed:", err);
+    }));
+  }
+
+  /**
+   * If the LoopTracker says we're over budget or thrashing, append a
+   * user-visible reflection prompt to the conversation. This re-enters
+   * the turn queue via saveMessages — safe here because Think releases
+   * the turn lock before calling onChatResponse.
+   */
+  private async maybeInjectReflection(): Promise<void> {
+    const decision = this._loop.shouldReflect();
+    if (!decision) return;
+    const text = this._loop.buildReflectionMessage(decision);
+    this._loop.markReflected();
+    await this.saveMessages([{
+      id: shortId(),
+      role: "user",
+      parts: [{ type: "text", text }],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any]);
   }
 
   async onRequest(request: Request): Promise<Response> {
