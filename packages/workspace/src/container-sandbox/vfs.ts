@@ -10,6 +10,8 @@
  * when exposing content.
  */
 
+import { DirtyRanges } from './dirty-ranges.js';
+
 export type VfsNode =
   | { type: 'dir';     mode: number; mtime: number }
   | { type: 'file';    mode: number; mtime: number; buf: Buffer; size: number }
@@ -29,8 +31,14 @@ export class Vfs {
   // new node is created at the same path. Surfaced via getTombstones(since).
   private tombstones = new Map<string, number>();
   // While true, delete() does NOT record tombstones. Set by applyChanges() so
-  // remote-pushed deletes don't echo back on the next pull.
+  // remote-pushed deletes don't echo back on the next pull.  Also suppresses
+  // dirty-range recording so remote-pushed writes don't bounce back either.
   public applying = false;
+  // Per-path chunk-dirty / whole-file-dirty tracker, populated by
+  // putFile() (whole-file) and (eventually) by the FUSE driver's write
+  // callback (range).  The bulk-pull computation uses it to decide
+  // whether to ship a file's chunks or the whole file.
+  public readonly dirty = new DirtyRanges();
 
   constructor() {
     this.nodes.set('/', { type: 'dir', mode: 0o40755, mtime: Date.now() });
@@ -61,6 +69,10 @@ export class Vfs {
     const existed = this.nodes.has(path);
     this.nodes.set(path, { type: 'file', mode, mtime: Date.now(), buf, size: buf.length });
     if (!existed) this.children.get(parentOf(path))!.add(basename(path));
+    // A putFile() replaces the entire file.  Mark whole-file dirty so
+    // the next pull ships every chunk.  Suppressed during applyChanges()
+    // (remote-pushed writes the DO already has).
+    if (!this.applying) this.dirty.recordWholeFile(path);
   }
 
   symlink(path: string, target: string): void {
@@ -109,7 +121,13 @@ export class Vfs {
     this.nodes.delete(path);
     const parent = this.children.get(parentOf(path));
     parent?.delete(basename(path));
-    if (!this.applying && path !== '/') this.tombstones.set(path, now);
+    if (!this.applying && path !== '/') {
+      this.tombstones.set(path, now);
+      // A locally-issued delete supersedes any pending dirty-state for
+      // the path.  Suppressed during applyChanges() so a remote-pushed
+      // delete doesn't wipe local dirty state we haven't pulled yet.
+      this.dirty.clear(path);
+    }
   }
 
   // Tombstones newer than `since` (container-local ms timestamp).
@@ -147,6 +165,10 @@ export class Vfs {
     buf.copy(node.buf, offset, 0, buf.length);
     if (needed > node.size) node.size = needed;
     node.mtime = Date.now();
+    // Range-dirty the touched chunks.  Suppressed during applyChanges()
+    // (remote-pushed writes the DO already has).  If the path is
+    // already whole-file dirty, recordRange is a no-op.
+    if (!this.applying) this.dirty.recordRange(path, offset, buf.length);
     return buf.length;
   }
 
@@ -160,6 +182,10 @@ export class Vfs {
     }
     node.size = size;
     node.mtime = Date.now();
+    // Truncate may either grow (zero-fill) or shrink the file.  Without
+    // a size field on the wire, the DO can't tell which trailing chunks
+    // (if any) to drop, so we conservatively mark the whole file dirty.
+    if (!this.applying) this.dirty.recordWholeFile(path);
   }
 
   rename(oldPath: string, newPath: string): void {
