@@ -300,7 +300,28 @@ export class Workspace {
     //   - outside any mount: applied to the VFS normally.
     //   - under a read-only mount: dropped (mounts are read-only end-to-end).
     //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    const dirtyRaw = await api.getDirtyNodes(this.pullSinceMs, this.opts.pullIgnore ?? ["node_modules"]);
+    // Bulk pull: one stream for all file contents instead of one stream
+    // per file.  Cuts capnweb's per-stream materialization round-trips.
+    const ignore = this.opts.pullIgnore ?? ["node_modules"];
+    const bulk = await api.pullDirty(this.pullSinceMs, ignore);
+    // Drain the blob once into a single Buffer-like view so each change
+    // can slice its content out without re-streaming.
+    const blobBytes = await readStreamToUint8Array(bulk.blob);
+    // Re-hydrate every change back to the existing VfsChange shape so
+    // vfs.applyChanges and the mount-mirror loop below don't need to
+    // know about the bulk wire format.
+    const dirtyRaw: VfsChange[] = bulk.changes.map(c => {
+      const base: VfsChange = { seq: c.seq, path: c.path, op: c.op };
+      if (c.type   !== undefined) base.type  = c.type;
+      if (c.mode   !== undefined) base.mode  = c.mode;
+      if (c.mtime  !== undefined) base.mtime = c.mtime;
+      if (c.op === "upsert" && c.type === "file" && c.contentSize !== undefined) {
+        const off = c.contentOffset ?? 0;
+        const slice = blobBytes.subarray(off, off + c.contentSize);
+        base.content = oneShotStream(slice);
+      }
+      return base;
+    });
     const accepted: VfsChange[] = [];
     const mirrors: Array<{ change: VfsChange; root: string; mount: Mount; relPath: string }> = [];
     for (const c of dirtyRaw) {
@@ -568,4 +589,34 @@ function normalizeMountRoot(p: string): string {
   if (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
   if (out === "/") throw new Error(`mount root cannot be "/"`);
   return out;
+}
+
+/**
+ * Drain a workerd ReadableStream<Uint8Array> into a single Uint8Array.
+ * Used to materialize the bulk-pull blob before slicing per-file views.
+ */
+async function readStreamToUint8Array(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) { chunks.push(value); total += value.length; }
+  }
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+/**
+ * Wrap a Uint8Array view as a single-chunk ReadableStream so the existing
+ * vfs.applyChanges() / writeFileFromStream() codepath consumes it unchanged.
+ */
+function oneShotStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(c) { c.enqueue(bytes); c.close(); },
+  });
 }
