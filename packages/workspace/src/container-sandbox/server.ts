@@ -131,12 +131,32 @@ class ContainerRpc extends RpcTarget {
     });
   }
 
-  async getDirtyNodes(since = 0): Promise<VfsChange[]> {
+  async getDirtyNodes(since = 0, ignore?: string[]): Promise<VfsChange[]> {
+    // Match any path that contains `/<seg>/` or ends with `/<seg>` for any
+    // segment in `ignore`. Cheap substring scan, no glob library. The
+    // canonical use is `['node_modules', '.git']` so npm-install et al.
+    // never ship their regenerable bytes back to the DO.
+    const segs = (ignore ?? []).filter(s => s.length > 0);
+    const isIgnored = segs.length === 0
+      ? (_p: string) => false
+      : (p: string) => {
+          for (const s of segs) {
+            const needle = '/' + s;
+            let i = p.indexOf(needle);
+            while (i !== -1) {
+              const after = i + needle.length;
+              if (after === p.length || p.charCodeAt(after) === 0x2f /* '/' */) return true;
+              i = p.indexOf(needle, after);
+            }
+          }
+          return false;
+        };
+
     if (this.fuseActive) {
       // Interleave upserts (live nodes with mtime > since) and tombstones
       // (path,ts pairs with ts > since), sorted by their effective timestamp.
       const upserts = this.vfs.allFiles()
-        .filter(({ node }) => node.type !== 'symlink' && node.mtime > since)
+        .filter(({ path, node }) => node.type !== 'symlink' && node.mtime > since && !isIgnored(path))
         .map(({ path, node }) => ({
           ts: node.mtime,
           change: {
@@ -145,10 +165,12 @@ class ContainerRpc extends RpcTarget {
             content: node.type === 'file' ? bufToStream(node.buf.slice(0, node.size)) : undefined,
           } as VfsChange,
         }));
-      const tombs = this.vfs.getTombstones(since).map(({ path, ts }) => ({
-        ts,
-        change: { seq: 0, path, op: 'delete' as const, mtime: ts } as VfsChange,
-      }));
+      const tombs = this.vfs.getTombstones(since)
+        .filter(({ path }) => !isIgnored(path))
+        .map(({ path, ts }) => ({
+          ts,
+          change: { seq: 0, path, op: 'delete' as const, mtime: ts } as VfsChange,
+        }));
       const merged = [...upserts, ...tombs].sort((a, b) => a.ts - b.ts);
       return merged.map((m, i) => ({ ...m.change, seq: i }));
     }
@@ -158,6 +180,7 @@ class ContainerRpc extends RpcTarget {
     function scan(dir: string) {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const abs = dir + '/' + entry.name;
+        if (isIgnored(abs)) continue;
         if (entry.isDirectory()) {
           const st = fs.statSync(abs);
           if (st.mtimeMs > since)

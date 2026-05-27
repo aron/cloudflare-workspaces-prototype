@@ -42,6 +42,18 @@ export interface WorkspaceOptions {
    * Writes anywhere under a mount root throw EROFS.
    */
   mounts?: Record<string, MountInput>;
+  /**
+   * Path segments excluded from the post-`exec()` pull. Default:
+   * `['node_modules']`. Matched against any path that contains
+   * `/<segment>/` or ends with `/<segment>`. Excluded paths never
+   * cross the wire from the container to the DO, so the bytes stay
+   * in the (ephemeral) container only. Anything that *uses* the
+   * excluded files (`exec("node ...")`, `runWasm`, etc.) still works
+   * because the bytes are already on the container side.
+   *
+   * Pass `[]` to disable the default and pull everything.
+   */
+  pullIgnore?: string[];
 }
 
 const WATERMARK_TABLE = `
@@ -288,7 +300,7 @@ export class Workspace {
     //   - outside any mount: applied to the VFS normally.
     //   - under a read-only mount: dropped (mounts are read-only end-to-end).
     //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    const dirtyRaw = await api.getDirtyNodes(this.pullSinceMs);
+    const dirtyRaw = await api.getDirtyNodes(this.pullSinceMs, this.opts.pullIgnore ?? ["node_modules"]);
     const accepted: VfsChange[] = [];
     const mirrors: Array<{ change: VfsChange; root: string; mount: Mount; relPath: string }> = [];
     for (const c of dirtyRaw) {

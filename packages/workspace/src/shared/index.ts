@@ -53,6 +53,6 @@ export interface ExecOptions {
 export interface ContainerRpc {
   snapshot():                                        Promise<{ entries: VfsEntry[]; seq: number }>;
   applyChanges(changes: VfsChange[]):                Promise<{ seq: number }>;
-  getDirtyNodes(since?: number):                     Promise<VfsChange[]>;
+  getDirtyNodes(since?: number, ignore?: string[]):  Promise<VfsChange[]>;
   exec(command: string, cwd?: string):               Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
