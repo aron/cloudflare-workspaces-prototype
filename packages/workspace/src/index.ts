@@ -13,7 +13,15 @@
  */
 
 export { Workspace } from "./workspace.js";
+export { Vfs } from "./vfs.js";
 export type { WorkspaceOptions } from "./workspace.js";
+export { R2Bucket, GitHubRepo } from "./mounts/index.js";
+export type {
+  Mount, MountInput, MountFactory, MountContext, MountWriteApi, MountEntry,
+  LazyMount, EagerMount,
+  R2MountOptions,
+  GitHubRepoOptions,
+} from "./mounts/index.js";
 
 // Re-export the shared types so consumers don't need a second import path
 // for simple cases. Use `@cloudflare/workspace/shared` directly when both

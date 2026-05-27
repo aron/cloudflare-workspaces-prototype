@@ -21,7 +21,7 @@ import { newWebSocketRpcSession, RpcTarget } from 'capnweb';
 import { createWriteStream } from 'fs';
 import { Vfs } from './vfs.js';
 import { mount } from './fuse-driver.js';
-import type { VfsEntry, VfsChange } from '../shared/index.js';
+import type { VfsEntry, VfsChange, VfsChangeLite, DirtyBulk } from '../shared/index.js';
 
 const LOG_FILE = process.env.LOG_FILE ?? '/tmp/server.log';
 const logStream = createWriteStream(LOG_FILE, { flags: 'a' });
@@ -59,6 +59,10 @@ async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Uint8
   for (const c of chunks) { out.set(c, offset); offset += c.length; }
   return out;
 }
+
+// Pull-scope matcher used by getDirtyNodes / pullDirty.  See ./ignore.ts.
+import { makeIgnore } from './ignore.js';
+import { computeBulkPull, computeDirtyNodes } from './pull.js';
 
 // ---- RpcTarget served to the DO ----
 
@@ -131,33 +135,88 @@ class ContainerRpc extends RpcTarget {
     });
   }
 
-  async getDirtyNodes(since = 0): Promise<VfsChange[]> {
+  /**
+   * Bulk-transport pull: same selection as getDirtyNodes() but content
+   * is concatenated into a single blob.  Each VfsChangeLite carries the
+   * offset and size of its file's bytes inside the blob.  This avoids
+   * capnweb materializing one stream per file (the dominant cost of the
+   * old protocol at 1000+ file scale).
+   */
+  async pullDirty(since = 0, ignore?: string[]): Promise<DirtyBulk> {
     if (this.fuseActive) {
-      // Interleave upserts (live nodes with mtime > since) and tombstones
-      // (path,ts pairs with ts > since), sorted by their effective timestamp.
-      const upserts = this.vfs.allFiles()
-        .filter(({ node }) => node.type !== 'symlink' && node.mtime > since)
-        .map(({ path, node }) => ({
-          ts: node.mtime,
-          change: {
-            seq: 0, path, op: 'upsert' as const, type: node.type as 'file' | 'dir',
-            mode: node.mode, mtime: node.mtime,
-            content: node.type === 'file' ? bufToStream(node.buf.slice(0, node.size)) : undefined,
-          } as VfsChange,
-        }));
-      const tombs = this.vfs.getTombstones(since).map(({ path, ts }) => ({
-        ts,
-        change: { seq: 0, path, op: 'delete' as const, mtime: ts } as VfsChange,
-      }));
-      const merged = [...upserts, ...tombs].sort((a, b) => a.ts - b.ts);
-      return merged.map((m, i) => ({ ...m.change, seq: i }));
+      const { changes, blob } = computeBulkPull(this.vfs, since, ignore);
+      // Clear dirty state for every file we shipped.  Optimistic: if
+      // the DO's apply fails the file's mtime is still > since so the
+      // next pull catches it again — just in whole-file mode this time.
+      // Symmetric to the existing pullSinceMs-advances-on-success rule.
+      for (const c of changes) {
+        if (c.op === "upsert" && c.type === "file") this.vfs.dirty.clear(c.path);
+      }
+      return { changes, blob: bufToStream(blob) };
     }
+    // No-FUSE fallback: scan the real /workspace directory.  Same wire
+    // shape as the FUSE path so the DO doesn't need to know which side
+    // produced the result.
+    const isIgnored = makeIgnore(ignore);
+    type Entry = { ts: number; change: VfsChangeLite; buf?: Buffer };
+    const entries: Entry[] = [];
+    const stack: string[] = [MOUNT];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let dirents: fs.Dirent[];
+      try { dirents = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const ent of dirents) {
+        const abs = dir + '/' + ent.name;
+        if (isIgnored(abs)) continue;
+        if (ent.isDirectory()) {
+          const st = fs.statSync(abs);
+          if (st.mtimeMs > since) {
+            entries.push({ ts: st.mtimeMs, change: { seq: 0, path: abs, op: 'upsert', type: 'dir', mode: 0o40755, mtime: st.mtimeMs } });
+          }
+          stack.push(abs);
+        } else if (ent.isFile()) {
+          const st = fs.statSync(abs);
+          if (st.mtimeMs > since) {
+            const buf = fs.readFileSync(abs);
+            entries.push({
+              ts: st.mtimeMs,
+              change: { seq: 0, path: abs, op: 'upsert', type: 'file', mode: 0o100644, mtime: st.mtimeMs, contentOffset: 0, contentSize: buf.length },
+              buf,
+            });
+          }
+        }
+      }
+    }
+    entries.sort((a, b) => a.ts - b.ts);
+    const fileEntries = entries.filter(e => e.buf !== undefined);
+    const totalBytes = fileEntries.reduce((n, e) => n + (e.buf!.length), 0);
+    const blob = Buffer.allocUnsafe(totalBytes);
+    let off = 0;
+    for (const e of fileEntries) {
+      e.change.contentOffset = off;
+      e.change.contentSize = e.buf!.length;
+      e.buf!.copy(blob, off);
+      off += e.buf!.length;
+    }
+    const changes: VfsChangeLite[] = entries.map((e, i) => ({ ...e.change, seq: i }));
+    return { changes, blob: bufToStream(blob) };
+  }
+
+  async getDirtyNodes(since = 0, ignore?: string[]): Promise<VfsChange[]> {
+    if (this.fuseActive) {
+      return computeDirtyNodes(this.vfs, since, ignore).map(({ change, bytes }) => ({
+        ...change,
+        content: bytes ? bufToStream(bytes) : undefined,
+      }));
+    }
+    const isIgnored = makeIgnore(ignore);
     // No FUSE: scan real /workspace, filter by mtime
     const results: VfsChange[] = [];
     let seq = 0;
     function scan(dir: string) {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const abs = dir + '/' + entry.name;
+        if (isIgnored(abs)) continue;
         if (entry.isDirectory()) {
           const st = fs.statSync(abs);
           if (st.mtimeMs > since)
@@ -185,6 +244,11 @@ async function main() {
   log(`[boot] MOUNT=${MOUNT} PORT=${PORT}`);
 
   const vfs = new Vfs();
+  // Pre-create the mount root in the VFS so FUSE's getattr('/') — which maps
+  // to vfs.get(MOUNT) via the driver's path translation — doesn't return
+  // ENOENT for the FUSE root inode itself, which would make the mount appear
+  // empty / inaccessible to userspace (`ls /workspace` => No such file).
+  vfs.mkdir(MOUNT);
   fs.mkdirSync(MOUNT, { recursive: true });
   let fuseActive = false;
   try {

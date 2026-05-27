@@ -3,6 +3,15 @@
  * class and the container-side server.
  */
 
+/**
+ * Size of one chunk in the chunked storage and on the chunked wire
+ * format.  Both sides must agree: the DO splits writes here so each
+ * row in `vfs_chunks` is at most CHUNK_SIZE bytes, and the container
+ * partitions dirty file ranges into chunkIdx = floor(byteOffset / CHUNK_SIZE)
+ * buckets so chunk-only pulls land on the same boundaries.
+ */
+export const CHUNK_SIZE = 512 * 1024;  // 512 KiB
+
 export interface VfsEntry {
   path:    string;
   type:    "file" | "dir";
@@ -19,6 +28,57 @@ export interface VfsChange {
   mode?:  number;
   mtime?: number;
   content?: ReadableStream<Uint8Array>;
+}
+
+/**
+ * Lightweight VfsChange used by the bulk-pull transport.  Files come
+ * back in one of two modes:
+ *
+ *   - **whole-file**: `contentOffset` + `contentSize` name one slice
+ *     of the bulk blob holding the file's complete bytes.
+ *   - **chunk-only**:  `chunks` lists the touched chunks; each entry
+ *     names a slice of the bulk blob plus the chunk index inside the
+ *     file (matches the DO's `vfs_chunks.idx`).  The DO merges these
+ *     into its existing rows instead of rewriting the whole file.
+ *
+ * `chunks` and (`contentOffset`/`contentSize`) are mutually exclusive.
+ * Dropping the per-file stream is what wins the round-trips inside
+ * capnweb.
+ */
+export interface VfsChangeLite {
+  seq:    number;
+  path:   string;
+  op:     "upsert" | "delete";
+  type?:  "file" | "dir";
+  mode?:  number;
+  mtime?: number;
+  // Whole-file mode:
+  contentOffset?: number;  // byte offset into the bulk blob (files only)
+  contentSize?:   number;  // byte length in the bulk blob (files only)
+  // Chunk-only mode:
+  chunks?: VfsChunkRef[];
+}
+
+/**
+ * One chunk's slice of the bulk pull blob, plus its index inside the
+ * containing file (the chunk-level VFS row's `idx`).  Always uses the
+ * shared CHUNK_SIZE so the DO can apply each entry to the matching
+ * `vfs_chunks` row without re-chunking.
+ */
+export interface VfsChunkRef {
+  idx:    number;  // chunk index inside the file (0-based)
+  offset: number;  // byte offset into the bulk blob
+  size:   number;  // byte length in the bulk blob (<= CHUNK_SIZE)
+}
+
+/**
+ * Return shape of the bulk pull: one stream for the concatenated bytes
+ * of every file in `changes`, in the order those files appear.  Empty
+ * blob if there are no file upserts.
+ */
+export interface DirtyBulk {
+  changes: VfsChangeLite[];
+  blob:    ReadableStream<Uint8Array>;
 }
 
 export interface FileStat {
@@ -53,6 +113,12 @@ export interface ExecOptions {
 export interface ContainerRpc {
   snapshot():                                        Promise<{ entries: VfsEntry[]; seq: number }>;
   applyChanges(changes: VfsChange[]):                Promise<{ seq: number }>;
-  getDirtyNodes(since?: number):                     Promise<VfsChange[]>;
+  getDirtyNodes(since?: number, ignore?: string[]):  Promise<VfsChange[]>;
+  /**
+   * Bulk pull: lightweight metadata records plus a single byte stream
+   * holding every file's content concatenated.  Cuts capnweb's
+   * per-stream round-trips down to one stream total.
+   */
+  pullDirty(since?: number, ignore?: string[]):      Promise<DirtyBulk>;
   exec(command: string, cwd?: string):               Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }

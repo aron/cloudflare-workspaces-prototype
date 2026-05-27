@@ -11,10 +11,12 @@
  */
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { switchPort } from "@cloudflare/containers";
-import { newWebSocketRpcSession } from "capnweb";
 
 import { Vfs } from "./vfs.js";
+import { ContainerConnection } from "./container-connection.js";
+import { ensureWorkspaceServer } from "./container-startup.js";
+import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
+import { asFactory } from "./mounts/index.js";
 import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
 
 export interface WorkspaceOptions {
@@ -33,12 +35,36 @@ export interface WorkspaceOptions {
    * Defaults to identity (sessionId itself names the Sandbox DO).
    */
   resolveSessionId?: (sessionId: string) => Promise<string> | string;
+  /**
+   * Read-only mounts keyed by absolute VFS path (the mount root).
+   * Index (directory tree + file metadata) is fetched lazily on first use;
+   * file content is fetched per-file the first time something reads it.
+   * Writes anywhere under a mount root throw EROFS.
+   */
+  mounts?: Record<string, MountInput>;
+  /**
+   * Path segments excluded from the post-`exec()` pull. Default:
+   * `['node_modules']`. Matched against any path that contains
+   * `/<segment>/` or ends with `/<segment>`. Excluded paths never
+   * cross the wire from the container to the DO, so the bytes stay
+   * in the (ephemeral) container only. Anything that *uses* the
+   * excluded files (`exec("node ...")`, `runWasm`, etc.) still works
+   * because the bytes are already on the container side.
+   *
+   * Pass `[]` to disable the default and pull everything.
+   */
+  pullIgnore?: string[];
 }
 
 const WATERMARK_TABLE = `
 CREATE TABLE IF NOT EXISTS _workspace_watermark (
   k TEXT PRIMARY KEY,
   v INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS _workspace_mounts (
+  root     TEXT PRIMARY KEY,
+  kind     TEXT NOT NULL,
+  indexed  INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -53,6 +79,23 @@ export class Workspace {
   private pushSeq     = 0;  // last VFS `seq` pushed to the container
   private pullSinceMs = 0;  // last container-side mtime seen on pull
 
+  // ---- mounts ----
+  /** Normalized mount roots (no trailing slash), sorted longest-first for prefix matching. */
+  private mountRoots: string[] = [];
+  /** Per-mount index state. Once indexed, stays indexed for the DO lifetime. */
+  private mountIndexed = new Map<string, boolean>();
+  private indexingPromise: Promise<void> | null = null;
+  /** Per-file in-flight fetches — dedupes concurrent reads of the same stub. */
+  private contentFetches = new Map<string, Promise<void>>();
+  /** Bounded concurrency for batch hydration during exec(). */
+  private static readonly FETCH_CONCURRENCY = 8;
+
+  // ---- container connection ----
+  /** Cached connection to the container's workspace-server. Rebuilt lazily after close. */
+  private conn: ContainerConnection | null = null;
+  /** Memoised in-flight ensureContainerProcess promise; clears on rejection so callers can retry. */
+  private ensurePromise: Promise<void> | null = null;
+
   constructor(opts: WorkspaceOptions) {
     this.opts = { port: 4567, ...opts };
     this.sql = (opts.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
@@ -62,7 +105,57 @@ export class Workspace {
       if (r.k === "pushSeq")     this.pushSeq     = r.v;
       if (r.k === "pullSinceMs") this.pullSinceMs = r.v;
     }
+
+    // Normalize and reconcile configured mounts against the persisted state.
+    // Anything in the table that no longer matches the configured mount kind
+    // (or is no longer configured at all) gets its subtree wiped — we'll
+    // re-index on demand.
+    // Realize every factory once, with the session context, so the rest of
+    // the constructor (and the reconcile loop below) sees concrete Mounts.
+    // Factories are cheap — they just close over options; expensive work
+    // (list, fork, clone) is deferred to ensureMountsIndexed().
+    const configured = new Map<string, Mount>();
+    for (const [rawRoot, input] of Object.entries(opts.mounts ?? {})) {
+      const root = normalizeMountRoot(rawRoot);
+      if (configured.has(root)) throw new Error(`duplicate mount root: ${root}`);
+      const ctx: MountContext = { sessionId: opts.sessionId, root, vfs: this.vfs };
+      configured.set(root, asFactory(input)(ctx));
+    }
+    // Reject overlapping mounts (one root being a prefix of another).
+    const roots = [...configured.keys()];
+    for (const a of roots) for (const b of roots) {
+      if (a !== b && (b + "/").startsWith(a + "/")) {
+        throw new Error(`mount root ${a} overlaps with ${b}`);
+      }
+    }
+    this.mountRoots = roots.sort((a, b) => b.length - a.length);
+
+    const persisted = [...this.sql.exec<{ root: string; kind: string; indexed: number }>(
+      `SELECT root, kind, indexed FROM _workspace_mounts`,
+    )];
+    for (const row of persisted) {
+      const m = configured.get(row.root);
+      if (!m || m.kind !== row.kind) {
+        // Configuration changed: purge stale subtree + row.
+        this.vfs.deleteFile(row.root);
+        this.sql.exec(`DELETE FROM _workspace_mounts WHERE root = ?`, row.root);
+      } else {
+        this.mountIndexed.set(row.root, row.indexed === 1);
+      }
+    }
+    for (const root of roots) {
+      if (!this.mountIndexed.has(root)) {
+        this.sql.exec(
+          `INSERT OR IGNORE INTO _workspace_mounts(root, kind, indexed) VALUES (?, ?, 0)`,
+          root, configured.get(root)!.kind,
+        );
+        this.mountIndexed.set(root, false);
+      }
+    }
+    this.configuredMounts = configured;
   }
+
+  private configuredMounts: Map<string, Mount> = new Map();
 
   /** Resolve and cache the sandbox DO name (UUID when using a warm pool). */
   private async sandboxName(): Promise<string> {
@@ -73,20 +166,77 @@ export class Workspace {
   }
 
   // ---- direct VFS (no container round-trip) ----
+  //
+  // All read/write methods are async: they may need to index a mount
+  // (one R2 list() call) or hydrate file content (one R2 get() call) on
+  // first use. After the index is built and content is cached, subsequent
+  // calls degrade to a couple of SQL statements — cheap, but still async
+  // for API consistency.
 
-  readFile(path: string): Uint8Array | null              { return this.vfs.readFile(path); }
-  writeFile(path: string, content: Uint8Array | string, mode?: number): void {
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    this.vfs.writeFile(path, bytes, mode);
+  async readFile(path: string): Promise<Uint8Array | null> {
+    await this.ensureMountsIndexed();
+    await this.ensureContentLoaded(path);
+    return this.vfs.readFile(path);
   }
-  readdir(path: string): Array<{ name: string; type: "file" | "dir" }> { return this.vfs.readdir(path); }
-  stat(path: string): FileStat | null                    { return this.vfs.stat(path); }
-  mkdir(path: string, mode?: number): void               { this.vfs.mkdir(path, mode); }
-  deleteFile(path: string): void                         { this.vfs.deleteFile(path); }
-  listFilesUnder(prefix: string): string[]               { return this.vfs.listFilesUnder(prefix); }
+
+  async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
+    await this.ensureMountsIndexed();
+    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    // Preserve the existing file's mode on overwrite when the caller didn't
+    // specify one — otherwise a plain `writeFile(path, bytes)` would silently
+    // downgrade an executable script (0o100755) to a regular file (0o100644).
+    // Callers that *want* to change the mode pass it explicitly.
+    const effectiveMode = mode ?? this.vfs.stat(path)?.mode ?? 0o100644;
+    const m = this.resolveMountForWrite(path);
+    if (m) {
+      // Push to the backing store first — if it fails, the VFS stays clean.
+      await m.mount.put!(m.relPath, bytes);
+      this.vfs.writeFile(path, bytes, effectiveMode, m.root);
+    } else {
+      this.vfs.writeFile(path, bytes, effectiveMode);
+    }
+  }
+
+  async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
+    await this.ensureMountsIndexed();
+    return this.vfs.readdir(path);
+  }
+
+  async stat(path: string): Promise<FileStat | null> {
+    await this.ensureMountsIndexed();
+    return this.vfs.stat(path);
+  }
+
+  async mkdir(path: string, mode?: number): Promise<void> {
+    await this.ensureMountsIndexed();
+    // mkdir is VFS-only even under writable mounts: R2 has no directories,
+    // and synthesizing zero-byte directory markers would surface as files.
+    const m = this.resolveMountForWrite(path);
+    this.vfs.mkdir(path, mode, m ? m.root : null);
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    await this.ensureMountsIndexed();
+    const m = this.resolveMountForWrite(path);
+    if (m) {
+      // Collect every file under `path` (could be a single file or a subtree)
+      // and delete each from the backing store before touching the VFS.
+      const subtree = this.vfs.listFilesUnder(path);
+      const files   = subtree.length ? subtree : (this.vfs.stat(path)?.type === "file" ? [path] : []);
+      const rels    = files.map(f => f.slice(m.root.length + 1));
+      await this.runBounded(rels, r => m.mount.delete!(r));
+    }
+    this.vfs.deleteFile(path);
+  }
+
+  async listFilesUnder(prefix: string): Promise<string[]> {
+    await this.ensureMountsIndexed();
+    return this.vfs.listFilesUnder(prefix);
+  }
 
   /** Search filenames under `directory` for `pattern` (substring match). */
-  findFiles(directory: string, pattern?: string): Array<{ path: string; type: "file" | "dir" }> {
+  async findFiles(directory: string, pattern?: string): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+    await this.ensureMountsIndexed();
     return this.vfs.snapshot().entries
       .filter(e => e.path.startsWith(directory))
       .filter(e => !pattern || e.path.includes(pattern))
@@ -94,10 +244,13 @@ export class Workspace {
   }
 
   /** Grep file contents for `pattern`. `path` may be a file or directory. */
-  grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): GrepHit[] {
+  async grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): Promise<GrepHit[]> {
+    await this.ensureMountsIndexed();
     const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
     const { entries } = this.vfs.snapshot();
     const files = entries.filter(e => e.type === "file" && e.path.startsWith(path));
+    // Hydrate any mount stubs in scope, bounded-concurrent.
+    await this.hydrateMany(files.map(f => f.path));
     const hits: GrepHit[] = [];
     for (const f of files) {
       const bytes = this.vfs.readFile(f.path);
@@ -123,8 +276,15 @@ export class Workspace {
    * load right after an applyChanges flush). Use absolute paths in `command`.
    */
   async exec(command: string, cwd?: string): Promise<ExecResult> {
+    await this.ensureMountsIndexed();
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    using api = await this.connectContainer();
+    const api = await this.getConnection();
+
+    // Hydrate any mount stubs we're about to push — otherwise the container
+    // would receive empty files. We pre-fetch in bounded parallel before
+    // computing the change set so the freshly-written rows are included.
+    const stubs = this.vfs.listStubs().map(s => s.path);
+    if (stubs.length) await this.hydrateMany(stubs);
 
     // Push the delta since the last exec.
     const changes = this.vfs.getChangesSince(this.pushSeq);
@@ -135,11 +295,87 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    // Pull files the container touched.
-    const dirty = await api.getDirtyNodes(this.pullSinceMs);
-    if (dirty.length) {
-      await this.vfs.applyChanges(dirty);
-      this.pullSinceMs = Math.max(this.pullSinceMs, ...dirty.map(d => d.mtime ?? 0));
+    // Pull files the container touched. Three cases per change, by the
+    // mount root of its path:
+    //   - outside any mount: applied to the VFS normally.
+    //   - under a read-only mount: dropped (mounts are read-only end-to-end).
+    //   - under a writable mount: applied to the VFS, then mirrored to R2.
+    // Bulk pull: one stream for all file contents instead of one stream
+    // per file.  Cuts capnweb's per-stream materialization round-trips.
+    const ignore = this.opts.pullIgnore ?? ["node_modules"];
+    const bulk = await api.pullDirty(this.pullSinceMs, ignore);
+    // Drain the blob once into a single Buffer-like view so each change
+    // can slice its content out without re-streaming.
+    const blobBytes = await readStreamToUint8Array(bulk.blob);
+
+    // Walk the change list once: keep what we'll apply locally, and (for
+    // writable mounts) what we'll mirror to the mount backend.  Each
+    // entry carries the file's bytes as a subarray view of `blobBytes`
+    // so the sync apply loop and the mount mirror can both reuse them
+    // without re-reading from SQLite.
+    type ApplyEntry = {
+      path: string;
+      op:   "upsert" | "delete";
+      type?: "file" | "dir";
+      mode?: number;
+      mtime?: number;
+      bytes?: Uint8Array;
+      chunks?: Array<{ idx: number; bytes: Uint8Array }>;
+    };
+    type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
+    const applyEntries: ApplyEntry[] = [];
+    const mirrors:      MirrorEntry[] = [];
+    let maxMtime = this.pullSinceMs;
+    for (const c of bulk.changes) {
+      const e: ApplyEntry = { path: c.path, op: c.op };
+      if (c.type  !== undefined) e.type  = c.type;
+      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
+      if (c.op === "upsert" && c.type === "file") {
+        if (c.chunks) {
+          // Chunk-mode: each VfsChunkRef names a slice of the blob.
+          e.chunks = c.chunks.map(k => ({
+            idx:   k.idx,
+            bytes: blobBytes.subarray(k.offset, k.offset + k.size),
+          }));
+        } else if (c.contentSize !== undefined) {
+          const off = c.contentOffset ?? 0;
+          e.bytes = blobBytes.subarray(off, off + c.contentSize);
+        }
+      }
+      const root = this.mountRootOf(c.path);
+      if (root === null) {
+        applyEntries.push(e);
+        continue;
+      }
+      const mount = this.configuredMounts.get(root)!;
+      if (!mount.writable) continue;  // read-only mount: drop
+      applyEntries.push(e);
+      mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
+    }
+
+    if (applyEntries.length) {
+      // Wrap the whole pull's SQLite work in one transactionSync so the
+      // DO commits once instead of once per file.  applyChangesSync is
+      // the sync sibling of applyChanges that takes bytes directly.
+      this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
+      this.pullSinceMs = maxMtime;
+    }
+    // Mirror writable-mount changes to R2 using the bytes we already
+    // captured above, so we don't pay a second SQLite read per file.
+    if (mirrors.length) {
+      await this.runBounded(mirrors, async (m) => {
+        if (m.op === "delete") {
+          await m.mount.delete!(m.relPath);
+        } else if (m.type === "file") {
+          // Chunk-mode files don't carry full bytes here — only the
+          // dirty chunks.  Read the merged file out of the VFS so
+          // the mount sees the complete content.
+          const bytes = m.bytes ?? this.vfs.readFile(m.path);
+          if (bytes) await m.mount.put!(m.relPath, bytes);
+        }
+        // dir entries are VFS-only; nothing to mirror.
+      });
     }
 
     this.saveWatermarks();
@@ -149,7 +385,7 @@ export class Workspace {
       stdout:   result.stdout,
       stderr:   result.stderr,
       pushed:   changes.length,
-      pulled:   dirty.length,
+      pulled:   applyEntries.length,
     };
   }
 
@@ -158,49 +394,205 @@ export class Workspace {
    * Use from `onStart()` in `ctx.waitUntil(...)` so the first exec is fast.
    */
   async warmup(): Promise<void> {
+    await this.ensureMountsIndexed();
     await this.ensureContainerProcess();
+  }
+
+  /**
+   * Eagerly hydrate file content under one mount root, or all mounts if
+   * omitted. Useful from `onStart()` if you want sync-ish reads immediately;
+   * otherwise content is fetched on first read.
+   */
+  async prefetch(root?: string): Promise<void> {
+    await this.ensureMountsIndexed();
+    const stubs = this.vfs.listStubs()
+      .filter(s => root === undefined || s.mountRoot === normalizeMountRoot(root))
+      .map(s => s.path);
+    if (stubs.length) await this.hydrateMany(stubs);
+  }
+
+  // ---- mount internals ----
+
+  /** Resolve the configured mount root that owns `path`, or null. */
+  private mountRootOf(path: string): string | null {
+    for (const r of this.mountRoots) {
+      if (path === r || path.startsWith(r + "/")) return r;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve `path` to its writable mount (root + mount + relPath) or null
+   * if `path` is outside any mount. Throws EROFS if `path` is under a
+   * read-only mount.
+   */
+  private resolveMountForWrite(path: string): { root: string; mount: Mount; relPath: string } | null {
+    const root = this.mountRootOf(path);
+    if (root === null) return null;
+    const mount = this.configuredMounts.get(root)!;
+    if (!mount.writable) {
+      throw new Error(`EROFS: read-only mount at ${root}: ${path}`);
+    }
+    if (!mount.put || !mount.delete) {
+      throw new Error(`mount ${root} is writable but missing put/delete`);
+    }
+    const relPath = path === root ? "" : path.slice(root.length + 1);
+    return { root, mount, relPath };
+  }
+
+  /** Run `fn` over `items` with bounded concurrency. Aggregates errors. */
+  private async runBounded<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+    if (items.length === 0) return;
+    const limit = Workspace.FETCH_CONCURRENCY;
+    const errors: unknown[] = [];
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) {
+        const idx = i++;
+        try { await fn(items[idx]); } catch (e) { errors.push(e); }
+      }
+    });
+    await Promise.all(workers);
+    if (errors.length) {
+      const messages = errors.map(e => (e instanceof Error ? e.message : String(e))).join("; ");
+      throw new Error(`bounded operation failed: ${messages}`);
+    }
+  }
+
+  /**
+   * Build the directory index for every configured mount that hasn't been
+   * indexed yet. Concurrent callers share one promise; once resolved, the
+   * `indexed` flag is persisted in `_workspace_mounts` so DO reloads skip
+   * the re-list (stubs are already in `vfs_nodes`).
+   */
+  private ensureMountsIndexed(): Promise<void> {
+    if (this.indexingPromise) return this.indexingPromise;
+    const pending = this.mountRoots.filter(r => !this.mountIndexed.get(r));
+    if (pending.length === 0) return Promise.resolve();
+
+    this.indexingPromise = (async () => {
+      for (const root of pending) {
+        const mount = this.configuredMounts.get(root)!;
+        const dirMode  = mount.writable ? 0o40755  : 0o40555;
+        const fileMode = mount.writable ? 0o100644 : 0o100444;
+        // Ensure the root itself exists as a directory before any work begins.
+        this.vfs.mkdir(root, dirMode, root);
+
+        if (mount.strategy === "eager") {
+          // Eager mount: hand the mount a write API and let it materialize the
+          // whole tree itself. The VFS holds real content (no stubs) when done.
+          const api: MountWriteApi = {
+            writeFile: (abs, bytes, mode) => {
+              this.vfs.writeFile(abs, bytes, mode ?? fileMode, root);
+            },
+            mkdir: (abs, mode) => {
+              this.vfs.mkdir(abs, mode ?? dirMode, root);
+            },
+          };
+          await mount.materialize(api);
+        } else {
+          // Lazy mount: list + write stubs. Content fetched per-file on read.
+          const entries = await mount.list();
+          for (const entry of entries) {
+            const abs = root + "/" + entry.relPath;
+            if (entry.type === "dir") {
+              this.vfs.mkdir(abs, dirMode, root);
+            } else {
+              this.vfs.writeStub(abs, fileMode, entry.mtime ?? Date.now(), root, entry.size ?? null);
+            }
+          }
+        }
+
+        this.mountIndexed.set(root, true);
+        this.sql.exec(
+          `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`, root,
+        );
+      }
+    })().finally(() => { this.indexingPromise = null; });
+    return this.indexingPromise;
+  }
+
+  /**
+   * Ensure a single stub's content is loaded into the VFS. No-op for
+   * non-stub paths. Dedupes concurrent calls for the same path.
+   */
+  private ensureContentLoaded(path: string): Promise<void> {
+    if (!this.vfs.isStub(path)) return Promise.resolve();
+    const existing = this.contentFetches.get(path);
+    if (existing) return existing;
+    const root = this.vfs.getMountRoot(path);
+    if (!root) return Promise.resolve();
+    const mount = this.configuredMounts.get(root);
+    if (!mount) throw new Error(`mount not configured for root: ${root}`);
+    // Eager mounts materialize everything during indexing — a remaining stub
+    // here means the file was deleted from the backing store between indexing
+    // and this read, or the eager materialize() returned without writing it.
+    // Either way there's nothing left to fetch.
+    if (mount.strategy === "eager") return Promise.resolve();
+    const relPath = path.slice(root.length + 1);
+    const p = (async () => {
+      const bytes = await mount.fetch(relPath);
+      const mode = mount.writable ? 0o100644 : 0o100444;
+      this.vfs.writeFile(path, bytes, mode, root);
+    })().finally(() => { this.contentFetches.delete(path); });
+    this.contentFetches.set(path, p);
+    return p;
+  }
+
+  /** Hydrate multiple paths with bounded concurrency. Skips non-stubs. */
+  private async hydrateMany(paths: string[]): Promise<void> {
+    const stubs = paths.filter(p => this.vfs.isStub(p));
+    if (stubs.length === 0) return;
+    const limit = Workspace.FETCH_CONCURRENCY;
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, stubs.length) }, async () => {
+      while (i < stubs.length) {
+        const idx = i++;
+        await this.ensureContentLoaded(stubs[idx]);
+      }
+    });
+    await Promise.all(workers);
   }
 
   // ---- internal: container process + capnweb session ----
 
+  /**
+   * Make sure `workspace-server` is running. Safe to call concurrently —
+   * the in-flight promise is shared, and clears on rejection so callers can
+   * retry. The orchestration logic lives in `container-startup.ts`; see the
+   * doc comment on `ensureWorkspaceServer` for the failure modes it defends
+   * against.
+   */
   private async ensureContainerProcess(): Promise<void> {
+    if (this.ensurePromise) return this.ensurePromise;
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    let proc;
-    try {
-      proc = await sb.getProcess("workspace-server");
-    } catch {
-      proc = null;
-    }
-    if (!proc) {
-      proc = await sb.startProcess("node /app/server.cjs", { processId: "workspace-server" });
-    }
-    await proc.waitForPort(this.opts.port);
+    this.ensurePromise = ensureWorkspaceServer(sb, this.opts.port).catch(err => {
+      this.ensurePromise = null;  // allow retry on next call
+      throw err;
+    });
+    return this.ensurePromise;
   }
 
-  async connectContainer(retries = 8, delayMs = 1500): Promise<ContainerRpc & Disposable> {
+  /**
+   * Get the active capnweb session, building a fresh one when the previous
+   * connection has been torn down (or never existed). Survives DO restarts
+   * because the container holds workspace-server across the gap; survives
+   * mid-life WS drops because `ContainerConnection.onClose` nulls `this.conn`
+   * synchronously and the next call rebuilds.
+   */
+  private async getConnection(): Promise<ContainerRpc> {
     await this.ensureContainerProcess();
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    const wsReq = new Request("http://container/rpc", {
-      headers: { Upgrade: "websocket", Connection: "upgrade" },
-    });
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const wsRes = await sb.fetch(switchPort(wsReq.clone(), this.opts.port));
-        const ws = (wsRes as unknown as { webSocket: WebSocket }).webSocket;
-        // Dispose the Response stub now that we've extracted the WS, so
-        // workerd doesn't warn at hibernate time.
-        try { (wsRes as unknown as Disposable)[Symbol.dispose]?.(); } catch { /* older runtimes */ }
-        if (!ws) throw new Error("no WebSocket in upgrade response");
-        ws.accept();
-        return newWebSocketRpcSession<ContainerRpc>(ws as unknown as WebSocket);
-      } catch (err) {
-        if (attempt === retries) {
-          throw new Error(`Container not ready after ${retries} attempts: ${err}`);
-        }
-        await new Promise(r => setTimeout(r, delayMs));
-      }
+    if (!this.conn) {
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      this.conn = new ContainerConnection({
+        // `containerFetch` is the documented path for HTTP, but WebSocket upgrades
+        // require `switchPort + fetch` (per @cloudflare/containers docs — see workerd #2319).
+        stub: { fetch: (req: Request) => sb.fetch(req) },
+        port: this.opts.port,
+        onClose: () => { this.conn = null; },
+      });
     }
-    throw new Error("unreachable");
+    return this.conn.rpc() as unknown as ContainerRpc;  // capnweb RpcStub<T> is structurally T at the call site
   }
 
   private saveWatermarks(): void {
@@ -209,4 +601,36 @@ export class Workspace {
       this.pushSeq, this.pullSinceMs,
     );
   }
+}
+
+/**
+ * Normalize a mount root: leading slash required, no trailing slash,
+ * collapse duplicate slashes. Rejects relative paths and the bare root "/".
+ */
+function normalizeMountRoot(p: string): string {
+  if (!p.startsWith("/")) throw new Error(`mount root must be absolute: ${p}`);
+  let out = p.replace(/\/+/g, "/");
+  if (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  if (out === "/") throw new Error(`mount root cannot be "/"`);
+  return out;
+}
+
+/**
+ * Drain a workerd ReadableStream<Uint8Array> into a single Uint8Array.
+ * Used to materialize the bulk-pull blob before slicing per-file views.
+ */
+async function readStreamToUint8Array(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) { chunks.push(value); total += value.length; }
+  }
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
 }
