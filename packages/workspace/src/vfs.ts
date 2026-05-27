@@ -322,6 +322,37 @@ export class Vfs {
     return { seq: this.currentSeq() };
   }
 
+  /**
+   * Sync sibling of applyChanges() for callers that already hold every
+   * file's bytes in memory (the bulk-pull path).  Drops the per-file
+   * await on the stream reader, which lets the caller wrap the whole
+   * loop in DurableObjectStorage.transactionSync for a single SQLite
+   * commit instead of one transaction per row.
+   */
+  applyChangesSync(changes: ReadonlyArray<{
+    path:   string;
+    op:     "upsert" | "delete";
+    type?:  "file" | "dir";
+    mode?:  number;
+    bytes?: Uint8Array;
+  }>): { seq: number } {
+    this.applying = true;
+    try {
+      for (const c of changes) {
+        if (c.op === "delete") {
+          this.deleteFile(c.path);
+        } else if (c.type === "dir") {
+          this.mkdir(c.path, c.mode);
+        } else {
+          this.writeFile(c.path, c.bytes ?? new Uint8Array(0), c.mode);
+        }
+      }
+    } finally {
+      this.applying = false;
+    }
+    return { seq: this.currentSeq() };
+  }
+
   // ---- private helpers ----
 
   private nextSeq(): number {

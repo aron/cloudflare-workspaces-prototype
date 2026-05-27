@@ -307,48 +307,52 @@ export class Workspace {
     // Drain the blob once into a single Buffer-like view so each change
     // can slice its content out without re-streaming.
     const blobBytes = await readStreamToUint8Array(bulk.blob);
-    // Re-hydrate every change back to the existing VfsChange shape so
-    // vfs.applyChanges and the mount-mirror loop below don't need to
-    // know about the bulk wire format.
-    const dirtyRaw: VfsChange[] = bulk.changes.map(c => {
-      const base: VfsChange = { seq: c.seq, path: c.path, op: c.op };
-      if (c.type   !== undefined) base.type  = c.type;
-      if (c.mode   !== undefined) base.mode  = c.mode;
-      if (c.mtime  !== undefined) base.mtime = c.mtime;
+
+    // Walk the change list once: keep what we'll apply locally, and (for
+    // writable mounts) what we'll mirror to the mount backend.  Each
+    // entry carries the file's bytes as a subarray view of `blobBytes`
+    // so the sync apply loop and the mount mirror can both reuse them
+    // without re-reading from SQLite.
+    type ApplyEntry = { path: string; op: "upsert" | "delete"; type?: "file" | "dir"; mode?: number; mtime?: number; bytes?: Uint8Array };
+    type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
+    const applyEntries: ApplyEntry[] = [];
+    const mirrors:      MirrorEntry[] = [];
+    let maxMtime = this.pullSinceMs;
+    for (const c of bulk.changes) {
+      const e: ApplyEntry = { path: c.path, op: c.op };
+      if (c.type  !== undefined) e.type  = c.type;
+      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
       if (c.op === "upsert" && c.type === "file" && c.contentSize !== undefined) {
         const off = c.contentOffset ?? 0;
-        const slice = blobBytes.subarray(off, off + c.contentSize);
-        base.content = oneShotStream(slice);
+        e.bytes = blobBytes.subarray(off, off + c.contentSize);
       }
-      return base;
-    });
-    const accepted: VfsChange[] = [];
-    const mirrors: Array<{ change: VfsChange; root: string; mount: Mount; relPath: string }> = [];
-    for (const c of dirtyRaw) {
       const root = this.mountRootOf(c.path);
       if (root === null) {
-        accepted.push(c);
+        applyEntries.push(e);
         continue;
       }
       const mount = this.configuredMounts.get(root)!;
       if (!mount.writable) continue;  // read-only mount: drop
-      accepted.push(c);
-      const relPath = c.path.slice(root.length + 1);
-      mirrors.push({ change: c, root, mount, relPath });
+      applyEntries.push(e);
+      mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
     }
-    if (accepted.length) {
-      await this.vfs.applyChanges(accepted);
-      this.pullSinceMs = Math.max(this.pullSinceMs, ...accepted.map(d => d.mtime ?? 0));
+
+    if (applyEntries.length) {
+      // Wrap the whole pull's SQLite work in one transactionSync so the
+      // DO commits once instead of once per file.  applyChangesSync is
+      // the sync sibling of applyChanges that takes bytes directly.
+      this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
+      this.pullSinceMs = maxMtime;
     }
-    // Mirror writable-mount changes to R2 *after* the VFS has the new bytes,
-    // so we can read them back chunk-by-chunk rather than buffering streams.
+    // Mirror writable-mount changes to R2 using the bytes we already
+    // captured above, so we don't pay a second SQLite read per file.
     if (mirrors.length) {
       await this.runBounded(mirrors, async (m) => {
-        if (m.change.op === "delete") {
+        if (m.op === "delete") {
           await m.mount.delete!(m.relPath);
-        } else if (m.change.type === "file") {
-          const bytes = this.vfs.readFile(m.change.path);
-          if (bytes) await m.mount.put!(m.relPath, bytes);
+        } else if (m.type === "file" && m.bytes) {
+          await m.mount.put!(m.relPath, m.bytes);
         }
         // dir entries are VFS-only; nothing to mirror.
       });
@@ -361,7 +365,7 @@ export class Workspace {
       stdout:   result.stdout,
       stderr:   result.stderr,
       pushed:   changes.length,
-      pulled:   accepted.length,
+      pulled:   applyEntries.length,
     };
   }
 
@@ -609,14 +613,4 @@ async function readStreamToUint8Array(stream: ReadableStream<Uint8Array>): Promi
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
-}
-
-/**
- * Wrap a Uint8Array view as a single-chunk ReadableStream so the existing
- * vfs.applyChanges() / writeFileFromStream() codepath consumes it unchanged.
- */
-function oneShotStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(c) { c.enqueue(bytes); c.close(); },
-  });
 }
