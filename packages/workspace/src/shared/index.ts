@@ -3,6 +3,15 @@
  * class and the container-side server.
  */
 
+/**
+ * Size of one chunk in the chunked storage and on the chunked wire
+ * format.  Both sides must agree: the DO splits writes here so each
+ * row in `vfs_chunks` is at most CHUNK_SIZE bytes, and the container
+ * partitions dirty file ranges into chunkIdx = floor(byteOffset / CHUNK_SIZE)
+ * buckets so chunk-only pulls land on the same boundaries.
+ */
+export const CHUNK_SIZE = 512 * 1024;  // 512 KiB
+
 export interface VfsEntry {
   path:    string;
   type:    "file" | "dir";

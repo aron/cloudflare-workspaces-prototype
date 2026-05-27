@@ -12,9 +12,8 @@
  * over the capnweb wire and is stored as raw BLOB in SQLite.
  */
 
-import type { VfsEntry, VfsChange } from "./shared/index.js";
+import { CHUNK_SIZE, type VfsEntry, type VfsChange } from "./shared/index.js";
 
-const CHUNK_SIZE = 512 * 1024; // 512 KB
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS vfs_seq (
