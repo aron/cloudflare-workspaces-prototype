@@ -8,7 +8,7 @@
  */
 
 import type { Vfs } from "./vfs.js";
-import type { VfsChange, VfsChangeLite } from "../shared/index.js";
+import { CHUNK_SIZE, type VfsChange, type VfsChangeLite, type VfsChunkRef } from "../shared/index.js";
 import { makeIgnore } from "./ignore.js";
 
 /**
@@ -32,45 +32,91 @@ export function computeBulkPull(
   ignore?: string[],
 ): BulkPullResult {
   const isIgnored = makeIgnore(ignore);
-  type Entry = { ts: number; change: VfsChangeLite; buf?: Buffer };
+  // An entry is either a directory (no bytes), a delete (no bytes), a
+  // whole-file file (carries one Buffer slice), or a chunk-mode file
+  // (carries one Buffer per dirty chunk plus the chunk indexes).
+  type Entry =
+    | { ts: number; change: VfsChangeLite; kind: "meta" }
+    | { ts: number; change: VfsChangeLite; kind: "whole"; buf: Buffer }
+    | { ts: number; change: VfsChangeLite; kind: "chunks"; chunks: Array<{ idx: number; buf: Buffer }> };
   const entries: Entry[] = [];
 
   for (const { path, node } of vfs.allFiles()) {
     if (node.type === "symlink") continue;
     if (node.mtime <= since) continue;
     if (isIgnored(path)) continue;
-    if (node.type === "file") {
-      const buf = node.buf.slice(0, node.size);
+    if (node.type !== "file") {
       entries.push({
         ts: node.mtime,
-        change: { seq: 0, path, op: "upsert", type: "file", mode: node.mode, mtime: node.mtime, contentOffset: 0, contentSize: buf.length },
-        buf,
+        kind: "meta",
+        change: { seq: 0, path, op: "upsert", type: "dir", mode: node.mode, mtime: node.mtime },
+      });
+      continue;
+    }
+    // File: chunk-mode iff the dirty tracker says "range-dirty, not
+    // whole-file dirty."  In every other case (brand-new file, whole
+    // replace, dirty tracker empty -> still in mtime range, fall back
+    // to whole-file to be safe), ship the whole file.
+    const buf = node.buf.slice(0, node.size);
+    if (vfs.dirty.dirtyChunks(path) && !vfs.dirty.isWholeFile(path)) {
+      const idxs = [...vfs.dirty.dirtyChunkIndexes(path)].sort((a, b) => a - b);
+      const chunks: Array<{ idx: number; buf: Buffer }> = [];
+      for (const idx of idxs) {
+        const start = idx * CHUNK_SIZE;
+        if (start >= buf.length) continue;  // dirty chunk past EOF: skip (truncate caught upstream)
+        const end = Math.min(buf.length, start + CHUNK_SIZE);
+        chunks.push({ idx, buf: buf.slice(start, end) });
+      }
+      entries.push({
+        ts: node.mtime,
+        kind: "chunks",
+        change: { seq: 0, path, op: "upsert", type: "file", mode: node.mode, mtime: node.mtime },
+        chunks,
       });
     } else {
       entries.push({
         ts: node.mtime,
-        change: { seq: 0, path, op: "upsert", type: "dir", mode: node.mode, mtime: node.mtime },
+        kind: "whole",
+        change: { seq: 0, path, op: "upsert", type: "file", mode: node.mode, mtime: node.mtime },
+        buf,
       });
     }
   }
   for (const { path, ts } of vfs.getTombstones(since)) {
     if (isIgnored(path)) continue;
-    entries.push({ ts, change: { seq: 0, path, op: "delete", mtime: ts } });
+    entries.push({
+      ts,
+      kind: "meta",
+      change: { seq: 0, path, op: "delete", mtime: ts },
+    });
   }
   entries.sort((a, b) => a.ts - b.ts);
 
-  // Lay out the blob: walk entries in order, assign offsets, accumulate
-  // a single Buffer.  Files >0 bytes carry their slice; dirs/deletes
-  // contribute nothing.
-  const fileEntries = entries.filter(e => e.buf !== undefined);
-  const totalBytes = fileEntries.reduce((n, e) => n + (e.buf!.length), 0);
+  // Lay out the blob: every whole-file slice and every chunk slice in
+  // entry order.  contentOffset / chunks[].offset are filled in as we
+  // copy bytes.
+  let totalBytes = 0;
+  for (const e of entries) {
+    if (e.kind === "whole")  totalBytes += e.buf.length;
+    if (e.kind === "chunks") for (const k of e.chunks) totalBytes += k.buf.length;
+  }
   const blob = Buffer.allocUnsafe(totalBytes);
   let off = 0;
-  for (const e of fileEntries) {
-    e.change.contentOffset = off;
-    e.change.contentSize = e.buf!.length;
-    e.buf!.copy(blob, off);
-    off += e.buf!.length;
+  for (const e of entries) {
+    if (e.kind === "whole") {
+      e.change.contentOffset = off;
+      e.change.contentSize   = e.buf.length;
+      e.buf.copy(blob, off);
+      off += e.buf.length;
+    } else if (e.kind === "chunks") {
+      const refs: VfsChunkRef[] = [];
+      for (const k of e.chunks) {
+        k.buf.copy(blob, off);
+        refs.push({ idx: k.idx, offset: off, size: k.buf.length });
+        off += k.buf.length;
+      }
+      e.change.chunks = refs;
+    }
   }
 
   const changes: VfsChangeLite[] = entries.map((e, i) => ({ ...e.change, seq: i }));
