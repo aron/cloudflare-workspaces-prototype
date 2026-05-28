@@ -55,6 +55,7 @@ import { readIdentity } from "./identity.js";
 import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
+import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
 import type { DeployResult } from "./worker/deploy.js";
@@ -348,6 +349,24 @@ export class Agent extends Think<Env> {
         entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
+    }
+
+    // GET /files-list?prefix=&limit= — prefix listing for the path
+    // autocomplete in the file viewer. Narrower than /vfs (which
+    // returns the full snapshot) so the popover can poll cheaply.
+    if (request.method === "GET" && url.pathname.endsWith("/files-list")) {
+      const prefix = url.searchParams.get("prefix") ?? "";
+      if (prefix.split("/").includes("..")) {
+        return new Response("bad prefix", { status: 400 });
+      }
+      const limitRaw = url.searchParams.get("limit");
+      const limit = Math.min(Math.max(parseInt(limitRaw ?? "20", 10) || 20, 1), 100);
+      const all: ListingEntry[] = [];
+      for (const e of this.workspace.vfs.snapshot().entries) {
+        all.push({ path: e.path, type: e.type === "dir" ? "dir" : "file" });
+      }
+      const result = buildListing(all, prefix, limit);
+      return Response.json(result, { headers: { "cache-control": "no-store" } });
     }
 
     // GET /files/<absolute path> — stream a workspace file with a
