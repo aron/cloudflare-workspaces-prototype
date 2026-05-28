@@ -7,7 +7,7 @@
  * into the thread panel when a posted message returns a threadId.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ChevronDown,
@@ -39,6 +39,7 @@ import * as outbox from "@/lib/roomOutbox";
 import type { AppMessage, Me, RoomMeta } from "@/lib/api";
 import { navigate } from "@/lib/nav";
 import { initials, relTime } from "@/lib/utils";
+import { isAtBottom, isMoreThanOneViewportFromBottom } from "@/lib/scroll-pinning";
 
 const AVATAR_PALETTE = [
   "bg-[#ea7d3a]",
@@ -81,7 +82,15 @@ export function RoomTimeline({
   const [error,    setError]    = useState<string | null>(null);
   const [input,    setInput]    = useState("");
   const [sending,  setSending]  = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Scroll plumbing for the room timeline. Mirrors ThreadPanel: the
+  // room loads pinned to the bottom (latest message visible), follows
+  // new messages while pinned, and surfaces a floating jump-to-bottom
+  // button once the user has scrolled back more than a viewport. Pure
+  // threshold predicates live in `lib/scroll-pinning`.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [isPinned, setIsPinned] = useState(true);
+  const [showJumpButton, setShowJumpButton] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting,      setDeleting]      = useState(false);
 
@@ -188,9 +197,41 @@ export function RoomTimeline({
     return () => { closed = true; ws?.close(); };
   }, [roomId, applyServerMessage]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+  // Follow the timeline while pinned to the bottom. `useLayoutEffect`
+  // so the new message never flashes above the fold before we scroll.
+  // Bail when the user has scrolled back so we don't yank them away.
+  useLayoutEffect(() => {
+    if (!isPinned) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [isPinned, messages]);
+
+  // Track scroll position. Show the jump button once the gap from the
+  // bottom exceeds one viewport; re-pin when we land at the bottom so
+  // a manual scroll-to-bottom resumes auto-follow.
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const m = {
+      scrollTop:    el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    };
+    setIsPinned(isAtBottom(m));
+    setShowJumpButton(isMoreThanOneViewportFromBottom(m));
+  }, []);
+
+  // Eagerly hide the button on click so it doesn't linger through the
+  // smooth-scroll animation; `onScroll` will keep state coherent once
+  // the scroll lands.
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setIsPinned(true);
+    setShowJumpButton(false);
+  }, []);
 
   // Outbox flusher. Re-runs whenever `pending` changes (which is whenever we
   // enqueue, dequeue, or reconnect). Drains entries sequentially so the
@@ -304,29 +345,55 @@ export function RoomTimeline({
         </div>
       )}
 
-      <div className="chat-panel flex-1 overflow-y-auto">
-        <div className="space-y-1 px-4 py-5">
-          {messages.length === 0 && !error && (
-            <div className="px-2 py-12 text-center text-sm text-kumo-inactive">
-              No messages yet. Say hi 👋 — mention{" "}
-              <code className="rounded bg-kumo-recessed px-1 py-0.5">@agent</code>{" "}
-              to start a thread.
-            </div>
-          )}
-          {messages.map(m => (
-            <TopLevelMessage
-              key={m.id}
-              message={m}
-              active={Boolean(activeThreadId && m.metadata.threadId === activeThreadId)}
-              onOpenThread={() => {
-                if (m.metadata.threadId) {
-                  navigate({ kind: "thread", roomId, threadId: m.metadata.threadId });
-                }
-              }}
-            />
-          ))}
-          <div ref={bottomRef} />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="chat-panel flex-1 overflow-y-auto"
+        >
+          <div className="space-y-1 px-4 py-5">
+            {messages.length === 0 && !error && (
+              <div className="px-2 py-12 text-center text-sm text-kumo-inactive">
+                No messages yet. Say hi 👋 — mention{" "}
+                <code className="rounded bg-kumo-recessed px-1 py-0.5">@agent</code>{" "}
+                to start a thread.
+              </div>
+            )}
+            {messages.map(m => (
+              <TopLevelMessage
+                key={m.id}
+                message={m}
+                active={Boolean(activeThreadId && m.metadata.threadId === activeThreadId)}
+                onOpenThread={() => {
+                  if (m.metadata.threadId) {
+                    navigate({ kind: "thread", roomId, threadId: m.metadata.threadId });
+                  }
+                }}
+              />
+            ))}
+          </div>
         </div>
+
+        {/*
+         * Jump-to-bottom button. Same pattern as ThreadPanel — floats
+         * just above the composer when the user has scrolled back more
+         * than a viewport. `pointer-events-none` on the wrapper means
+         * the gap on either side of the button doesn't eat clicks on
+         * the timeline underneath; the button itself re-enables them.
+         */}
+        {showJumpButton && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+            <Button
+              size="icon-sm"
+              variant="secondary"
+              aria-label="Jump to latest message"
+              onClick={scrollToBottom}
+              className="pointer-events-auto rounded-full border border-kumo-line bg-kumo-elevated/90 shadow-lg backdrop-blur hover:bg-kumo-elevated"
+            >
+              <ChevronDown className="size-4" />
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="flex-shrink-0 bg-kumo-base px-5 pb-4 pt-2">
