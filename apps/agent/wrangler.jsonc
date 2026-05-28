@@ -7,13 +7,9 @@
 
   "ai": { "binding": "AI", "remote": true },
   "worker_loaders": [{ "binding": "LOADER" }],
-  "r2_buckets": [
-    { "binding": "SKILLS", "bucket_name": "hackspace-skills" }
-  ],
+  "r2_buckets": [{ "binding": "SKILLS", "bucket_name": "hackspace-skills" }],
 
-  "artifacts": [
-    { "binding": "Artifacts", "namespace": "hackspace-prototype" }
-  ],
+  "artifacts": [{ "binding": "Artifacts", "namespace": "hackspace-prototype" }],
 
   "assets": {
     "directory": "../frontend/dist",
@@ -25,8 +21,8 @@
       "class_name": "Sandbox",
       "image": "./Dockerfile",
       "image_build_context": "../..",
-      "instance_type": "lite",
-      "max_instances": 10
+      "instance_type": "standard-2",
+      "max_instances": 100
     }
   ],
 
@@ -54,7 +50,7 @@
 
   "vars": {
     // Number of pre-warmed sandbox containers to keep ready.
-    "WARM_POOL_TARGET": "2",
+    "WARM_POOL_TARGET": "3",
     "WARM_POOL_REFRESH_INTERVAL": "10000",
 
     "OPENAI_MODEL": "gpt-5.5"

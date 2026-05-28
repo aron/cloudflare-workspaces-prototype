@@ -45,6 +45,8 @@ describe("buildSystemPrompt — tool list", () => {
       "findFiles", "grep",
       "exec",
       "webFetch", "webSearch",
+      "gitClone", "gitCreateRepo", "gitListRepos",
+      "gitCommit", "gitPush", "gitShare",
       "worker_deploy", "worker_fetch",
     ];
     for (const name of expected) {
@@ -55,6 +57,19 @@ describe("buildSystemPrompt — tool list", () => {
   it("includes the custom-tools hedge sentence after the tool list", () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/In addition to the tools above, you may have access to other custom tools/);
+  });
+
+  it("describes gitShare as the way to hand a URL back to the user for local checkout", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/\n- gitShare: [^\n]*URL/);
+  });
+});
+
+describe("buildSystemPrompt — capabilities overview", () => {
+  it("tells the model to load the capabilities-overview skill when asked what it can do", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/capabilities-overview/);
+    expect(prompt).toMatch(/what can you do|what you can do|how to use/i);
   });
 });
 

@@ -60,6 +60,12 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["exec",          "run a build/compile command in the container"],
   ["webFetch",      "fetch and summarize a URL"],
   ["webSearch",     "search the web for documentation or examples"],
+  ["gitClone",      "clone a public GitHub repo into the workspace"],
+  ["gitCreateRepo", "create an empty repo in the session's Artifacts bucket"],
+  ["gitListRepos",  "list repos available to this session"],
+  ["gitCommit",     "commit the current working tree"],
+  ["gitPush",       "push HEAD to the per-session fork on Artifacts"],
+  ["gitShare",      "snapshot the working tree and return a short-lived URL the user can `git remote add` and clone locally"],
   ["worker_deploy", "build a Worker from /workspace/wrangler.jsonc and load it"],
   ["worker_fetch",  "send a fetch() call to the loaded Worker"],
 ];
@@ -67,6 +73,7 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
 const GUIDELINES = [
   "Prefer grep / findFiles / listDirectory over exec for file exploration",
   "Use worker_deploy + worker_fetch to test Workers, not exec",
+  "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
   "Be concise in your responses",
   "Show file paths clearly when working with files",
 ];
