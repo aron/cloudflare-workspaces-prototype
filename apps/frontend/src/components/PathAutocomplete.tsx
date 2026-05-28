@@ -47,8 +47,10 @@ export function PathAutocomplete({ threadId, text, onAccept, registerHandlers }:
         const res = await fetch(url, { signal: controller.signal, credentials: "same-origin" });
         if (!res.ok) return;
         const body = await res.json() as { entries: ListingEntry[] };
-        const prefix = text.trimStart().slice(1).trimEnd();
-        setEntries(filterAndRank(body.entries, prefix));
+        // Strip the `!/` trigger to recover the server-side query text.
+        const query = text.trimStart().slice(2).trimEnd();
+        setEntries(filterAndRank(body.entries, query));
+
         setActive(0);
       } catch {
         // Network errors are non-fatal; the popover stays empty.

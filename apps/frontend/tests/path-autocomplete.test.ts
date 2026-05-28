@@ -19,11 +19,13 @@ const tid = "thread123";
 
 describe("buildListingUrl", () => {
   it("returns a listing URL when the input is in bang mode", () => {
+    // After the !/ trigger, plain text is a fuzzy query.
     expect(buildListingUrl(tid, "!/foo")).toBe(
-      `/api/threads/${tid}/files-list?prefix=%2Ffoo&limit=20`,
+      `/api/threads/${tid}/files-list?prefix=foo&limit=20`,
     );
+    // Slashes inside the query stay as-is so the server can do prefix mode.
     expect(buildListingUrl(tid, "!/workspace/sr")).toBe(
-      `/api/threads/${tid}/files-list?prefix=%2Fworkspace%2Fsr&limit=20`,
+      `/api/threads/${tid}/files-list?prefix=workspace%2Fsr&limit=20`,
     );
   });
 
@@ -33,15 +35,15 @@ describe("buildListingUrl", () => {
     expect(buildListingUrl(tid, "")).toBeNull();
   });
 
-  it("handles bare !/ as an empty prefix on the absolute root", () => {
+  it("handles bare !/ as an empty query", () => {
     expect(buildListingUrl(tid, "!/")).toBe(
-      `/api/threads/${tid}/files-list?prefix=%2F&limit=20`,
+      `/api/threads/${tid}/files-list?prefix=&limit=20`,
     );
   });
 
   it("tolerates leading whitespace", () => {
     expect(buildListingUrl(tid, "  !/foo")).toBe(
-      `/api/threads/${tid}/files-list?prefix=%2Ffoo&limit=20`,
+      `/api/threads/${tid}/files-list?prefix=foo&limit=20`,
     );
   });
 });
@@ -78,7 +80,8 @@ describe("filterAndRank", () => {
   ];
 
   it("filters by prefix and sorts dirs first", () => {
-    expect(filterAndRank(entries, "/workspace/s").map((e) => e.path)).toEqual([
+    // Query as the popover sends it: trigger stripped, no leading slash.
+    expect(filterAndRank(entries, "workspace/s").map((e) => e.path)).toEqual([
       "/workspace/skills",
       "/workspace/src",
       "/workspace/system.log",
@@ -86,7 +89,7 @@ describe("filterAndRank", () => {
   });
 
   it("returns everything when prefix matches all", () => {
-    expect(filterAndRank(entries, "/workspace/").map((e) => e.path)).toEqual([
+    expect(filterAndRank(entries, "workspace/").map((e) => e.path)).toEqual([
       "/workspace/skills",
       "/workspace/src",
       "/workspace/README.md",
@@ -95,6 +98,18 @@ describe("filterAndRank", () => {
   });
 
   it("returns empty when nothing matches", () => {
-    expect(filterAndRank(entries, "/nope/")).toEqual([]);
+    expect(filterAndRank(entries, "nope/")).toEqual([]);
+  });
+
+  it("passes fuzzy-query results through unchanged (trusts the server)", () => {
+    // Server returned these in fuzzy-score order; we shouldn't reorder.
+    const fuzzyResults: ListingEntry[] = [
+      { path: "/workspace/foo.png", type: "file" },
+      { path: "/workspace/src/foo.ts", type: "file" },
+    ];
+    expect(filterAndRank(fuzzyResults, "foo").map(e => e.path)).toEqual([
+      "/workspace/foo.png",
+      "/workspace/src/foo.ts",
+    ]);
   });
 });
