@@ -213,6 +213,109 @@ export class Agent extends Think<Env> {
   onStart() {
     // Pre-warm: kick off container boot in background, don't block.
     this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+    // Recover in-flight exec processes that were running when the DO
+    // last died. Don't block onStart; this can race with new turns and
+    // either path tolerates a stale inflight row.
+    this.ctx.waitUntil(this._recoverInflightExecs().catch(err => {
+      console.warn("[Agent] exec recovery failed:", err);
+    }));
+  }
+
+  /**
+   * Sweep the _exec_inflight table and reconcile each row with the
+   * sandbox's view of the process. Three cases:
+   *
+   *   - sandbox.getProcess returns null     -> process is gone (sandbox
+   *     cycled or never had it). Patch the persisted tool part to
+   *     output-error with details: "process lost on restart". Clear
+   *     the inflight row.
+   *   - process completed                    -> patch the part to a
+   *     final output-available state built from sandbox logs. Clear.
+   *   - process still running                -> reattach, stream the
+   *     remaining logs into the persisted part via
+   *     updateMessageInHistory, then clear when it exits.
+   *
+   * Patches go through updateMessageInHistory so subsequent reconnects
+   * and future turns see the correct state. Without recovery the
+   * orphan-tools safety net (beforeTurn) still rewrites the part to
+   * output-error; recovery just gives a nicer result when the process
+   * actually finished.
+   */
+  private async _recoverInflightExecs(): Promise<void> {
+    const inflight = this._inflight();
+    const rows = inflight.list();
+    if (rows.length === 0) return;
+    for (const row of rows) {
+      try {
+        await this._recoverOneInflightExec(row.toolCallId, row.processId);
+      } catch (err) {
+        console.warn(`[Agent] recovery for ${row.toolCallId} failed:`, err);
+      } finally {
+        inflight.clear(row.toolCallId);
+      }
+    }
+  }
+
+  private async _recoverOneInflightExec(toolCallId: string, processId: string): Promise<void> {
+    const ws = this.workspace;
+    // 1. Probe the sandbox.
+    const proc = await ws.getProcess(processId);
+    if (!proc) {
+      await this._patchExecPart(toolCallId, {
+        processId, running: false, stdout: "", stderr: "",
+        error: { details: "process lost on restart" },
+        exitCode: -1,
+      });
+      return;
+    }
+
+    // 2. Pull whatever logs are still buffered. The sandbox keeps them
+    //    even after exit, so this covers both running and completed.
+    const buf = new ExecOutputBuffer();
+    try {
+      const stream = await ws.streamProcessLogs(processId);
+      for await (const event of stream as AsyncIterable<LogEvent>) {
+        buf.apply(event);
+        if (event.type === "exit" || event.type === "error") break;
+      }
+    } catch (err) {
+      const details = err instanceof Error ? err.message : String(err);
+      await this._patchExecPart(toolCallId, {
+        ...buf.snapshot(processId), error: { details },
+      });
+      return;
+    }
+    // Pull dirty files; same rationale as the live tool's finally clause.
+    try { await ws.pullDirtyAfter(); } catch { /* best effort */ }
+    await this._patchExecPart(toolCallId, buf.snapshot(processId));
+  }
+
+  /**
+   * Walk this.messages, find the assistant message that carries the
+   * tool part with matching toolCallId, and patch it to
+   * output-available with the supplied snapshot. Persisted via
+   * updateMessageInHistory so reconnects and future turns see it.
+   */
+  private async _patchExecPart(toolCallId: string, snap: unknown): Promise<void> {
+    for (const m of this.messages) {
+      if (m.role !== "assistant") continue;
+      let touched = false;
+      const parts = m.parts.map(p => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ap = p as any;
+        if (typeof ap.type === "string" && ap.type.startsWith("tool-") &&
+            ap.toolCallId === toolCallId) {
+          touched = true;
+          return { ...ap, state: "output-available", output: snap };
+        }
+        return p;
+      });
+      if (touched) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await this.updateMessageInHistory({ ...m, parts } as any);
+        return;
+      }
+    }
   }
 
   // ── Think hooks ───────────────────────────────────────
