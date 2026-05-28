@@ -8,7 +8,7 @@
  * "quoted root" so the thread always has its own context.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
@@ -52,6 +52,7 @@ import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
 import { initials, relTime } from "@/lib/utils";
+import { isAtBottom, isMoreThanOneViewportFromBottom } from "@/lib/scroll-pinning";
 
 const AVATAR_PALETTE = [
   "bg-[#ea7d3a]",
@@ -122,6 +123,67 @@ export function ThreadPanel({
   });
 
   const { messages, sendMessage, isStreaming, isServerStreaming, stop } = useAgentChat({ agent });
+
+  // Scroll plumbing for the chat panel. The thread loads pinned to
+  // the bottom (latest message visible), follows new messages while
+  // pinned, and surfaces a floating jump-to-bottom button once the
+  // user scrolls back more than a viewport. The pure predicates that
+  // decide "at bottom" / "more than a page up" live in
+  // `lib/scroll-pinning` so the thresholds are unit-tested without
+  // jsdom + scroll-event plumbing.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Start pinned: a fresh thread that hasn't been scrolled is at the
+  // bottom by definition, and `useLayoutEffect` below seals that in
+  // the moment messages first render.
+  const [isPinned, setIsPinned] = useState(true);
+  const [showJumpButton, setShowJumpButton] = useState(false);
+
+  // Follow the conversation while pinned. `useLayoutEffect` runs
+  // before the browser paints so the new message never flashes on
+  // screen above the fold — important for streaming text where every
+  // chunk would otherwise look like a scroll jolt. We bail when the
+  // user has scrolled back so we don't yank them away from what
+  // they're reading.
+  useLayoutEffect(() => {
+    if (!isPinned) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    // Depend on `isStreaming` directly rather than the derived
+    // `turnInFlight` so we don't have to hoist its declaration above
+    // this hook. Either flag flipping advances the message list
+    // (streaming chunks land as part updates), so following both is
+    // the right shape for "more content may have arrived".
+  }, [isPinned, messages, isStreaming, isServerStreaming]);
+
+  // Track scroll position. The button appears once the gap from the
+  // bottom exceeds one viewport ("more than a page") and disappears
+  // again as soon as we land at the bottom. Pinning re-engages on
+  // the same edge so a manual scroll-to-bottom resumes auto-follow.
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const m = {
+      scrollTop:    el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    };
+    const atBottom = isAtBottom(m);
+    setIsPinned(atBottom);
+    setShowJumpButton(isMoreThanOneViewportFromBottom(m));
+  }, []);
+
+  // Clicking the jump button scrolls to the bottom and re-pins. The
+  // re-pin happens via `onScroll` once the smooth-scroll lands, but
+  // set it eagerly too so the button hides immediately instead of
+  // waiting for the animation to settle.
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setIsPinned(true);
+    setShowJumpButton(false);
+  }, []);
 
   // Show the stop button whenever a turn is in progress from *either* the
   // client's vantage (an in-flight sendMessage call) or the server's (a
@@ -286,135 +348,162 @@ export function ThreadPanel({
         </div>
       )}
 
-      <div className="chat-panel flex-1 overflow-y-auto">
-        <div className="flex flex-col gap-6 px-5 py-4">
-          {messages.length === 0 && (
-            <div className="py-8 text-center text-sm text-kumo-inactive">
-              Thread is starting up…
-            </div>
-          )}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="chat-panel flex-1 overflow-y-auto"
+        >
+          <div className="flex flex-col gap-6 px-5 py-4">
+            {messages.length === 0 && (
+              <div className="py-8 text-center text-sm text-kumo-inactive">
+                Thread is starting up…
+              </div>
+            )}
 
-          {messages.map((m) => {
-            if (m.role === "user") {
-              const text = m.parts.filter(p => p.type === "text")
-                .map(p => (p as { type: "text"; text: string }).text).join("");
-              const meta = (m as { metadata?: { author?: { kind?: string; name?: string; id?: string } } }).metadata;
-              const author = meta?.author;
-              const name = author?.name ?? "You";
-              const idx  = authorIdx(author?.id ?? name);
-              return (
-                <div key={m.id} className="flex flex-row-reverse items-start gap-2.5">
-                  <div className={`flex size-7 flex-shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white ${AVATAR_PALETTE[idx]}`}>
-                    {initials(name).slice(0, 1)}
+            {messages.map((m) => {
+              if (m.role === "user") {
+                const text = m.parts.filter(p => p.type === "text")
+                  .map(p => (p as { type: "text"; text: string }).text).join("");
+                const meta = (m as { metadata?: { author?: { kind?: string; name?: string; id?: string } } }).metadata;
+                const author = meta?.author;
+                const name = author?.name ?? "You";
+                const idx  = authorIdx(author?.id ?? name);
+                return (
+                  <div key={m.id} className="flex flex-row-reverse items-start gap-2.5">
+                    <div className={`flex size-7 flex-shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white ${AVATAR_PALETTE[idx]}`}>
+                      {initials(name).slice(0, 1)}
+                    </div>
+                    <Message from="user" className="ml-0 max-w-full flex-1">
+                      <div className="mb-1 text-right text-2xs text-kumo-inactive">{name}</div>
+                      <MessageContent>
+                        <div className="whitespace-pre-wrap"><MentionText text={text} /></div>
+                      </MessageContent>
+                    </Message>
                   </div>
-                  <Message from="user" className="ml-0 max-w-full flex-1">
-                    <div className="mb-1 text-right text-2xs text-kumo-inactive">{name}</div>
-                    <MessageContent>
-                      <div className="whitespace-pre-wrap"><MentionText text={text} /></div>
-                    </MessageContent>
-                  </Message>
-                </div>
-              );
-            }
+                );
+              }
 
-            if (m.role === "assistant") {
-              return (
-                <Message key={m.id} from="assistant" className="max-w-full">
-                  {m.parts.map((part, i) => {
-                    if (part.type === "text") {
-                      return (
-                        <MessageContent key={i}>
-                          <MentionHighlighter>
-                            <MessageResponse>{part.text}</MessageResponse>
-                          </MentionHighlighter>
-                        </MessageContent>
-                      );
-                    }
-                    if (part.type === "reasoning") {
-                      const text = (part as { text?: string }).text;
-                      if (!text) return null;
-                      return (
-                        <Reasoning key={i} isStreaming={false} defaultOpen={false}>
-                          <ReasoningTrigger />
-                          <ReasoningContent>{text}</ReasoningContent>
-                        </Reasoning>
-                      );
-                    }
-                    if (isToolUIPart(part)) {
-                      const name   = getToolName(part);
-                      const input  = (part as { input?: unknown }).input;
-                      const output = (part as { output?: unknown }).output;
-                      const errorText = (part as { errorText?: string }).errorText;
-                      const toolCallId = (part as { toolCallId?: string }).toolCallId;
-                      // Tool-call duration in ms attached by the agent in
-                      // `afterToolCall` once the call settles. Falls back to
-                      // the exec snapshot's own `durationMs` so old persisted
-                      // exec parts keep their badge after the rollout.
-                      const callDurationMs =
-                        (part as { callDurationMs?: number }).callDurationMs
-                        ?? (output as { durationMs?: number } | null)?.durationMs;
-
-                      // Custom chrome for exec — streams stdout/stderr live,
-                      // colours green on exit 0, red on non-zero or error.
-                      if (name === "exec") {
+              if (m.role === "assistant") {
+                return (
+                  <Message key={m.id} from="assistant" className="max-w-full">
+                    {m.parts.map((part, i) => {
+                      if (part.type === "text") {
                         return (
-                          <ExecToolView
-                            key={i}
-                            input={input as { command?: string; cwd?: string } | undefined}
-                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                            output={output as any}
-                            errorText={errorText}
-                            state={part.state}
-                            toolCallId={toolCallId}
-                            onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
-                          />
+                          <MessageContent key={i}>
+                            <MentionHighlighter>
+                              <MessageResponse>{part.text}</MessageResponse>
+                            </MentionHighlighter>
+                          </MessageContent>
                         );
                       }
-                      // "Running" states: the model has emitted the call but no
-                      // result has landed yet. Show a Cancel affordance so the
-                      // user can fail a wedged tool without nuking the whole turn.
-                      const isRunning = part.state === "input-streaming" || part.state === "input-available";
-                      return (
-                        <Tool key={i} defaultOpen={false}>
-                          <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} callDurationMs={callDurationMs} />
-                          <ToolContent>
-                            {input != null && <ToolInput input={input} />}
-                            {isRunning && toolCallId && (
-                              <div className="px-3 pb-2 pt-1">
-                                <Button
-                                  size="sm"
-                                  onClick={() => {
-                                    void agent.call("cancelToolCall", [toolCallId]).catch(() => {});
-                                  }}
-                                  className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                                >
-                                  Cancel tool call
-                                </Button>
-                              </div>
-                            )}
-                            {(output != null || errorText) && (
-                              <ToolOutput output={output} errorText={errorText} />
-                            )}
-                          </ToolContent>
-                        </Tool>
-                      );
-                    }
-                    return null;
-                  })}
-                </Message>
-              );
-            }
-            return null;
-          })}
+                      if (part.type === "reasoning") {
+                        const text = (part as { text?: string }).text;
+                        if (!text) return null;
+                        return (
+                          <Reasoning key={i} isStreaming={false} defaultOpen={false}>
+                            <ReasoningTrigger />
+                            <ReasoningContent>{text}</ReasoningContent>
+                          </Reasoning>
+                        );
+                      }
+                      if (isToolUIPart(part)) {
+                        const name   = getToolName(part);
+                        const input  = (part as { input?: unknown }).input;
+                        const output = (part as { output?: unknown }).output;
+                        const errorText = (part as { errorText?: string }).errorText;
+                        const toolCallId = (part as { toolCallId?: string }).toolCallId;
+                        // Tool-call duration in ms attached by the agent in
+                        // `afterToolCall` once the call settles. Falls back to
+                        // the exec snapshot's own `durationMs` so old persisted
+                        // exec parts keep their badge after the rollout.
+                        const callDurationMs =
+                          (part as { callDurationMs?: number }).callDurationMs
+                          ?? (output as { durationMs?: number } | null)?.durationMs;
 
-          {viewerEntries.map(entry => (
-            <FileViewer key={entry.id} entry={entry} onDismiss={dismissViewerEntry} />
-          ))}
+                        // Custom chrome for exec — streams stdout/stderr live,
+                        // colours green on exit 0, red on non-zero or error.
+                        if (name === "exec") {
+                          return (
+                            <ExecToolView
+                              key={i}
+                              input={input as { command?: string; cwd?: string } | undefined}
+                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                              output={output as any}
+                              errorText={errorText}
+                              state={part.state}
+                              toolCallId={toolCallId}
+                              onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
+                            />
+                          );
+                        }
+                        // "Running" states: the model has emitted the call but no
+                        // result has landed yet. Show a Cancel affordance so the
+                        // user can fail a wedged tool without nuking the whole turn.
+                        const isRunning = part.state === "input-streaming" || part.state === "input-available";
+                        return (
+                          <Tool key={i} defaultOpen={false}>
+                            <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} callDurationMs={callDurationMs} />
+                            <ToolContent>
+                              {input != null && <ToolInput input={input} />}
+                              {isRunning && toolCallId && (
+                                <div className="px-3 pb-2 pt-1">
+                                  <Button
+                                    size="sm"
+                                    onClick={() => {
+                                      void agent.call("cancelToolCall", [toolCallId]).catch(() => {});
+                                    }}
+                                    className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                                  >
+                                    Cancel tool call
+                                  </Button>
+                                </div>
+                              )}
+                              {(output != null || errorText) && (
+                                <ToolOutput output={output} errorText={errorText} />
+                              )}
+                            </ToolContent>
+                          </Tool>
+                        );
+                      }
+                      return null;
+                    })}
+                  </Message>
+                );
+              }
+              return null;
+            })}
 
-          {turnInFlight && (
-            <div className="text-sm text-kumo-inactive">●●●</div>
-          )}
+            {viewerEntries.map(entry => (
+              <FileViewer key={entry.id} entry={entry} onDismiss={dismissViewerEntry} />
+            ))}
+
+            {turnInFlight && (
+              <div className="text-sm text-kumo-inactive">●●●</div>
+            )}
+          </div>
         </div>
+
+        {/*
+         * Jump-to-bottom button. Floats above the composer's top edge
+         * (positioned via `bottom-3` inside this relative wrapper).
+         * `pointer-events-none` on the wrapper means the gap on either
+         * side of the button never eats clicks on the chat panel; the
+         * button itself re-enables pointer events.
+         */}
+        {showJumpButton && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+            <Button
+              size="icon-sm"
+              variant="secondary"
+              aria-label="Jump to latest message"
+              onClick={scrollToBottom}
+              className="pointer-events-auto rounded-full border border-kumo-line bg-kumo-elevated/90 shadow-lg backdrop-blur hover:bg-kumo-elevated"
+            >
+              <ChevronDown className="size-4" />
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="flex-shrink-0 bg-kumo-base px-4 pb-3 pt-2">
