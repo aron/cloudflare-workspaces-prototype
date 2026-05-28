@@ -1,5 +1,13 @@
 # 04. Filesystem Interface
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 `Workspace.fs` is the file API. It's inspired by `node:fs/promises` for
 familiarity — same method names, similar option shapes — but it's a much
 smaller surface and it leans on `ReadableStream<Uint8Array>` wherever a

@@ -1,5 +1,13 @@
 # 02. Sync Protocol
 
+> [!IMPORTANT]
+> This document describes the **intended design** of the sync protocol
+> and has **diverged from the current implementation** in the
+> repository. Naming, signatures, and behaviours described here are
+> targets, not what `main` ships today. When in doubt, treat the code
+> as authoritative for what runs and this doc as authoritative for
+> what we're moving toward.
+
 The workspace keeps two copies of the filesystem tree in sync:
 
 - **DO side** — a SQLite-backed VFS in the Durable Object (the source of
@@ -31,29 +39,34 @@ Data flows in two directions, on its own clock:
 
 A typical `exec()` round-trip:
 
-1. **Push.** The DO sends every change with a higher revision than the
-   container has seen, **coalesced to one record per path** (the latest
-   state wins — five rewrites of the same path between execs cost one
-   record on the wire, not five). The container suppresses its own
-   dirty-tracking while applying so deletes don't bounce back.
+1. **Push.** The DO streams every `ChangeEntry` with a higher
+   revision than the container has seen, **coalesced to one entry
+   per path** (the latest state wins — five rewrites of the same
+   path between execs cost one entry on the wire, not five). Bytes
+   are not inline; entries carry chunk hashes only. The container
+   calls `hasObjects` on the referenced hashes, the DO follows up
+   with `pushObjects` for the missing subset. The container
+   suppresses its own dirty-tracking while applying so deletes don't
+   bounce back.
 2. **Hydrate.** Lazy-mount stubs the command might touch are fetched
    from their providers and included in the same push batch. See
    [06. Mount Interface](./06_mount_interface.md).
 3. **Exec.** The command runs. FUSE writes are captured by the
    in-container VFS as they happen, each stamped with a fresh revision.
-4. **Pull.** The DO asks the container for every change since its
-   pull watermark. The container returns a **stream of manifest
-   records** — one per touched path with a `chunks: (hash, size)[]`
-   array. No bytes inline. The DO consumes records as they arrive so
-   peak memory stays bounded regardless of how much the exec touched.
-5. **Diff.** The DO unions all chunk hashes from the manifest stream,
-   probes which it already has, and fetches only the missing bytes.
-6. **Apply.** Manifests + new blobs land in the DO's SQLite **in
+4. **Fetch.** The DO calls `fetchChanges(sinceRev = fetchRev)`. The
+   container streams `ChangeEntry` records — one per touched path,
+   per-file entries carrying `chunks: (hash, size)[]`. No bytes
+   inline. The DO consumes entries as they arrive so peak memory
+   stays bounded regardless of how much the exec touched.
+5. **Diff.** The DO unions all chunk hashes from the entry stream,
+   probes its own `cf_vfs_blobs` for which it already has, and calls
+   `fetchObjects` for the missing subset.
+6. **Apply.** Entries + new objects land in the DO's SQLite **in
    bounded transactions** (default cap: 64 MiB of new bytes or 1024
-   paths, whichever first). `pullRev` advances per committed batch so a
-   crash mid-pull resumes cleanly via `sinceRev = pullRev` on the next
-   call. After the final batch the DO advances `pullRev` to the
-   container's reported max revision.
+   paths, whichever first). `fetchRev` advances per committed batch
+   so a crash mid-fetch resumes cleanly via `sinceRev = fetchRev` on
+   the next call. After the final batch the DO advances `fetchRev`
+   to the container's reported max revision.
 
 `writeFile` / `mkdir` / `rm` outside of `exec()` follow the same shape:
 step 1 is "this single change", steps 3–6 are skipped. `workspace.push()`
@@ -81,7 +94,7 @@ one name.
 | Watermark | Owner | Meaning |
 | --- | --- | --- |
 | `pushRev` | DO | Last DO-side `rev` successfully pushed to the container. |
-| `pullRev` | DO | Last container-side `rev` the DO has consumed. |
+| `fetchRev` | DO | Last container-side `rev` the DO has fetched. |
 | `currentRev` | DO | Latest `rev` stamped on a DO-side mutation. |
 | `currentRev` | Container | Latest `rev` stamped on a container-side mutation. |
 | `appliedPushRev` | Container | Largest DO `rev` the container has fully applied. Echoed on every push response and pull stream. |
@@ -93,7 +106,7 @@ baseline.
 
 ### Cross-side invariant
 
-Every `pullDirty` and `applyChanges` response carries the container's
+Every `fetchChanges` and `push` response carries the container's
 current `appliedPushRev`. The DO asserts `appliedPushRev >= pushRev` on
 every response. The two sides never share a single clock, but echoing
 the largest applied DO rev makes the "container is caught up with the
@@ -103,15 +116,18 @@ trips the assertion immediately rather than corrupting data silently.
 
 ## Wire shape
 
-The container exposes a single pull RPC, `pullDirty`, that returns a
-manifest:
+The wire is symmetric: push and fetch both move `ChangeEntry`
+records, both probe with `hasObjects`, both transfer bytes by hash.
+Naming follows git's vocabulary — the DO *pushes* entries and
+objects to the container, and *fetches* entries and objects back.
 
-| RPC | Returns | Notes |
-| --- | --- | --- |
-| `applyChanges` | `{ rev, appliedPushRev }` | DO → container. Applies a coalesced batch of changes. |
-| `pullDirty(sinceRev?, ignore?)` | `ReadableStream<ManifestRecord>` | Container → DO. Streams one record per touched path with `chunks: (hash, size)[]`. No bytes inline. Each record carries the container's `appliedPushRev`. |
-| `hasBlobs(hashes[])` | `Uint8Array[]` | Probes which chunk hashes the container has stored. |
-| `getBlobs(hashes[])` | `ReadableStream<{ hash, bytes }>` | Streams chunk bytes back in request order. |
+| RPC | Direction | Returns | Notes |
+| --- | --- | --- | --- |
+| `push` | DO → container | `{ rev, appliedPushRev }` | Streams a coalesced batch of `ChangeEntry`. Container calls `hasObjects` on referenced hashes; DO follows up with `pushObjects` for the missing subset. |
+| `fetchChanges(sinceRev?, ignore?)` | container → DO | `ReadableStream<ChangeEntry>` | Streams one entry per touched path. For files, `chunks: (hash, size)[]` (no bytes inline); for dirs, metadata; for deletes, a tombstone. Each entry carries the container's `appliedPushRev`. |
+| `hasObjects(hashes[])` | either side probes the other | `Uint8Array[]` | Returns the subset of the input the receiver already holds. The git `have` line, batched. |
+| `fetchObjects(hashes[])` | container → DO | `ReadableStream<{ hash, bytes }>` | Streams chunk bytes by hash. The git `want`/pack response on the fetch path. |
+| `pushObjects(objects)` | DO → container | `void` | Streams chunk bytes by hash. The push-direction mirror of `fetchObjects`. |
 
 Identical content at multiple paths (or unchanged chunks within an
 edited file) shows up exactly once on the wire. See
@@ -122,17 +138,17 @@ edited file) shows up exactly once on the wire. See
 - **Container restart mid-exec.** The DO's connection detects the
   closed WebSocket and self-destructs. The next call transparently
   rebuilds against the still-running workspace-server (or restarts it
-  if needed). `pushRev` and `pullRev` mean the catch-up is incremental.
-- **Container crash mid-apply.** `applyChanges` is atomic from the DO's
+  if needed). `pushRev` and `fetchRev` mean the catch-up is incremental.
+- **Container crash mid-apply.** `push` is atomic from the DO's
   perspective. The container is permitted to lose all state on crash;
   the next push treats the container as empty (`appliedPushRev = 0`).
   Partial application must not survive a crash. Today the in-memory
   VFS satisfies this trivially — the process dies and restarts empty.
   A future on-disk container mirror will need a staging-dir-then-rename
   or WAL to preserve the same invariant.
-- **DO restart mid-pull.** `pullRev` advances per committed apply batch,
+- **DO restart mid-pull.** `fetchRev` advances per committed apply batch,
   so the new DO instance resumes from the last durably-committed batch
-  via `pullDirty(sinceRev = pullRev)`.
+  via `fetchChanges(sinceRev = fetchRev)`.
 - **DO restart.** Watermarks are persisted, so the new DO instance
   picks up where the old one left off. The container keeps the
   workspace-server process alive across the gap.
@@ -191,11 +207,11 @@ much the DO admits exists.
 
 ### Bloom/cuckoo filter over `cf_vfs_blobs.hash`
 
-Every pull does a `hasBlobs` probe round-trip. With tens of thousands
+Every pull does a `hasObjects` probe round-trip. With tens of thousands
 of chunks per pull the bytes are small but the latency is real. A DO-
 side probabilistic filter rebuilt lazily from `cf_vfs_blobs` would let the
 DO skip the probe for chunks it can prove it doesn't have, falling
-back to `hasBlobs` only for likely-present hits. No protocol change
+back to `hasObjects` only for likely-present hits. No protocol change
 needed; pure DO-side optimisation.
 
 ### Push backpressure
@@ -220,8 +236,8 @@ better trade for our scale.
 
 **Git pack protocol.** Maps directly onto our model: trees =
 directories, blobs = files, content addressing by sha. The smart
-protocol's haves/wants negotiation is exactly what `hasBlobs` /
-`getBlobs` do today, and isomorphic-git is already in the dependency
+protocol's haves/wants negotiation is exactly what `hasObjects` /
+`fetchObjects` do today, and isomorphic-git is already in the dependency
 tree for `GitHubRepo`. Where it stops fitting: git's chunking is
 per-blob (whole file), so sub-file dedup costs a repack-driven delta
 search rather than falling out of the addressing. Its mental model is
@@ -259,7 +275,8 @@ dependency:
    (`casync mtree`, `desync index` on the file from any container)
    and trivial export of a workspace as `.caidx` + `.castr` for
    backup or migration. Spec borrow, not code borrow.
-2. **Rename `hasBlobs` / `getBlobs` to align with git's haves/wants
+2. **The `hasObjects` / `fetchObjects` RPCs already align with git's
+   haves/wants
    vocabulary** — anyone who has read `git fetch` source recognises
    the pattern instantly. The semantics are already the same; this
    is purely a naming alignment.

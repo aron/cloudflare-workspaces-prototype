@@ -1,5 +1,13 @@
 # 07. Injected Service
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 The "injected service" is the workspace-server process that runs *inside*
 the sandbox container. It owns the FUSE mount, the in-container VFS
 mirror, and the capnweb RPC endpoint the DO talks to.

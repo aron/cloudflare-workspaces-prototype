@@ -1,5 +1,13 @@
 # 05. Shell Interface
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 `Workspace.shell` runs commands inside the sandbox container against the
 same filesystem tree the DO writes to. Every `exec` is wrapped by an
 incremental push (DO → container) before the command runs and an

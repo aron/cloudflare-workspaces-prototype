@@ -1,5 +1,13 @@
 # 01. Directory Structure
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 The workspace exposes a single absolute path namespace rooted at `/`. By
 convention everything lives under `/workspace`, but the root is
 configurable — pass `root` to the `Workspace` constructor to anchor the

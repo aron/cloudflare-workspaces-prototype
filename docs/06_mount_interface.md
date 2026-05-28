@@ -1,5 +1,13 @@
 # Mount Interface
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 A mount populates a subtree of the workspace from an external source —
 R2, a GitHub repository, an artifact bundle, or anything custom. Mounts
 are configured once at construction and live for the lifetime of the

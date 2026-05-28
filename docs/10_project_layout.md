@@ -1,5 +1,13 @@
 # 10. Project Layout
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 The workspace ships as a monorepo. The package itself lives in
 `packages/workspace`; the agent-facing tooling sits alongside it.
 

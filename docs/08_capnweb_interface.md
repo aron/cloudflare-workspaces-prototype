@@ -1,5 +1,15 @@
 # 08. Capnweb Interface
 
+> [!IMPORTANT]
+> This document describes the **intended design** of the capnweb wire
+> interface and has **diverged from the current implementation** in
+> the repository. RPC names, type names (`ChangeEntry`, `hasObjects`,
+> `fetchObjects`, `pushObjects`, `push`, `fetchChanges`), and the
+> unification of push/fetch on a single `ChangeEntry` type are
+> targets, not what `main` ships today. When in doubt, treat the code
+> as authoritative for what runs and this doc as authoritative for
+> what we're moving toward.
+
 [capnweb](https://github.com/cloudflare/capnweb) is the RPC framing used
 between the Durable Object and the in-container workspace-server. The
 wire format is text JSON over a single WebSocket. The interface served
@@ -35,21 +45,38 @@ interface ContainerRPC {
   // the DO has no watermark (e.g. fresh sandbox).
   snapshot(): Promise<{ entries: VFSEntry[]; rev: number }>;
 
-  // DO → container. Apply the listed changes to the in-container mirror.
-  applyChanges(changes: VFSChange[]): Promise<{ rev: number }>;
+  // DO → container. Stream a coalesced batch of changes. Bytes are
+  // not inline: the DO sends ChangeEntry records with chunk hashes,
+  // the container calls back via hasObjects / asks for the missing
+  // bytes through pushObjects. Returns the container's new rev and
+  // its appliedPushRev once the batch is durably applied.
+  push(changes: ReadableStream<ChangeEntry>):
+    Promise<{ rev: number; appliedPushRev: number }>;
 
-  // Container → DO. Manifest pull. Per-file (hash, size) chunk lists;
-  // no inline bytes. Caller follows up with hasBlobs / getBlobs for
-  // the subset it doesn't already have.
-  pullDirty(sinceRev?: number, ignore?: string[]): ReadableStream<ManifestRecord>;
+  // Container → DO. Stream every ChangeEntry with rev > sinceRev.
+  // Per-file entries carry (hash, size) chunk lists; no bytes inline.
+  // Caller follows up with hasObjects / fetchObjects for the chunks
+  // it doesn't already have. Each entry carries the container's
+  // current appliedPushRev.
+  fetchChanges(sinceRev?: number, ignore?: string[]):
+    ReadableStream<ChangeEntry>;
 
-  // Probe which chunk hashes the container has. Used by the manifest
-  // pull and by the chunk-mode push.
-  hasBlobs(hashes: Uint8Array[]): Promise<Uint8Array[]>;
+  // Probe which object hashes the receiver has. Same semantics in
+  // both directions: git's `have` line, batched. Returns the subset
+  // of the input the receiver already holds.
+  hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]>;
 
-  // Fetch raw bytes for a set of chunk hashes, in request order.
-  // Throws if any hash is unknown — callers must dedupe and probe first.
-  getBlobs(hashes: Uint8Array[]): ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>;
+  // Container → DO direction of object transfer. Stream bytes for
+  // a set of chunk hashes in request order. Throws EUNKNOWN_HASH if
+  // any hash is unknown — callers must dedupe and probe first.
+  fetchObjects(hashes: Uint8Array[]):
+    ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>;
+
+  // DO → container direction of object transfer. The DO streams the
+  // bytes the container reported missing (via hasObjects) during a
+  // push. Pushed objects are addressable immediately by hash.
+  pushObjects(objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>):
+    Promise<void>;
 
   // Start a command. Returns a handle whose `events` stream yields
   // stdout / stderr / exit frames as they happen. The stream is the
@@ -95,30 +122,39 @@ type ExecEvent =
   | { id: string; seq: number; name: "exit";   value: number };
 ```
 
-`VFSEntry`, `VFSChange`, and `ManifestRecord` are defined in
+`VFSEntry` and `ChangeEntry` are defined in
 `src/shared/index.ts`. The schema column references match
 [03. Filesystem Schema](./03_filesystem_schema.md).
 
-## Pull semantics
+## Push and fetch semantics
 
-`pullDirty` returns a `ReadableStream<ManifestRecord>` — one record per
-touched path with a `chunks: (hash, size)[]` array. No bytes inline.
-Callers consume records as they arrive, accumulate the union of chunk
-hashes they don't recognise, and follow up with `hasBlobs` /
-`getBlobs` (the latter also returns a stream) for the missing subset.
+Push and fetch are symmetric. The same `ChangeEntry` shape moves in
+both directions, and the same `hasObjects` probe runs against both
+ends:
+
+- **Push (DO → container).** The DO streams `ChangeEntry` records,
+  the container calls `hasObjects` on the chunk hashes referenced,
+  the DO follows up with `pushObjects` for the missing subset, the
+  container applies the batch and returns `{ rev, appliedPushRev }`.
+- **Fetch (container → DO).** The container streams `ChangeEntry`
+  records, the DO accumulates chunk hashes, calls `hasObjects` on
+  itself (cheap, local) to find what it already has, then calls
+  `fetchObjects` for the rest.
 
 | Aspect | Value |
 | --- | --- |
-| Round-trips per pull | 1 streaming RPC + 1 `hasBlobs` + 1 streaming `getBlobs` (only if any hashes are missing) |
-| Bytes inline | None — manifests carry chunk hashes only |
-| Dedup | Global, content-addressed by `sha256(chunk)` |
+| Round-trips per fetch | 1 streaming `fetchChanges` + 1 `hasObjects` + 1 streaming `fetchObjects` (only if any hashes are missing) |
+| Round-trips per push | 1 streaming `push` + 1 `hasObjects` (server-driven) + 1 streaming `pushObjects` (only if any hashes are missing) |
+| Bytes inline in `ChangeEntry` | None — entries carry chunk hashes only |
+| Dedup | Global, content-addressed by `sha256(chunk)`. Applies in both directions. |
 
-Identical content at multiple paths costs exactly one entry on the wire
-and zero `getBlobs` round-trips if the DO already has the blob from a
-previous pull. Streaming both the manifest and the blob fetch keeps
-peak memory bounded on both sides regardless of how much the exec
-touched. See [02. Sync Protocol](./02_sync_protocol.md) for how this
-composes into the push/pull cycle.
+Identical content at multiple paths costs exactly one entry on the
+wire and zero object-fetch round-trips if the receiver already has
+the blob from a previous push or fetch. Streaming both the change
+list and the object transfer keeps peak memory bounded on both sides
+regardless of how much was touched. See
+[02. Sync Protocol](./02_sync_protocol.md) for how this composes into
+the push/fetch cycle.
 
 ## Backpressure on the exec stream
 
@@ -176,7 +212,7 @@ type WireError = {
 | Code | Meaning |
 | --- | --- |
 | `ENOENT` | Path does not exist on the DO side (covers ignored paths, which are invisible to `Workspace.fs`). |
-| `EUNKNOWN_HASH` | `getBlobs` was called for a hash the container has no record of. |
+| `EUNKNOWN_HASH` | `fetchObjects` or `pushObjects` referenced a hash the receiver has no record of. |
 | `ELOG_TRUNCATED` | `getExec` resume point is older than the retained log. |
 | `ESHUTDOWN` | Server is shutting down; reconnect after the next boot. |
 | `EAUTH` | Handshake auth failed (see [07. Injected Service](./07_injected_service.md)). |
@@ -218,13 +254,14 @@ case depends on a particular resolution.
   capnweb side will likely grow a pre-bootstrap auth phase to match
   whatever scheme the injected service settles on.
 - **Frame-size and message limits.** The wire has no documented
-  bound on single-frame size, in-flight RPC count, or `getBlobs`
-  batch size. A pathological caller can ask for 100k hashes in one
-  call and pin both sides on a single oversized frame. Working
-  defaults are likely 16 MiB per frame, 256 concurrent RPCs per
-  session, and 1024 hashes per `getBlobs` batch — but they need
-  measurement and an enforcement story (reject loudly? split
-  silently?) before they go in the contract.
+  bound on single-frame size, in-flight RPC count, or
+  `hasObjects` / `fetchObjects` / `pushObjects` batch size. A
+  pathological caller can ask for 100k hashes in one call and pin
+  both sides on a single oversized frame. Working defaults are
+  likely 16 MiB per frame, 256 concurrent RPCs per session, and
+  1024 hashes per object-transfer batch — but they need measurement
+  and an enforcement story (reject loudly? split silently?) before
+  they go in the contract.
 
 See [02. Sync Protocol](./02_sync_protocol.md) for how these RPCs
 compose into a push/pull cycle, and

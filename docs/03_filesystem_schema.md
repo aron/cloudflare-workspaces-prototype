@@ -1,5 +1,13 @@
 # 03. Filesystem Schema
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 The VFS lives in the Durable Object's SQLite. Every read and write
 ultimately hits one of these tables. All tables are prefixed with
 `cf_vfs_` (or `_cf_vfs_` for internal bookkeeping) so they don't
@@ -161,7 +169,7 @@ CREATE TABLE _cf_vfs_watermark (
 );
 ```
 
-Stores `pushRev` and `pullRev` (see
+Stores `pushRev` and `fetchRev` (see
 [02. Sync Protocol](./02_sync_protocol.md#watermarks)). Survives DO
 restarts so reconnects resume cleanly.
 

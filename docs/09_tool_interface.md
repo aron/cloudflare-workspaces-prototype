@@ -1,5 +1,13 @@
 # 09. Tool Interface (Agents)
 
+> [!IMPORTANT]
+> This document describes the **intended design** and has **diverged
+> from the current implementation** in the repository. Names,
+> signatures, and behaviours described here are targets, not what
+> `main` ships today. When in doubt, treat the code as authoritative
+> for what runs and this doc as authoritative for what we're moving
+> toward.
+
 The `@cloudflare/fs-tools` package ships ready-made
 [AI SDK](https://github.com/vercel/ai) tools that drive a `Workspace`
 through its `FileStore` adapter. Drop them into a `@cloudflare/agents`
