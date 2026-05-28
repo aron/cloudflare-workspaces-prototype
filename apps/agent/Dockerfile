@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 cloudflare/sandbox:0.9.2
+FROM cloudflare/sandbox:0.9.3
 
 # Install any user-supplied root CAs (sandbox/*.crt). Optional — see
 # sandbox/README.md. The directory always exists (the README sits there),
