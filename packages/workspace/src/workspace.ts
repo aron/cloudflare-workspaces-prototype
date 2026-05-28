@@ -18,6 +18,7 @@ import { ensureWorkspaceServer } from "./container-startup.js";
 import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
 import { asFactory } from "./mounts/index.js";
 import { pathStartsWith, type ContainerRpc, type ExecResult, type GrepHit, type FileStat, type VfsChange } from "./shared/index.js";
+import { createQueue, serialize, type Queue } from "./serialize.js";
 
 export interface WorkspaceOptions {
   /** DO storage to mount the VFS on. */
@@ -98,6 +99,17 @@ export class Workspace {
   private conn: ContainerConnection | null = null;
   /** Memoised in-flight ensureContainerProcess promise; clears on rejection so callers can retry. */
   private ensurePromise: Promise<void> | null = null;
+
+  // ---- per-workspace mutex ----
+  /**
+   * FIFO queue serializing all mutating + sync entry points (exec,
+   * writeFile, mkdir, deleteFile).  Without this, concurrent calls
+   * could read overlapping watermarks, interleave mount-side writes,
+   * and race the Vfs.applying flag through async gaps.  Pure reads
+   * (readFile, readdir, stat, findFiles, grep, listFilesUnder) stay
+   * outside the queue — readers shouldn't wait on writers.
+   */
+  private mutex: Queue = createQueue();
 
   constructor(opts: WorkspaceOptions) {
     this.opts = { port: 4567, ...opts };
@@ -189,19 +201,21 @@ export class Workspace {
   async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
     await this.ensureMountsIndexed();
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    // Preserve the existing file's mode on overwrite when the caller didn't
-    // specify one — otherwise a plain `writeFile(path, bytes)` would silently
-    // downgrade an executable script (0o100755) to a regular file (0o100644).
-    // Callers that *want* to change the mode pass it explicitly.
-    const effectiveMode = mode ?? this.vfs.stat(path)?.mode ?? 0o100644;
-    const m = this.resolveMountForWrite(path);
-    if (m) {
-      // Push to the backing store first — if it fails, the VFS stays clean.
-      await m.mount.put!(m.relPath, bytes);
-      this.vfs.writeFile(path, bytes, effectiveMode, m.root);
-    } else {
-      this.vfs.writeFile(path, bytes, effectiveMode);
-    }
+    return serialize(this.mutex, async () => {
+      // Preserve the existing file's mode on overwrite when the caller didn't
+      // specify one — otherwise a plain `writeFile(path, bytes)` would silently
+      // downgrade an executable script (0o100755) to a regular file (0o100644).
+      // Callers that *want* to change the mode pass it explicitly.
+      const effectiveMode = mode ?? this.vfs.stat(path)?.mode ?? 0o100644;
+      const m = this.resolveMountForWrite(path);
+      if (m) {
+        // Push to the backing store first — if it fails, the VFS stays clean.
+        await m.mount.put!(m.relPath, bytes);
+        this.vfs.writeFile(path, bytes, effectiveMode, m.root);
+      } else {
+        this.vfs.writeFile(path, bytes, effectiveMode);
+      }
+    });
   }
 
   async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
@@ -216,24 +230,28 @@ export class Workspace {
 
   async mkdir(path: string, mode?: number): Promise<void> {
     await this.ensureMountsIndexed();
-    // mkdir is VFS-only even under writable mounts: R2 has no directories,
-    // and synthesizing zero-byte directory markers would surface as files.
-    const m = this.resolveMountForWrite(path);
-    this.vfs.mkdir(path, mode, m ? m.root : null);
+    return serialize(this.mutex, async () => {
+      // mkdir is VFS-only even under writable mounts: R2 has no directories,
+      // and synthesizing zero-byte directory markers would surface as files.
+      const m = this.resolveMountForWrite(path);
+      this.vfs.mkdir(path, mode, m ? m.root : null);
+    });
   }
 
   async deleteFile(path: string): Promise<void> {
     await this.ensureMountsIndexed();
-    const m = this.resolveMountForWrite(path);
-    if (m) {
-      // Collect every file under `path` (could be a single file or a subtree)
-      // and delete each from the backing store before touching the VFS.
-      const subtree = this.vfs.listFilesUnder(path);
-      const files   = subtree.length ? subtree : (this.vfs.stat(path)?.type === "file" ? [path] : []);
-      const rels    = files.map(f => f.slice(m.root.length + 1));
-      await this.runBounded(rels, r => m.mount.delete!(r));
-    }
-    this.vfs.deleteFile(path);
+    return serialize(this.mutex, async () => {
+      const m = this.resolveMountForWrite(path);
+      if (m) {
+        // Collect every file under `path` (could be a single file or a subtree)
+        // and delete each from the backing store before touching the VFS.
+        const subtree = this.vfs.listFilesUnder(path);
+        const files   = subtree.length ? subtree : (this.vfs.stat(path)?.type === "file" ? [path] : []);
+        const rels    = files.map(f => f.slice(m.root.length + 1));
+        await this.runBounded(rels, r => m.mount.delete!(r));
+      }
+      this.vfs.deleteFile(path);
+    });
   }
 
   async listFilesUnder(prefix: string): Promise<string[]> {
@@ -284,6 +302,7 @@ export class Workspace {
    */
   async exec(command: string, cwd?: string): Promise<ExecResult> {
     await this.ensureMountsIndexed();
+    return serialize(this.mutex, async () => {
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
     const api = await this.getConnection();
 
@@ -302,7 +321,7 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    const pulled = await this.pullDirtyAfter();
+    const pulled = await this._pullDirtyAfterLocked();
 
 
     return {
@@ -312,6 +331,7 @@ export class Workspace {
       pushed:   changes.length,
       pulled,
     };
+    });
   }
 
   /**
@@ -339,19 +359,21 @@ export class Workspace {
     opts: { cwd?: string } = {},
   ): Promise<Process> {
     await this.ensureMountsIndexed();
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    const api = await this.getConnection();
+    return serialize(this.mutex, async () => {
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      const api = await this.getConnection();
 
-    // Same pre-flight as exec: hydrate stub mounts then push the delta.
-    const stubs = this.vfs.listStubs().map(s => s.path);
-    if (stubs.length) await this.hydrateMany(stubs);
-    const changes = this.vfs.getChangesSince(this.pushSeq);
-    if (changes.length) {
-      await api.applyChanges(changes);
-      this.pushSeq = changes[changes.length - 1].seq;
-    }
+      // Same pre-flight as exec: hydrate stub mounts then push the delta.
+      const stubs = this.vfs.listStubs().map(s => s.path);
+      if (stubs.length) await this.hydrateMany(stubs);
+      const changes = this.vfs.getChangesSince(this.pushSeq);
+      if (changes.length) {
+        await api.applyChanges(changes);
+        this.pushSeq = changes[changes.length - 1].seq;
+      }
 
-    return sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
+      return sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
+    });
   }
 
   /**
@@ -389,6 +411,14 @@ export class Workspace {
    * streaming. Returns the count of applied entries.
    */
   async pullDirtyAfter(): Promise<number> {
+    return serialize(this.mutex, () => this._pullDirtyAfterLocked());
+  }
+
+  /**
+   * Pull body without the mutex. exec() already holds the mutex when it
+   * calls this; the public pullDirtyAfter() wraps it.
+   */
+  private async _pullDirtyAfterLocked(): Promise<number> {
     const api = await this.getConnection();
 
     // Pull files the container touched. Three cases per change, by the
