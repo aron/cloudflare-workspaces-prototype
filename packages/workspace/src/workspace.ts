@@ -392,13 +392,29 @@ export class Workspace {
    * Stream `LogEvent`s from a running (or recently-running) process.
    * Decodes the sandbox SDK's SSE wire format so callers iterate
    * structured events directly.
+   *
+   * Cancellation: pass an `AbortSignal` and we translate `abort` into a
+   * `killProcess(processId)` call worker-side. We do *not* forward the
+   * signal to `sb.streamProcessLogs` itself:
+   *   - workerd refuses to serialize an `AbortSignal` across the DO RPC
+   *     boundary ("AbortSignal serialization is not enabled").
+   *   - the sandbox SDK's HTTP transport drops the option two layers
+   *     down anyway (process-client's `streamProcessLogs` doesn't even
+   *     accept it).
+   * Killing the process stops the sandbox emitting log events; the SSE
+   * stream then closes naturally and the consuming iterator returns.
    */
   async streamProcessLogs(
     processId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<AsyncIterable<LogEvent>> {
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    const stream = await sb.streamProcessLogs(processId, options);
+    if (options.signal) {
+      const onAbort = () => { void sb.killProcess(processId).catch(() => {}); };
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const stream = await sb.streamProcessLogs(processId);
     return parseSSEStream<LogEvent>(stream);
   }
 
