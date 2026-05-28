@@ -10,7 +10,7 @@
  * DO storage so reconnects/restarts resume cleanly.
  */
 
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, parseSSEStream, type LogEvent, type Process, type Sandbox } from "@cloudflare/sandbox";
 
 import { Vfs } from "./vfs.js";
 import { ContainerConnection } from "./container-connection.js";
@@ -295,6 +295,95 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
+    const pulled = await this.pullDirtyAfter();
+
+
+    return {
+      exitCode: result.exitCode,
+      stdout:   result.stdout,
+      stderr:   result.stderr,
+      pushed:   changes.length,
+      pulled,
+    };
+  }
+
+  /**
+   * Pre-warm the container without running a command. Idempotent.
+   * Use from `onStart()` in `ctx.waitUntil(...)` so the first exec is fast.
+   */
+  async warmup(): Promise<void> {
+    await this.ensureMountsIndexed();
+    await this.ensureContainerProcess();
+  }
+
+  /**
+   * Start a long-running process in the sandbox container, returning a
+   * `Process` handle the caller can stream logs from, await exit on, or
+   * kill. Performs the same DO→container push as `exec` so the process
+   * sees the latest VFS state.
+   *
+   * Caller is responsible for pulling DO←container deltas after the
+   * process exits via `pullDirtyAfter(...)` — we can't bake that into
+   * the returned handle because the consumer typically wants to stream
+   * logs in parallel with the wait.
+   */
+  async startProcess(
+    command: string,
+    opts: { cwd?: string } = {},
+  ): Promise<Process> {
+    await this.ensureMountsIndexed();
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    const api = await this.getConnection();
+
+    // Same pre-flight as exec: hydrate stub mounts then push the delta.
+    const stubs = this.vfs.listStubs().map(s => s.path);
+    if (stubs.length) await this.hydrateMany(stubs);
+    const changes = this.vfs.getChangesSince(this.pushSeq);
+    if (changes.length) {
+      await api.applyChanges(changes);
+      this.pushSeq = changes[changes.length - 1].seq;
+    }
+
+    return sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
+  }
+
+  /**
+   * Stream `LogEvent`s from a running (or recently-running) process.
+   * Decodes the sandbox SDK's SSE wire format so callers iterate
+   * structured events directly.
+   */
+  async streamProcessLogs(
+    processId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AsyncIterable<LogEvent>> {
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    const stream = await sb.streamProcessLogs(processId, options);
+    return parseSSEStream<LogEvent>(stream);
+  }
+
+  /**
+   * Look up a process by id. Returns null when the sandbox has lost the
+   * process. Used by the agent's `onStart` recovery sweep to decide
+   * whether to reattach or close out an in-flight exec.
+   */
+  async getProcess(processId: string): Promise<Process | null> {
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    try {
+      return await sb.getProcess(processId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Pull file changes the container made into the VFS. Counterpart to
+   * the automatic pull `exec` performs; for `startProcess` callers must
+   * invoke this explicitly once they've decided the process is done
+   * streaming. Returns the count of applied entries.
+   */
+  async pullDirtyAfter(): Promise<number> {
+    const api = await this.getConnection();
+
     // Pull files the container touched. Three cases per change, by the
     // mount root of its path:
     //   - outside any mount: applied to the VFS normally.
@@ -308,11 +397,6 @@ export class Workspace {
     // can slice its content out without re-streaming.
     const blobBytes = await readStreamToUint8Array(bulk.blob);
 
-    // Walk the change list once: keep what we'll apply locally, and (for
-    // writable mounts) what we'll mirror to the mount backend.  Each
-    // entry carries the file's bytes as a subarray view of `blobBytes`
-    // so the sync apply loop and the mount mirror can both reuse them
-    // without re-reading from SQLite.
     type ApplyEntry = {
       path: string;
       op:   "upsert" | "delete";
@@ -333,7 +417,6 @@ export class Workspace {
       if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
       if (c.op === "upsert" && c.type === "file") {
         if (c.chunks) {
-          // Chunk-mode: each VfsChunkRef names a slice of the blob.
           e.chunks = c.chunks.map(k => ({
             idx:   k.idx,
             bytes: blobBytes.subarray(k.offset, k.offset + k.size),
@@ -349,53 +432,28 @@ export class Workspace {
         continue;
       }
       const mount = this.configuredMounts.get(root)!;
-      if (!mount.writable) continue;  // read-only mount: drop
+      if (!mount.writable) continue;
       applyEntries.push(e);
       mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
     }
 
     if (applyEntries.length) {
-      // Wrap the whole pull's SQLite work in one transactionSync so the
-      // DO commits once instead of once per file.  applyChangesSync is
-      // the sync sibling of applyChanges that takes bytes directly.
       this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
       this.pullSinceMs = maxMtime;
     }
-    // Mirror writable-mount changes to R2 using the bytes we already
-    // captured above, so we don't pay a second SQLite read per file.
     if (mirrors.length) {
       await this.runBounded(mirrors, async (m) => {
         if (m.op === "delete") {
           await m.mount.delete!(m.relPath);
         } else if (m.type === "file") {
-          // Chunk-mode files don't carry full bytes here — only the
-          // dirty chunks.  Read the merged file out of the VFS so
-          // the mount sees the complete content.
           const bytes = m.bytes ?? this.vfs.readFile(m.path);
           if (bytes) await m.mount.put!(m.relPath, bytes);
         }
-        // dir entries are VFS-only; nothing to mirror.
       });
     }
 
     this.saveWatermarks();
-
-    return {
-      exitCode: result.exitCode,
-      stdout:   result.stdout,
-      stderr:   result.stderr,
-      pushed:   changes.length,
-      pulled:   applyEntries.length,
-    };
-  }
-
-  /**
-   * Pre-warm the container without running a command. Idempotent.
-   * Use from `onStart()` in `ctx.waitUntil(...)` so the first exec is fast.
-   */
-  async warmup(): Promise<void> {
-    await this.ensureMountsIndexed();
-    await this.ensureContainerProcess();
+    return applyEntries.length;
   }
 
   /**
