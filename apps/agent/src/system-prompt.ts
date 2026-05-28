@@ -32,6 +32,13 @@ export interface BuildSystemPromptOptions {
   /** Current thread's id, substituted into the file-serving URL examples. */
   threadId?: string;
   /**
+   * Path segments excluded from the container→DO pull (matches
+   * Workspace's `pullIgnore`). Surfaced to the model so it knows
+   * which paths won't appear via read/ls/grep/find. Pass an empty
+   * array (or omit) to skip the workspace-ignore section.
+   */
+  pullIgnore?: string[];
+  /**
    * Override "now" — exposed for tests. Production callers leave this
    * unset and get the current date in YYYY-MM-DD form.
    */
@@ -59,6 +66,25 @@ function fileServing(threadId: string): string {
     `  \`<a href="/api/threads/${tid}/files/workspace/build.zip?download" download>Download build.zip</a>\`.`,
     "- Add `?download` to the URL to force a Content-Disposition: attachment header so the browser saves the file instead of rendering it.",
     "- Don't fabricate file paths \u2014 only link files you actually created or that the user provided.",
+  ].join("\n");
+}
+
+/**
+ * Section describing the workspace-ignore policy. Renders only when
+ * `pullIgnore` has at least one entry. The wording leans heavily on
+ * the rule that ignored paths *still exist on the container* — the
+ * agent's exec can read them, but the file tools can't, and exec is
+ * the slow path so the model should reach for it deliberately rather
+ * than as a fallback.
+ */
+function workspaceIgnore(pullIgnore: string[]): string {
+  const list = pullIgnore.map(p => `\`${p}\``).join(", ");
+  return [
+    "Workspace ignore rules:",
+    `- Paths matching ${list} are ignored by the post-exec sync, so they don't appear via \`read\`, \`write\`, \`edit\`, \`ls\`, \`stat\`, \`find\`, or \`grep\`. They are matched as path segments — any path containing \`/<name>/\` or ending in \`/<name>\`.`,
+    "- The files still exist on the container side, so `exec` (and anything it runs — node, tsc, eslint, etc.) sees them normally.",
+    "- `exec` *can* be used to read or grep an ignored file (e.g. `exec(\"cat /workspace/node_modules/foo/package.json\")`), but each call spawns a sandbox process and round-trips through the container — plan on hundreds of ms minimum. Reach for it only when no other tool can answer the question.",
+    "- Prefer published documentation, `websearch` / `webfetch`, or the source repo's metadata over crawling installed dependencies.",
   ].join("\n");
 }
 
@@ -103,6 +129,7 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const skills = opts.skills ?? [];
   const now      = opts.now ?? new Date();
   const threadId = opts.threadId ?? "";
+  const pullIgnore = opts.pullIgnore ?? [];
 
   const tools = TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
   const guidelines = GUIDELINES.map(g => `- ${g}`).join("\n");
@@ -113,6 +140,7 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
     WORKSPACE_NOTE,
     "",
     fileServing(threadId),
+    ...(pullIgnore.length > 0 ? ["", workspaceIgnore(pullIgnore)] : []),
     "",
     "Available tools:",
     tools,

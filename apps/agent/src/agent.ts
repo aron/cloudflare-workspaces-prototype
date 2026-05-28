@@ -75,6 +75,18 @@ export type { DeployResult, FetchToolResult, ParsedFetch };
 const WORKSPACE   = "/workspace";
 const SKILLS_PATH = "/workspace/.agents/skills";
 
+/**
+ * Path segments excluded from the post-`exec()` pull. Shared between
+ * the Workspace config (which uses it to gate what crosses the wire
+ * from the container to the DO) and the system prompt (which tells
+ * the model these files won't appear via read/ls/grep/find). Single
+ * source of truth so a future addition only needs to be made here.
+ *
+ * The Workspace matcher treats each entry as a path segment: a name
+ * matches when the path contains `/<name>/` or ends with `/<name>`.
+ */
+const WORKSPACE_IGNORE = ["node_modules"];
+
 
 export class Agent extends Think<Env> {
   /** Wrap each chat turn in a runFiber so streams survive DO eviction. */
@@ -188,10 +200,9 @@ export class Agent extends Think<Env> {
       // ship megabytes of node_modules through capnweb after every
       // npm install. The bytes still exist on the container side for
       // the next exec() to use; we just don't persist them into the
-      // DO's VFS.  Workspace defaults to ['node_modules'] already —
-      // listed explicitly here so the policy is visible at the call
-      // site and survives a default change.
-      pullIgnore: ["node_modules"],
+      // DO's VFS. Sourced from WORKSPACE_IGNORE so the system prompt
+      // can advertise the same list to the model — see getSystemPrompt().
+      pullIgnore: WORKSPACE_IGNORE,
       // R2-backed mount of the shared skills bucket. The agent reads
       // SKILL.md bodies through this mount via the normal `read` tool;
       // discovery below indexes the metadata for the system prompt.
@@ -356,7 +367,7 @@ export class Agent extends Think<Env> {
    * loaded on demand via the read tool.
    */
   override getSystemPrompt(): string {
-    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills, threadId: this.name });
+    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills, threadId: this.name, pullIgnore: WORKSPACE_IGNORE });
   }
 
   /**

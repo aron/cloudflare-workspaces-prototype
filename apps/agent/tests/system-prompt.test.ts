@@ -168,3 +168,54 @@ describe("buildSystemPrompt — skills", () => {
     expect(dateIdx).toBeGreaterThan(skillsIdx);
   });
 });
+
+describe("buildSystemPrompt — workspace ignore", () => {
+  it("omits the workspace-ignore section when pullIgnore is missing", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).not.toMatch(/Workspace ignore rules/);
+  });
+
+  it("omits the workspace-ignore section when pullIgnore is empty", () => {
+    // [] is the documented way to disable Workspace's pull-ignore;
+    // the prompt section should disappear in lockstep so the model
+    // isn't told about ignores that don't apply.
+    const prompt = buildSystemPrompt({ pullIgnore: [] });
+    expect(prompt).not.toMatch(/Workspace ignore rules/);
+  });
+
+  it("lists each pullIgnore entry verbatim in backticks", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules", ".cache"] });
+    expect(prompt).toMatch(/`node_modules`/);
+    expect(prompt).toMatch(/`\.cache`/);
+  });
+
+  it("explains that ignored paths don't appear via the file tools", () => {
+    // The whole point of surfacing this in the prompt is to keep
+    // the model from doing read/ls/grep against paths that aren't
+    // there — pin the wording.
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
+    expect(prompt).toMatch(/don't appear via/);
+    for (const name of ["read", "write", "edit", "ls", "stat", "find", "grep"]) {
+      expect(prompt).toMatch(new RegExp(`\\\`${name}\\\``));
+    }
+  });
+
+  it("tells the model that exec sees ignored files but is the slow path", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
+    // The container-side files exist; exec can reach them.
+    expect(prompt).toMatch(/files still exist on the container side/);
+    expect(prompt).toMatch(/\bexec\b/);
+    // And the perf warning so the model uses exec deliberately.
+    expect(prompt).toMatch(/performance|slow|hundreds of ms|round-trip/i);
+  });
+
+  it("places the workspace-ignore section between file serving and the tool list", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
+    const fileServingIdx = prompt.indexOf("Serving workspace files");
+    const ignoreIdx = prompt.indexOf("Workspace ignore rules");
+    const toolsIdx = prompt.indexOf("Available tools:");
+    expect(fileServingIdx).toBeGreaterThan(0);
+    expect(ignoreIdx).toBeGreaterThan(fileServingIdx);
+    expect(toolsIdx).toBeGreaterThan(ignoreIdx);
+  });
+});
