@@ -1,0 +1,34 @@
+{
+  "$schema": "ode_modules/wrangler/config-schema.json",
+  "name": "workspace-basic-exec",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Container hosting the @cloudflare/sandbox runtime + workspace server.
+  // image_build_context points at the monorepo root so the Dockerfile can
+  // COPY node_modules/@cloudflare/workspace/dist/* into the image.
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "image_build_context": "../../../..",
+      "instance_type": "standard-1",
+      "max_instances": 10
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ExecAgent", "name": "ExecAgent" },
+      { "class_name": "Sandbox", "name": "Sandbox" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ExecAgent", "Sandbox"] }
+  ],
+
+  "observability": { "enabled": true },
+  "workers_dev": true
+}
