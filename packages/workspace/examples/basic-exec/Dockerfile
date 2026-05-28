@@ -1,5 +1,5 @@
 # Build context is the monorepo root (see wrangler.jsonc → image_build_context).
-FROM --platform=linux/amd64 cloudflare/sandbox:0.9.2
+FROM --platform=linux/amd64 cloudflare/sandbox:0.9.3
 
 # Workspace container-sandbox needs FUSE.
 RUN apt-get update && apt-get install -y --no-install-recommends \

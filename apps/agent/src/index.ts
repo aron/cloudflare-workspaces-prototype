@@ -6,7 +6,11 @@ import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
 import { Room } from "./room.js";
-import { resolveIdentity, withIdentity, type AccessIdentity } from "./identity.js";
+import {
+  resolveIdentity,
+  withIdentity,
+  type AccessIdentity,
+} from "./identity.js";
 
 export { Agent, SubAgent, App, Room, Sandbox, WarmPool };
 
@@ -33,31 +37,41 @@ app.use("*", async (c, next) => {
 // corresponding Room DO so the client can talk to it immediately.
 app.all("/api/app/*", async (c) => {
   const identity = c.get("identity");
-  const request  = c.req.raw;
-  const url      = new URL(request.url);
+  const request = c.req.raw;
+  const url = new URL(request.url);
 
   const innerUrl = new URL(request.url);
   innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
   const inner = new Request(innerUrl, request);
-  const stub  = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
-  const res   = await stub.fetch(withIdentity(inner, identity));
+  const stub = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
+  const res = await stub.fetch(withIdentity(inner, identity));
 
   // Side-effect: when App creates a room, init the Room so /api/rooms/:id
   // is immediately usable. We don't fail the response if init fails — the
   // room row exists, the client can retry.
-  if (res.status === 201 && url.pathname.endsWith("/rooms") && request.method === "POST") {
+  if (
+    res.status === 201 &&
+    url.pathname.endsWith("/rooms") &&
+    request.method === "POST"
+  ) {
     const cloned = res.clone();
-    const body   = await cloned.json().catch(() => null) as { room?: { id: string; name: string; createdBy: string } } | null;
+    const body = (await cloned.json().catch(() => null)) as {
+      room?: { id: string; name: string; createdBy: string };
+    } | null;
     if (body?.room) {
       const roomStub = c.env.Room.get(c.env.Room.idFromName(body.room.id));
-      await roomStub.fetch(withIdentity(
-        new Request("https://room/init", {
-          method:  "POST",
-          headers: { "content-type": "application/json" },
-          body:    JSON.stringify(body.room),
-        }),
-        identity,
-      )).catch(() => undefined);
+      await roomStub
+        .fetch(
+          withIdentity(
+            new Request("https://room/init", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body.room),
+            }),
+            identity,
+          ),
+        )
+        .catch(() => undefined);
     }
   }
   return res;
@@ -73,46 +87,71 @@ app.all("/api/app/*", async (c) => {
 // Done as a dedicated route so we can orchestrate the multi-DO cleanup; the
 // catch-all forwarder below still handles GET/POST/etc on the same paths.
 app.delete("/api/rooms/:id", async (c) => {
-  const id       = c.req.param("id");
+  const id = c.req.param("id");
   const identity = c.get("identity");
   const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
-  const roomRes  = await roomStub.fetch(withIdentity(
-    new Request("https://room/", { method: "DELETE" }), identity,
-  ));
+  const roomRes = await roomStub.fetch(
+    withIdentity(new Request("https://room/", { method: "DELETE" }), identity),
+  );
   // Best-effort cascade: even if Room reported failure, try to clean up the
   // pieces we know about so a half-deleted room doesn't linger in the UI.
-  const body = await roomRes.clone().json().catch(() => ({})) as { threadIds?: unknown };
-  const threadIds = Array.isArray(body.threadIds) ? body.threadIds.filter((x): x is string => typeof x === "string") : [];
-  await Promise.allSettled(threadIds.map(tid => {
-    const stub = c.env.Agent.get(c.env.Agent.idFromName(tid));
-    return stub.fetch(withIdentity(new Request("https://agent/", { method: "DELETE" }), identity));
-  }));
+  const body = (await roomRes
+    .clone()
+    .json()
+    .catch(() => ({}))) as { threadIds?: unknown };
+  const threadIds = Array.isArray(body.threadIds)
+    ? body.threadIds.filter((x): x is string => typeof x === "string")
+    : [];
+  await Promise.allSettled(
+    threadIds.map((tid) => {
+      const stub = c.env.Agent.get(c.env.Agent.idFromName(tid));
+      return stub.fetch(
+        withIdentity(
+          new Request("https://agent/", { method: "DELETE" }),
+          identity,
+        ),
+      );
+    }),
+  );
   const appStub = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
-  await appStub.fetch(withIdentity(
-    new Request(`https://app/rooms/${id}`, { method: "DELETE" }), identity,
-  )).catch(() => undefined);
+  await appStub
+    .fetch(
+      withIdentity(
+        new Request(`https://app/rooms/${id}`, { method: "DELETE" }),
+        identity,
+      ),
+    )
+    .catch(() => undefined);
   return roomRes;
 });
 
 // DELETE /api/rooms/:id/threads/:tid — detach the thread from the room and
 // wipe the backing Agent DO. The originating message stays in the room.
 app.delete("/api/rooms/:id/threads/:tid", async (c) => {
-  const id       = c.req.param("id");
-  const tid      = c.req.param("tid");
+  const id = c.req.param("id");
+  const tid = c.req.param("tid");
   const identity = c.get("identity");
   const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
-  const roomRes  = await roomStub.fetch(withIdentity(
-    new Request(`https://room/threads/${tid}`, { method: "DELETE" }), identity,
-  ));
+  const roomRes = await roomStub.fetch(
+    withIdentity(
+      new Request(`https://room/threads/${tid}`, { method: "DELETE" }),
+      identity,
+    ),
+  );
   const agentStub = c.env.Agent.get(c.env.Agent.idFromName(tid));
-  await agentStub.fetch(withIdentity(
-    new Request("https://agent/", { method: "DELETE" }), identity,
-  )).catch(() => undefined);
+  await agentStub
+    .fetch(
+      withIdentity(
+        new Request("https://agent/", { method: "DELETE" }),
+        identity,
+      ),
+    )
+    .catch(() => undefined);
   return roomRes;
 });
 
 app.all("/api/rooms/:id/*", (c) => {
-  const id    = c.req.param("id");
+  const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/rooms/${id}`);
   return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), inner);
 });
@@ -128,13 +167,13 @@ app.all("/api/rooms/:id", (c) => {
 // viewer's HEAD-then-GET probe relies on HEAD reaching the DO, so we
 // register it explicitly here (same forwarder either way).
 app.on("HEAD", "/api/threads/:id/*", (c) => {
-  const id    = c.req.param("id");
+  const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
   return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
 });
 
 app.all("/api/threads/:id/*", (c) => {
-  const id    = c.req.param("id");
+  const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
   return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
 });
@@ -148,39 +187,68 @@ app.all("/api/threads/:id", (c) => {
 // Debug routes hit the same warm-pool container the agent uses, plus a
 // passthrough to the Agent DO for messages/vfs/reset.
 app.post("/debug/:sessionId/exec", async (c) => {
-  const sb = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
-  const { command, cwd } = await c.req.json() as { command: string; cwd?: string };
+  const sb = getSandbox(
+    c.env.Sandbox,
+    await resolveContainerId(c.env, c.req.param("sessionId")),
+    { enableDefaultSession: false },
+  );
+  const { command, cwd } = (await c.req.json()) as {
+    command: string;
+    cwd?: string;
+  };
   return Response.json(await sb.exec(command, { cwd }));
 });
 
 app.get("/debug/:sessionId/env", async (c) => {
-  const sb = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
-  const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] = await Promise.all([
-    sb.exec("zig version"),
-    sb.exec("go version"),
-    sb.exec("node --version"),
-    sb.exec("esbuild --version"),
-    sb.exec("wrangler --version"),
-    sb.exec("uname -a"),
-    sb.exec("cat /proc/mounts | grep fuse || echo no-fuse"),
-    sb.exec("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
-  ]);
-  return Response.json({ zig, go, node, esbuild, wrangler, uname, mounts, fuse });
+  const sb = getSandbox(
+    c.env.Sandbox,
+    await resolveContainerId(c.env, c.req.param("sessionId")),
+    { enableDefaultSession: false },
+  );
+  const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] =
+    await Promise.all([
+      sb.exec("zig version"),
+      sb.exec("go version"),
+      sb.exec("node --version"),
+      sb.exec("esbuild --version"),
+      sb.exec("wrangler --version"),
+      sb.exec("uname -a"),
+      sb.exec("cat /proc/mounts | grep fuse || echo no-fuse"),
+      sb.exec("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
+    ]);
+  return Response.json({
+    zig,
+    go,
+    node,
+    esbuild,
+    wrangler,
+    uname,
+    mounts,
+    fuse,
+  });
 });
 
 app.get("/debug/:sessionId/logs", async (c) => {
-  const sb   = getSandbox(c.env.Sandbox, await resolveContainerId(c.env, c.req.param("sessionId")));
+  const sb = getSandbox(
+    c.env.Sandbox,
+    await resolveContainerId(c.env, c.req.param("sessionId")),
+    { enableDefaultSession: false },
+  );
   const file = await sb.readFile("/tmp/server.log");
-  return new Response(file?.content ?? "(no log file yet)", { headers: { "content-type": "text/plain" } });
+  return new Response(file?.content ?? "(no log file yet)", {
+    headers: { "content-type": "text/plain" },
+  });
 });
 
-app.get("/debug/:sessionId/pool", async (c) => Response.json(await poolStats(c.env)));
+app.get("/debug/:sessionId/pool", async (c) =>
+  Response.json(await poolStats(c.env)),
+);
 
 // Forward agent-level debug routes (messages, vfs, reset) to the DO's onRequest().
 app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
   const sessionId = c.req.param("sessionId");
-  const id        = c.env.Agent.idFromName(sessionId);
-  const stub      = c.env.Agent.get(id);
+  const id = c.env.Agent.idFromName(sessionId);
+  const stub = c.env.Agent.get(id);
   return stub.fetch(withIdentity(c.req.raw, c.get("identity")));
 });
 
@@ -190,7 +258,10 @@ app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
 // WebSocket upgrade path and RPC calls. Attach worker-trusted identity so
 // the Agent DO can stamp user messages even when the connection is shared.
 app.all("*", async (c) => {
-  const res = await routeAgentRequest(withIdentity(c.req.raw, c.get("identity")), c.env);
+  const res = await routeAgentRequest(
+    withIdentity(c.req.raw, c.get("identity")),
+    c.env,
+  );
   return res ?? c.text("not found", 404);
 });
 
@@ -201,10 +272,10 @@ app.all("*", async (c) => {
  * named Durable Object stub with identity attached.
  */
 function forwardToDO<T extends Rpc.DurableObjectBranded | undefined>(
-  ns:        DurableObjectNamespace<T>,
-  id:        string | undefined,
-  request:   Request,
-  identity:  AccessIdentity,
+  ns: DurableObjectNamespace<T>,
+  id: string | undefined,
+  request: Request,
+  identity: AccessIdentity,
   innerPath: string,
 ): Promise<Response> {
   if (!id) {

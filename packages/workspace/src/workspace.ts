@@ -10,14 +10,32 @@
  * DO storage so reconnects/restarts resume cleanly.
  */
 
-import { getSandbox, parseSSEStream, type LogEvent, type Process, type Sandbox } from "@cloudflare/sandbox";
+import {
+  getSandbox,
+  parseSSEStream,
+  type LogEvent,
+  type Process,
+  type Sandbox,
+} from "@cloudflare/sandbox";
 
 import { Vfs } from "./vfs.js";
 import { ContainerConnection } from "./container-connection.js";
 import { ensureWorkspaceServer } from "./container-startup.js";
-import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
+import type {
+  Mount,
+  MountInput,
+  MountContext,
+  MountWriteApi,
+} from "./mounts/index.js";
 import { asFactory } from "./mounts/index.js";
-import { pathStartsWith, type ContainerRpc, type ExecResult, type GrepHit, type FileStat, type VfsChange } from "./shared/index.js";
+import {
+  pathStartsWith,
+  type ContainerRpc,
+  type ExecResult,
+  type GrepHit,
+  type FileStat,
+  type VfsChange,
+} from "./shared/index.js";
 import { createQueue, serialize, type Queue } from "./serialize.js";
 import { parseWorkspacePath } from "./path.js";
 import { chunkHashUnion, assembleFileBytes, hashKey } from "./pull-assembly.js";
@@ -77,8 +95,8 @@ CREATE TABLE IF NOT EXISTS _workspace_mounts (
  * consumed by `vfs.applyChangesSync` and the writable-mount mirror loop.
  */
 type ApplyEntry = {
-  path:  string;
-  op:    "upsert" | "delete";
+  path: string;
+  op: "upsert" | "delete";
   type?: "file" | "dir";
   mode?: number;
   mtime?: number;
@@ -95,7 +113,10 @@ type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
  * errors, transport failures, etc.) still propagates.
  */
 export function isMissingRpcMethod(err: unknown, method: string): boolean {
-  return err instanceof TypeError && err.message.includes(`'${method}' is not a function`);
+  return (
+    err instanceof TypeError &&
+    err.message.includes(`'${method}' is not a function`)
+  );
 }
 
 export class Workspace {
@@ -106,7 +127,7 @@ export class Workspace {
   private resolvedSandboxName: string | null = null;
 
   // Sync watermarks (persisted in _workspace_watermark)
-  private pushSeq      = 0;  // last VFS `seq` pushed to the container
+  private pushSeq = 0; // last VFS `seq` pushed to the container
   // Last container-side monotonic revision seen on pull .
   // Replaces the old wall-clock mtime watermark, which lost same-millisecond
   // writes once it advanced past them.
@@ -145,8 +166,10 @@ export class Workspace {
     this.sql = (opts.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
     this.vfs = new Vfs(this.sql);
     this.sql.exec(WATERMARK_TABLE);
-    for (const r of this.sql.exec(`SELECT k, v FROM _workspace_watermark`) as Iterable<{ k: string; v: number }>) {
-      if (r.k === "pushSeq")      this.pushSeq      = r.v;
+    for (const r of this.sql.exec(
+      `SELECT k, v FROM _workspace_watermark`,
+    ) as Iterable<{ k: string; v: number }>) {
+      if (r.k === "pushSeq") this.pushSeq = r.v;
       // Stage-1 migration: read the new key if present,
       // and tolerate the legacy `pullSinceMs` row by leaving the rev
       // watermark at 0 (the next pull re-fetches everything from
@@ -165,22 +188,30 @@ export class Workspace {
     const configured = new Map<string, Mount>();
     for (const [rawRoot, input] of Object.entries(opts.mounts ?? {})) {
       const root = normalizeMountRoot(rawRoot);
-      if (configured.has(root)) throw new Error(`duplicate mount root: ${root}`);
-      const ctx: MountContext = { sessionId: opts.sessionId, root, vfs: this.vfs };
+      if (configured.has(root))
+        throw new Error(`duplicate mount root: ${root}`);
+      const ctx: MountContext = {
+        sessionId: opts.sessionId,
+        root,
+        vfs: this.vfs,
+      };
       configured.set(root, asFactory(input)(ctx));
     }
     // Reject overlapping mounts (one root being a prefix of another).
     const roots = [...configured.keys()];
-    for (const a of roots) for (const b of roots) {
-      if (a !== b && (b + "/").startsWith(a + "/")) {
-        throw new Error(`mount root ${a} overlaps with ${b}`);
+    for (const a of roots)
+      for (const b of roots) {
+        if (a !== b && (b + "/").startsWith(a + "/")) {
+          throw new Error(`mount root ${a} overlaps with ${b}`);
+        }
       }
-    }
     this.mountRoots = roots.sort((a, b) => b.length - a.length);
 
-    const persisted = [...this.sql.exec<{ root: string; kind: string; indexed: number }>(
-      `SELECT root, kind, indexed FROM _workspace_mounts`,
-    )];
+    const persisted = [
+      ...this.sql.exec<{ root: string; kind: string; indexed: number }>(
+        `SELECT root, kind, indexed FROM _workspace_mounts`,
+      ),
+    ];
     for (const row of persisted) {
       const m = configured.get(row.root);
       if (!m || m.kind !== row.kind) {
@@ -195,7 +226,8 @@ export class Workspace {
       if (!this.mountIndexed.has(root)) {
         this.sql.exec(
           `INSERT OR IGNORE INTO _workspace_mounts(root, kind, indexed) VALUES (?, ?, 0)`,
-          root, configured.get(root)!.kind,
+          root,
+          configured.get(root)!.kind,
         );
         this.mountIndexed.set(root, false);
       }
@@ -209,7 +241,9 @@ export class Workspace {
   private async sandboxName(): Promise<string> {
     if (this.resolvedSandboxName !== null) return this.resolvedSandboxName;
     const resolve = this.opts.resolveSessionId;
-    this.resolvedSandboxName = resolve ? await resolve(this.opts.sessionId) : this.opts.sessionId;
+    this.resolvedSandboxName = resolve
+      ? await resolve(this.opts.sessionId)
+      : this.opts.sessionId;
     return this.resolvedSandboxName;
   }
 
@@ -228,10 +262,15 @@ export class Workspace {
     return this.vfs.readFile(cp);
   }
 
-  async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
+  async writeFile(
+    path: string,
+    content: Uint8Array | string,
+    mode?: number,
+  ): Promise<void> {
     const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    const bytes =
+      typeof content === "string" ? new TextEncoder().encode(content) : content;
     return serialize(this.mutex, async () => {
       // Preserve the existing file's mode on overwrite when the caller didn't
       // specify one — otherwise a plain `writeFile(path, bytes)` would silently
@@ -249,7 +288,9 @@ export class Workspace {
     });
   }
 
-  async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
+  async readdir(
+    path: string,
+  ): Promise<Array<{ name: string; type: "file" | "dir" }>> {
     const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
     return this.vfs.readdir(cp);
@@ -281,9 +322,13 @@ export class Workspace {
         // Collect every file under `path` (could be a single file or a subtree)
         // and delete each from the backing store before touching the VFS.
         const subtree = this.vfs.listFilesUnder(cp);
-        const files   = subtree.length ? subtree : (this.vfs.stat(cp)?.type === "file" ? [cp] : []);
-        const rels    = files.map(f => f.slice(m.root.length + 1));
-        await this.runBounded(rels, r => m.mount.delete!(r));
+        const files = subtree.length
+          ? subtree
+          : this.vfs.stat(cp)?.type === "file"
+            ? [cp]
+            : [];
+        const rels = files.map((f) => f.slice(m.root.length + 1));
+        await this.runBounded(rels, (r) => m.mount.delete!(r));
       }
       this.vfs.deleteFile(cp);
     });
@@ -297,24 +342,34 @@ export class Workspace {
 
   /** Search filenames under `directory` for `pattern` (substring match). */
   /** Search filenames under `directory` for `pattern` (substring match). */
-  async findFiles(directory: string, pattern?: string): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+  async findFiles(
+    directory: string,
+    pattern?: string,
+  ): Promise<Array<{ path: string; type: "file" | "dir" }>> {
     const cp = parseWorkspacePath(directory);
     await this.ensureMountsIndexed();
-    return this.vfs.snapshot().entries
-      .filter(e => pathStartsWith(e.path, cp))
-      .filter(e => !pattern || e.path.includes(pattern))
-      .map(e => ({ path: e.path, type: e.type }));
+    return this.vfs
+      .snapshot()
+      .entries.filter((e) => pathStartsWith(e.path, cp))
+      .filter((e) => !pattern || e.path.includes(pattern))
+      .map((e) => ({ path: e.path, type: e.type }));
   }
 
   /** Grep file contents for `pattern`. `path` may be a file or directory. */
-  async grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): Promise<GrepHit[]> {
+  async grep(
+    pattern: string,
+    path: string,
+    opts: { ignoreCase?: boolean } = {},
+  ): Promise<GrepHit[]> {
     const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
     const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
     const { entries } = this.vfs.snapshot();
-    const files = entries.filter(e => e.type === "file" && pathStartsWith(e.path, cp));
+    const files = entries.filter(
+      (e) => e.type === "file" && pathStartsWith(e.path, cp),
+    );
     // Hydrate any mount stubs in scope, bounded-concurrent.
-    await this.hydrateMany(files.map(f => f.path));
+    await this.hydrateMany(files.map((f) => f.path));
     const hits: GrepHit[] = [];
     for (const f of files) {
       const bytes = this.vfs.readFile(f.path);
@@ -323,7 +378,8 @@ export class Workspace {
       const lines = text.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const hay = opts.ignoreCase ? lines[i].toLowerCase() : lines[i];
-        if (hay.includes(needle)) hits.push({ path: f.path, line: i + 1, text: lines[i] });
+        if (hay.includes(needle))
+          hits.push({ path: f.path, line: i + 1, text: lines[i] });
       }
     }
     return hits;
@@ -342,34 +398,35 @@ export class Workspace {
   async exec(command: string, cwd?: string): Promise<ExecResult> {
     await this.ensureMountsIndexed();
     return serialize(this.mutex, async () => {
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    const api = await this.getConnection();
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+        enableDefaultSession: false,
+      });
+      const api = await this.getConnection();
 
-    // Hydrate any mount stubs we're about to push — otherwise the container
-    // would receive empty files. We pre-fetch in bounded parallel before
-    // computing the change set so the freshly-written rows are included.
-    const stubs = this.vfs.listStubs().map(s => s.path);
-    if (stubs.length) await this.hydrateMany(stubs);
+      // Hydrate any mount stubs we're about to push — otherwise the container
+      // would receive empty files. We pre-fetch in bounded parallel before
+      // computing the change set so the freshly-written rows are included.
+      const stubs = this.vfs.listStubs().map((s) => s.path);
+      if (stubs.length) await this.hydrateMany(stubs);
 
-    // Push the delta since the last exec.
-    const changes = this.vfs.getChangesSince(this.pushSeq);
-    if (changes.length) {
-      await api.applyChanges(changes);
-      this.pushSeq = changes[changes.length - 1].seq;
-    }
+      // Push the delta since the last exec.
+      const changes = this.vfs.getChangesSince(this.pushSeq);
+      if (changes.length) {
+        await api.applyChanges(changes);
+        this.pushSeq = changes[changes.length - 1].seq;
+      }
 
-    const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
+      const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    const pulled = await this._pullDirtyAfterLocked();
+      const pulled = await this._pullDirtyAfterLocked();
 
-
-    return {
-      exitCode: result.exitCode,
-      stdout:   result.stdout,
-      stderr:   result.stderr,
-      pushed:   changes.length,
-      pulled,
-    };
+      return {
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        pushed: changes.length,
+        pulled,
+      };
     });
   }
 
@@ -399,11 +456,13 @@ export class Workspace {
   ): Promise<Process> {
     await this.ensureMountsIndexed();
     return serialize(this.mutex, async () => {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+        enableDefaultSession: false,
+      });
       const api = await this.getConnection();
 
       // Same pre-flight as exec: hydrate stub mounts then push the delta.
-      const stubs = this.vfs.listStubs().map(s => s.path);
+      const stubs = this.vfs.listStubs().map((s) => s.path);
       if (stubs.length) await this.hydrateMany(stubs);
       const changes = this.vfs.getChangesSince(this.pushSeq);
       if (changes.length) {
@@ -435,9 +494,13 @@ export class Workspace {
     processId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<AsyncIterable<LogEvent>> {
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+      enableDefaultSession: false,
+    });
     if (options.signal) {
-      const onAbort = () => { void sb.killProcess(processId).catch(() => {}); };
+      const onAbort = () => {
+        void sb.killProcess(processId).catch(() => {});
+      };
       if (options.signal.aborted) onAbort();
       else options.signal.addEventListener("abort", onAbort, { once: true });
     }
@@ -451,7 +514,9 @@ export class Workspace {
    * whether to reattach or close out an in-flight exec.
    */
   async getProcess(processId: string): Promise<Process | null> {
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+      enableDefaultSession: false,
+    });
     try {
       return await sb.getProcess(processId);
     } catch {
@@ -493,7 +558,11 @@ export class Workspace {
     // surfaces the missing method as `TypeError: '...' is not a function`
     // from inside its read loop. We catch *only* that shape so genuine
     // pull failures still propagate.
-    let result: { changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number };
+    let result: {
+      changes: ApplyEntry[];
+      mirrors: MirrorEntry[];
+      maxRev: number;
+    };
     try {
       result = await this._pullDirtyV2(api, ignore);
     } catch (err) {
@@ -503,7 +572,9 @@ export class Workspace {
     const { changes: applyEntries, mirrors, maxRev } = result;
 
     if (applyEntries.length) {
-      this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
+      this.opts.storage.transactionSync(() =>
+        this.vfs.applyChangesSync(applyEntries),
+      );
     }
     // Advance the rev watermark even on an empty pull, so a successive
     // pull doesn't re-scan the same range. The container reports maxRev
@@ -535,13 +606,17 @@ export class Workspace {
   private async _pullDirtyV2(
     api: ContainerRpc,
     ignore: string[],
-  ): Promise<{ changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number }> {
+  ): Promise<{
+    changes: ApplyEntry[];
+    mirrors: MirrorEntry[];
+    maxRev: number;
+  }> {
     const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
 
     // Collect the union of chunk hashes across this pull, ask our own
     // Vfs which we lack, and fetch just those from the container.
     const allHashes = chunkHashUnion(bulk);
-    const wantList  = this.vfs.missingBlobs(allHashes);
+    const wantList = this.vfs.missingBlobs(allHashes);
     const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
     const fetched = new Map<string, Uint8Array>();
     for (let i = 0; i < wantList.length; i++) {
@@ -552,11 +627,11 @@ export class Workspace {
     };
 
     const applyEntries: ApplyEntry[] = [];
-    const mirrors:      MirrorEntry[] = [];
+    const mirrors: MirrorEntry[] = [];
     for (const c of bulk.changes) {
       const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type  !== undefined) e.type  = c.type;
-      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.type !== undefined) e.type = c.type;
+      if (c.mode !== undefined) e.mode = c.mode;
       if (c.mtime !== undefined) e.mtime = c.mtime;
       if (c.op === "upsert" && c.type === "file" && c.chunks) {
         // Every byte is content-verified by construction: the lookup
@@ -577,18 +652,26 @@ export class Workspace {
   private async _pullDirtyLegacy(
     api: ContainerRpc,
     ignore: string[],
-  ): Promise<{ changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number }> {
+  ): Promise<{
+    changes: ApplyEntry[];
+    mirrors: MirrorEntry[];
+    maxRev: number;
+  }> {
     const bulk = await api.pullDirty(this.pullSinceRev, ignore);
     const blobBytes = await readStreamToUint8Array(bulk.blob);
 
     const applyEntries: ApplyEntry[] = [];
-    const mirrors:      MirrorEntry[] = [];
+    const mirrors: MirrorEntry[] = [];
     for (const c of bulk.changes) {
       const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type  !== undefined) e.type  = c.type;
-      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.type !== undefined) e.type = c.type;
+      if (c.mode !== undefined) e.mode = c.mode;
       if (c.mtime !== undefined) e.mtime = c.mtime;
-      if (c.op === "upsert" && c.type === "file" && c.contentSize !== undefined) {
+      if (
+        c.op === "upsert" &&
+        c.type === "file" &&
+        c.contentSize !== undefined
+      ) {
         const off = c.contentOffset ?? 0;
         e.bytes = blobBytes.subarray(off, off + c.contentSize);
       }
@@ -629,7 +712,9 @@ export class Workspace {
    * Callers can pass a tighter safety window than
    * `Vfs.GC_DEFAULT_WINDOW_MS` (5 min) for tests or aggressive reclaim.
    */
-  async gc(safetyWindowMs?: number): Promise<{ manifestsFreed: number; blobsFreed: number }> {
+  async gc(
+    safetyWindowMs?: number,
+  ): Promise<{ manifestsFreed: number; blobsFreed: number }> {
     return serialize(this.mutex, async () => this.vfs.gc(safetyWindowMs));
   }
 
@@ -640,9 +725,12 @@ export class Workspace {
    */
   async prefetch(root?: string): Promise<void> {
     await this.ensureMountsIndexed();
-    const stubs = this.vfs.listStubs()
-      .filter(s => root === undefined || s.mountRoot === normalizeMountRoot(root))
-      .map(s => s.path);
+    const stubs = this.vfs
+      .listStubs()
+      .filter(
+        (s) => root === undefined || s.mountRoot === normalizeMountRoot(root),
+      )
+      .map((s) => s.path);
     if (stubs.length) await this.hydrateMany(stubs);
   }
 
@@ -661,7 +749,9 @@ export class Workspace {
    * if `path` is outside any mount. Throws EROFS if `path` is under a
    * read-only mount.
    */
-  private resolveMountForWrite(path: string): { root: string; mount: Mount; relPath: string } | null {
+  private resolveMountForWrite(
+    path: string,
+  ): { root: string; mount: Mount; relPath: string } | null {
     const root = this.mountRootOf(path);
     if (root === null) return null;
     const mount = this.configuredMounts.get(root)!;
@@ -676,20 +766,32 @@ export class Workspace {
   }
 
   /** Run `fn` over `items` with bounded concurrency. Aggregates errors. */
-  private async runBounded<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+  private async runBounded<T>(
+    items: T[],
+    fn: (item: T) => Promise<void>,
+  ): Promise<void> {
     if (items.length === 0) return;
     const limit = Workspace.FETCH_CONCURRENCY;
     const errors: unknown[] = [];
     let i = 0;
-    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (i < items.length) {
-        const idx = i++;
-        try { await fn(items[idx]); } catch (e) { errors.push(e); }
-      }
-    });
+    const workers = Array.from(
+      { length: Math.min(limit, items.length) },
+      async () => {
+        while (i < items.length) {
+          const idx = i++;
+          try {
+            await fn(items[idx]);
+          } catch (e) {
+            errors.push(e);
+          }
+        }
+      },
+    );
     await Promise.all(workers);
     if (errors.length) {
-      const messages = errors.map(e => (e instanceof Error ? e.message : String(e))).join("; ");
+      const messages = errors
+        .map((e) => (e instanceof Error ? e.message : String(e)))
+        .join("; ");
       throw new Error(`bounded operation failed: ${messages}`);
     }
   }
@@ -702,13 +804,13 @@ export class Workspace {
    */
   private ensureMountsIndexed(): Promise<void> {
     if (this.indexingPromise) return this.indexingPromise;
-    const pending = this.mountRoots.filter(r => !this.mountIndexed.get(r));
+    const pending = this.mountRoots.filter((r) => !this.mountIndexed.get(r));
     if (pending.length === 0) return Promise.resolve();
 
     this.indexingPromise = (async () => {
       for (const root of pending) {
         const mount = this.configuredMounts.get(root)!;
-        const dirMode  = mount.writable ? 0o40755  : 0o40555;
+        const dirMode = mount.writable ? 0o40755 : 0o40555;
         const fileMode = mount.writable ? 0o100644 : 0o100444;
         // Ensure the root itself exists as a directory before any work begins.
         this.vfs.mkdir(root, dirMode, root);
@@ -733,17 +835,26 @@ export class Workspace {
             if (entry.type === "dir") {
               this.vfs.mkdir(abs, dirMode, root);
             } else {
-              this.vfs.writeStub(abs, fileMode, entry.mtime ?? Date.now(), root, entry.size ?? null);
+              this.vfs.writeStub(
+                abs,
+                fileMode,
+                entry.mtime ?? Date.now(),
+                root,
+                entry.size ?? null,
+              );
             }
           }
         }
 
         this.mountIndexed.set(root, true);
         this.sql.exec(
-          `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`, root,
+          `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`,
+          root,
         );
       }
-    })().finally(() => { this.indexingPromise = null; });
+    })().finally(() => {
+      this.indexingPromise = null;
+    });
     return this.indexingPromise;
   }
 
@@ -769,23 +880,28 @@ export class Workspace {
       const bytes = await mount.fetch(relPath);
       const mode = mount.writable ? 0o100644 : 0o100444;
       this.vfs.writeFile(path, bytes, mode, root);
-    })().finally(() => { this.contentFetches.delete(path); });
+    })().finally(() => {
+      this.contentFetches.delete(path);
+    });
     this.contentFetches.set(path, p);
     return p;
   }
 
   /** Hydrate multiple paths with bounded concurrency. Skips non-stubs. */
   private async hydrateMany(paths: string[]): Promise<void> {
-    const stubs = paths.filter(p => this.vfs.isStub(p));
+    const stubs = paths.filter((p) => this.vfs.isStub(p));
     if (stubs.length === 0) return;
     const limit = Workspace.FETCH_CONCURRENCY;
     let i = 0;
-    const workers = Array.from({ length: Math.min(limit, stubs.length) }, async () => {
-      while (i < stubs.length) {
-        const idx = i++;
-        await this.ensureContentLoaded(stubs[idx]);
-      }
-    });
+    const workers = Array.from(
+      { length: Math.min(limit, stubs.length) },
+      async () => {
+        while (i < stubs.length) {
+          const idx = i++;
+          await this.ensureContentLoaded(stubs[idx]);
+        }
+      },
+    );
     await Promise.all(workers);
   }
 
@@ -800,11 +916,15 @@ export class Workspace {
    */
   private async ensureContainerProcess(): Promise<void> {
     if (this.ensurePromise) return this.ensurePromise;
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
-    this.ensurePromise = ensureWorkspaceServer(sb, this.opts.port).catch(err => {
-      this.ensurePromise = null;  // allow retry on next call
-      throw err;
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+      enableDefaultSession: false,
     });
+    this.ensurePromise = ensureWorkspaceServer(sb, this.opts.port).catch(
+      (err) => {
+        this.ensurePromise = null; // allow retry on next call
+        throw err;
+      },
+    );
     return this.ensurePromise;
   }
 
@@ -818,16 +938,20 @@ export class Workspace {
   private async getConnection(): Promise<ContainerRpc> {
     await this.ensureContainerProcess();
     if (!this.conn) {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+        enableDefaultSession: false,
+      });
       this.conn = new ContainerConnection({
         // `containerFetch` is the documented path for HTTP, but WebSocket upgrades
         // require `switchPort + fetch` (per @cloudflare/containers docs — see workerd #2319).
         stub: { fetch: (req: Request) => sb.fetch(req) },
         port: this.opts.port,
-        onClose: () => { this.conn = null; },
+        onClose: () => {
+          this.conn = null;
+        },
       });
     }
-    return this.conn.rpc() as unknown as ContainerRpc;  // capnweb RpcStub<T> is structurally T at the call site
+    return this.conn.rpc() as unknown as ContainerRpc; // capnweb RpcStub<T> is structurally T at the call site
   }
 
   private saveWatermarks(): void {
@@ -837,7 +961,8 @@ export class Workspace {
     // round-trip on every exec for a one-time migration.
     this.sql.exec(
       `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceRev', ?)`,
-      this.pushSeq, this.pullSinceRev,
+      this.pushSeq,
+      this.pullSinceRev,
     );
   }
 }
@@ -858,18 +983,26 @@ function normalizeMountRoot(p: string): string {
  * Drain a workerd ReadableStream<Uint8Array> into a single Uint8Array.
  * Used to materialize the bulk-pull blob before slicing per-file views.
  */
-async function readStreamToUint8Array(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function readStreamToUint8Array(
+  stream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) { chunks.push(value); total += value.length; }
+    if (value) {
+      chunks.push(value);
+      total += value.length;
+    }
   }
   if (chunks.length === 1) return chunks[0];
   const out = new Uint8Array(total);
   let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.length; }
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
   return out;
 }
