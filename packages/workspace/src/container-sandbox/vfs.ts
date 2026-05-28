@@ -10,7 +10,10 @@
  * when exposing content.
  */
 
+import { createHash } from 'node:crypto';
+
 import { DirtyRanges } from './dirty-ranges.js';
+import { CHUNK_SIZE } from '../shared/index.js';
 
 /**
  * Every node carries a monotonic `rev` stamp . Dirty pulls
@@ -21,7 +24,22 @@ import { DirtyRanges } from './dirty-ranges.js';
  */
 export type VfsNode =
   | { type: 'dir';     mode: number; mtime: number; rev: number }
-  | { type: 'file';    mode: number; mtime: number; rev: number; buf: Buffer; size: number }
+  | {
+      type: 'file';
+      mode: number;
+      mtime: number;
+      rev: number;
+      buf: Buffer;
+      size: number;
+      /**
+       * Per-chunk SHA-256 in (idx, hash) order. `null` means the bytes
+       * in that slice changed since the last hash was taken; the value
+       * is recomputed lazily by `chunkHashes()`. Length is always
+       * `Math.max(1, Math.ceil(size / CHUNK_SIZE))` — empty files still
+       * carry one entry. .
+       */
+      chunkHashes: (Uint8Array | null)[];
+    }
   | { type: 'symlink'; mode: number; mtime: number; rev: number; target: string };
 
 function parentOf(path: string): string {
@@ -103,7 +121,11 @@ export class Vfs {
     this.ensureParent(path);
     this.tombstones.delete(path);
     const existed = this.nodes.has(path);
-    this.nodes.set(path, { type: 'file', mode, mtime: Date.now(), rev: this.bumpRev(), buf, size: buf.length });
+    const chunkHashes = makeChunkHashSlots(buf.length);
+    this.nodes.set(path, {
+      type: 'file', mode, mtime: Date.now(), rev: this.bumpRev(),
+      buf, size: buf.length, chunkHashes,
+    });
     if (!existed) this.children.get(parentOf(path))!.add(basename(path));
     // A putFile() replaces the entire file.  Mark whole-file dirty so
     // the next pull ships every chunk.  Suppressed during applyChanges()
@@ -130,8 +152,10 @@ export class Vfs {
     this.ensureParent(dst);
     const existed = this.nodes.has(dst);
     // Spread the source node but stamp the destination with its own
-    // rev so a pull sees the new path.
-    this.nodes.set(dst, { ...node, rev: this.bumpRev() });
+    // rev so a pull sees the new path. Copy the chunkHashes array (not
+    // share by reference) so an invalidation on the source doesn't
+    // bleed into the destination.
+    this.nodes.set(dst, { ...node, rev: this.bumpRev(), chunkHashes: node.chunkHashes.slice() });
     if (!existed) this.children.get(parentOf(dst))!.add(basename(dst));
     return true;
   }
@@ -213,7 +237,14 @@ export class Vfs {
       node.buf = next;
     }
     buf.copy(node.buf, offset, 0, buf.length);
-    if (needed > node.size) node.size = needed;
+    if (needed > node.size) {
+      node.size = needed;
+      // Grow the per-chunk hash array to match the new size.
+      resizeChunkHashSlots(node, needed);
+    }
+    // Invalidate every chunk slot the write touched. Lazy rehash on
+    // the next chunkHashes() call.
+    invalidateChunkHashes(node, offset, buf.length);
     node.mtime = Date.now();
     node.rev = this.bumpRev();
     // Range-dirty the touched chunks.  Suppressed during applyChanges()
@@ -230,10 +261,15 @@ export class Vfs {
       const next = Buffer.alloc(size);
       node.buf.copy(next, 0, 0, node.size);
       node.buf = next;
+    } else if (size > node.size) {
+      // Growing within existing capacity: zero-fill the new bytes so
+      // the chunk-hash view reflects POSIX truncate semantics.
+      node.buf.fill(0, node.size, size);
     }
     node.size = size;
     node.mtime = Date.now();
     node.rev = this.bumpRev();
+    resizeChunkHashSlots(node, size);
     // Truncate may either grow (zero-fill) or shrink the file.  Without
     // a size field on the wire, the DO can't tell which trailing chunks
     // (if any) to drop, so we conservatively mark the whole file dirty.
@@ -275,6 +311,33 @@ export class Vfs {
     this.children.get(parentOf(newPath))!.add(basename(newPath));
   }
 
+  /**
+   * Per-chunk SHA-256 view of a file. Mirrors the DO's vfs_chunks
+   * (path, idx, hash, size) shape so the manifest-aware pull (ticket
+   * 013 stage 3) can ship a manifest without re-walking bytes on
+   * every pull. Hashes are computed lazily: write() / truncate() set
+   * the affected slots to null, and this method fills them in on first
+   * read.
+   *
+   * Length is `Math.max(1, ceil(size / CHUNK_SIZE))`. Throws if `path`
+   * isn't a live file node.
+   */
+  chunkHashes(path: string): Uint8Array[] {
+    const node = this.nodes.get(path);
+    if (!node || node.type !== 'file') {
+      throw new Error(`chunkHashes: not a file: ${path}`);
+    }
+    for (let i = 0; i < node.chunkHashes.length; i++) {
+      if (node.chunkHashes[i] !== null) continue;
+      const start = i * CHUNK_SIZE;
+      const end   = Math.min(node.size, start + CHUNK_SIZE);
+      const slice = node.buf.slice(start, end);
+      const h = createHash('sha256').update(slice).digest();
+      node.chunkHashes[i] = new Uint8Array(h);
+    }
+    return node.chunkHashes as Uint8Array[];
+  }
+
   // Snapshot of all non-root entries
   allFiles(): Array<{ path: string; node: VfsNode }> {
     const result: Array<{ path: string; node: VfsNode }> = [];
@@ -293,5 +356,53 @@ export class Vfs {
     this.nodes.set(parent, { type: 'dir', mode: 0o40755, mtime: Date.now(), rev: this.bumpRev() });
     this.children.set(parent, new Set());
     this.children.get(parentOf(parent))!.add(basename(parent));
+  }
+}
+
+/**
+ * Build a fresh chunk-hash array sized for `byteLength` bytes. Every
+ * slot starts as `null`; the public chunkHashes() accessor fills them
+ * in lazily. Empty files still get one slot so the manifest has a
+ * well-defined empty-file shape.
+ */
+function makeChunkHashSlots(byteLength: number): (Uint8Array | null)[] {
+  const n = Math.max(1, Math.ceil(byteLength / CHUNK_SIZE));
+  return new Array(n).fill(null);
+}
+
+/**
+ * Resize a file node's chunk-hash array to match its current `size`.
+ * Truncate or extend with nulls, and invalidate the boundary slot —
+ * a truncate that lands mid-chunk changes the hash of the surviving
+ * partial chunk, and a grow zero-fills the tail of the previously-last
+ * chunk.
+ */
+function resizeChunkHashSlots(node: { size: number; chunkHashes: (Uint8Array | null)[] }, newSize: number): void {
+  const oldLen = node.chunkHashes.length;
+  const newLen = Math.max(1, Math.ceil(newSize / CHUNK_SIZE));
+  if (newLen === oldLen) {
+    // Same number of chunks; the trailing one's bytes may have changed.
+    node.chunkHashes[newLen - 1] = null;
+    return;
+  }
+  if (newLen < oldLen) {
+    node.chunkHashes.length = newLen;
+  } else {
+    while (node.chunkHashes.length < newLen) node.chunkHashes.push(null);
+  }
+  // The boundary chunk's bytes are different either way.
+  node.chunkHashes[newLen - 1] = null;
+}
+
+/**
+ * Invalidate every chunk slot the byte range [offset, offset+length)
+ * overlaps. Lazy rehash on the next chunkHashes() call.
+ */
+function invalidateChunkHashes(node: { chunkHashes: (Uint8Array | null)[] }, offset: number, length: number): void {
+  if (length === 0) return;
+  const firstIdx = Math.floor(offset / CHUNK_SIZE);
+  const lastIdx  = Math.floor((offset + length - 1) / CHUNK_SIZE);
+  for (let i = firstIdx; i <= lastIdx && i < node.chunkHashes.length; i++) {
+    node.chunkHashes[i] = null;
   }
 }
