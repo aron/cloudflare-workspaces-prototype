@@ -7,6 +7,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { humanizeDuration } from "@/lib/humanize-duration";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {
   CheckCircleIcon,
@@ -35,6 +36,15 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
+  /**
+   * Wall-clock duration of the tool call in milliseconds. Rendered as
+   * a small italic label in the header (top-right, before the chevron)
+   * so the user can see at a glance how long each call took without
+   * expanding the part. Omitted while the call is still running — the
+   * value only becomes meaningful after `output-available` /
+   * `output-error`.
+   */
+  callDurationMs?: number;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -77,6 +87,7 @@ export const ToolHeader = ({
   type,
   state,
   toolName,
+  callDurationMs,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
@@ -95,7 +106,14 @@ export const ToolHeader = ({
         <span className="font-mono text-xs leading-none text-kumo-subtle">{title ?? derivedName}</span>
         {getStatusBadge(state)}
       </div>
-      <ChevronDownIcon className="size-3.5 text-kumo-inactive transition-transform group-data-[state=open]:rotate-180" />
+      <div className="flex items-center gap-2">
+        {callDurationMs !== undefined && (
+          <span className="text-2xs italic leading-none text-kumo-inactive">
+            {humanizeDuration(callDurationMs)}
+          </span>
+        )}
+        <ChevronDownIcon className="size-3.5 text-kumo-inactive transition-transform group-data-[state=open]:rotate-180" />
+      </div>
     </CollapsibleTrigger>
   );
 };

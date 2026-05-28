@@ -346,6 +346,13 @@ export function ThreadPanel({
                       const output = (part as { output?: unknown }).output;
                       const errorText = (part as { errorText?: string }).errorText;
                       const toolCallId = (part as { toolCallId?: string }).toolCallId;
+                      // Tool-call duration in ms attached by the agent in
+                      // `afterToolCall` once the call settles. Falls back to
+                      // the exec snapshot's own `durationMs` so old persisted
+                      // exec parts keep their badge after the rollout.
+                      const callDurationMs =
+                        (part as { callDurationMs?: number }).callDurationMs
+                        ?? (output as { durationMs?: number } | null)?.durationMs;
 
                       // Custom chrome for exec — streams stdout/stderr live,
                       // colours green on exit 0, red on non-zero or error.
@@ -369,7 +376,7 @@ export function ThreadPanel({
                       const isRunning = part.state === "input-streaming" || part.state === "input-available";
                       return (
                         <Tool key={i} defaultOpen={false}>
-                          <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} />
+                          <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} callDurationMs={callDurationMs} />
                           <ToolContent>
                             {input != null && <ToolInput input={input} />}
                             {isRunning && toolCallId && (

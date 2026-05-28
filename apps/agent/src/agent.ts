@@ -17,8 +17,9 @@
  * of this file with the same Think baseline (chatRecovery on, empty tool
  * set by default — fill in per use case).
  */
-import type { StepContext, TurnContext } from "@cloudflare/think";
+import type { ChatResponseResult, StepContext, ToolCallResultContext, TurnContext } from "@cloudflare/think";
 import { LoopTracker } from "./loop-tracker.js";
+import { stampPartDurations } from "./stamp-tool-durations.js";
 
 import { Think } from "@cloudflare/think";
 import { callable } from "agents";
@@ -141,6 +142,27 @@ export class Agent extends Think<Env> {
     loopThreshold: 3,
     maxReflectionsPerTurn: 1,
   });
+
+  /**
+   * Per-turn `toolCallId → durationMs` buffer populated by
+   * `afterToolCall`. Consumed by `onChatResponse` to stamp
+   * `callDurationMs` onto the persisted assistant message's tool parts.
+   *
+   * Why a buffer instead of patching the part directly in
+   * `afterToolCall`: the AI SDK's `experimental_onToolCallFinish` fires
+   * before Think persists the assistant message via
+   * `_persistAssistantMessage` (which only runs after the stream ends).
+   * Mutating `this.messages` mid-stream would race the
+   * `StreamAccumulator` that builds the final message. Stamping in
+   * `onChatResponse` is post-persistence, single-threaded, and survives
+   * reconnects because the patch is written back through
+   * `updateMessageInHistory`.
+   *
+   * Cleared after each `onChatResponse` so a long-lived agent doesn't
+   * accumulate ids forever; durations from earlier assistant messages
+   * have already been stamped and don't need to be replayed.
+   */
+  private _toolDurations = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -416,6 +438,17 @@ export class Agent extends Think<Env> {
   }
 
   /**
+   * Record the tool call's wall-clock duration so `onChatResponse` can
+   * stamp it onto the persisted assistant message's tool part. The AI
+   * SDK gives us `durationMs` on both the success and error branches of
+   * `ToolCallResultContext`, so we record either way — a failed call's
+   * duration is just as interesting to surface as a successful one.
+   */
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._toolDurations.set(ctx.toolCallId, ctx.durationMs);
+  }
+
+  /**
    * Introspection RPC — returns the bits of TurnConfig that don't
    * require a real model call. Used by tests to assert the persona
    * prompt, ZDR posture, and that a model object is constructable.
@@ -469,13 +502,59 @@ export class Agent extends Think<Env> {
 
   /**
    * Fires after a chat turn completes and the assistant message has been
-   * persisted. We use it to refresh the thread summary so the room view's
-   * preview reflects what the agent just said.
+   * persisted. Two jobs:
+   *
+   *   1. Stamp `callDurationMs` onto every tool part whose call duration
+   *      we recorded in `afterToolCall`. Patches the persisted message
+   *      via `updateMessageInHistory` and broadcasts a
+   *      `cf_agent_message_updated` frame so live `useAgentChat` clients
+   *      see the badge without reloading the room.
+   *
+   *   2. Refresh the thread summary so the room view's preview reflects
+   *      what the agent just said, and run the loop-tracker reflection
+   *      injector.
+   *
+   * The duration-stamping path is wrapped in `try/catch` and logged: it's
+   * a display detail, never load-bearing, and a failure here must not
+   * block the summary kick or the reflection injector that the room
+   * view depends on.
    */
-  override onChatResponse(): void {
+  override onChatResponse(result: ChatResponseResult): void {
+    this.ctx.waitUntil(this._stampToolDurations(result).catch(err => {
+      console.warn("[Agent] tool duration stamping failed:", err);
+    }));
     this.ctx.waitUntil(this.kickSummary());
     this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
       console.warn("[Agent] reflection injection failed:", err);
+    }));
+  }
+
+  /**
+   * Stamp buffered tool-call durations onto the persisted assistant
+   * message and broadcast the update.
+   *
+   * Only fires the storage write + broadcast when something actually
+   * changed — the common case for a model turn with no tool calls is a
+   * no-op. The buffer is cleared unconditionally so a continuation turn
+   * starts with a clean slate.
+   */
+  private async _stampToolDurations(result: ChatResponseResult): Promise<void> {
+    if (this._toolDurations.size === 0) return;
+
+    const { parts, touched } = stampPartDurations(result.message.parts, this._toolDurations);
+    this._toolDurations.clear();
+    if (!touched) return;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = { ...result.message, parts } as any;
+    await this.updateMessageInHistory(updated);
+    // Think's `updateMessageInHistory` doesn't broadcast — it only
+    // refreshes the live cache. Push a MESSAGE_UPDATED frame so connected
+    // `useAgentChat` clients see the new field without waiting for the
+    // next full-message broadcast.
+    this.broadcast(JSON.stringify({
+      type: "cf_agent_message_updated",
+      message: updated,
     }));
   }
 

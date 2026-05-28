@@ -27,6 +27,7 @@
 
 import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { humanizeDuration } from "@/lib/humanize-duration";
 
 interface ExecSnapshot {
   processId?: string;
@@ -67,13 +68,6 @@ function statusFor(output?: ExecSnapshot | null, errorText?: string): {
     : { kind: "fail", label: `exit ${output.exitCode}` };
 }
 
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.round((ms % 60_000) / 1000);
-  return `${m}m${s}s`;
-}
 
 /**
  * Render stdout and stderr in arrival order. With cumulative snapshots
@@ -137,7 +131,7 @@ export function ExecToolView({
           :                           "text-xs text-kumo-inactive"
         }>{status.label}</span>
         {output?.durationMs !== undefined && status.kind !== "running" && (
-          <span className="text-xs text-kumo-inactive">· {fmtDuration(output.durationMs)}</span>
+          <span className="text-xs text-kumo-inactive">· {humanizeDuration(output.durationMs)}</span>
         )}
       </header>
 
