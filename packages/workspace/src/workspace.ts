@@ -509,6 +509,19 @@ export class Workspace {
   }
 
   /**
+   * Run the worker-side mark-and-sweep GC to
+   * reclaim orphan manifests and blobs left behind by overwrites and
+   * deletes. Runs under the per-workspace mutex so it can never race
+   * a writer mid-flight.
+   *
+   * Callers can pass a tighter safety window than
+   * `Vfs.GC_DEFAULT_WINDOW_MS` (5 min) for tests or aggressive reclaim.
+   */
+  async gc(safetyWindowMs?: number): Promise<{ manifestsFreed: number; blobsFreed: number }> {
+    return serialize(this.mutex, async () => this.vfs.gc(safetyWindowMs));
+  }
+
+  /**
    * Eagerly hydrate file content under one mount root, or all mounts if
    * omitted. Useful from `onStart()` if you want sync-ish reads immediately;
    * otherwise content is fetched on first read.

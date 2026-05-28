@@ -623,6 +623,64 @@ export class Vfs {
     return { seq: this.currentSeq() };
   }
 
+  // ---- garbage collection ----
+
+  /**
+   * Default safety window for blob reclaim. Five minutes is a
+   * conservative starting point: it protects chunks that arrive on
+   * the wire just ahead of their manifest (the stage-3 sync ordering)
+   * without leaking unbounded storage. Callers can pass a tighter
+   * window for tests or aggressive reclaim policies.
+   */
+  static readonly GC_DEFAULT_WINDOW_MS = 5 * 60 * 1000;
+
+  /**
+   * Mark-and-sweep reclaim of orphan manifests and orphan blobs.
+   *
+   * 1. Drop every `vfs_manifests` row not referenced by any `vfs_nodes.manifest_hash`.
+   * 2. Drop every `vfs_blobs` row not referenced by any `vfs_chunks.hash`,
+   *    provided its `last_seen` falls before `now - safetyWindowMs`.
+   *
+   * Refcount-free by design — the audit (v3) calls out
+   * inline refcounts as fragile under DO async gaps; mark-and-sweep
+   * is recoverable from any partial-failure state.
+   *
+   * Returns counts so callers (and tests) can verify what was reclaimed.
+   */
+  gc(safetyWindowMs: number = Vfs.GC_DEFAULT_WINDOW_MS): { manifestsFreed: number; blobsFreed: number } {
+    // Manifests: no `last_seen` column — they're cheap to recompute,
+    // so we don't keep a window for them. Anything not referenced by
+    // a live node row is fair game.
+    const orphanManifests = [...this.sql.exec<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM vfs_manifests
+        WHERE hash NOT IN (SELECT manifest_hash FROM vfs_nodes WHERE manifest_hash IS NOT NULL)`,
+    )][0]?.n ?? 0;
+    this.sql.exec(
+      `DELETE FROM vfs_manifests
+        WHERE hash NOT IN (SELECT manifest_hash FROM vfs_nodes WHERE manifest_hash IS NOT NULL)`,
+    );
+
+    // Blobs: safety window matters. Fresh blobs may belong to an
+    // upload that hasn't installed its manifest yet (stage 3 will
+    // make this concrete). Compare against last_seen, which is bumped
+    // on every chunk-row write.
+    const cutoff = Date.now() - safetyWindowMs;
+    const orphanBlobs = [...this.sql.exec<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM vfs_blobs
+        WHERE hash NOT IN (SELECT hash FROM vfs_chunks)
+          AND last_seen <= ?`,
+      cutoff,
+    )][0]?.n ?? 0;
+    this.sql.exec(
+      `DELETE FROM vfs_blobs
+        WHERE hash NOT IN (SELECT hash FROM vfs_chunks)
+          AND last_seen <= ?`,
+      cutoff,
+    );
+
+    return { manifestsFreed: orphanManifests, blobsFreed: orphanBlobs };
+  }
+
   // ---- private helpers ----
 
   /**
