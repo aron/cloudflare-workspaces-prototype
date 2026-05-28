@@ -56,6 +56,7 @@ import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
+import { splitStreamingTools } from "./streaming-tools.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
@@ -113,6 +114,19 @@ export class Agent extends Think<Env> {
   ]);
 
   /**
+   * Tools whose `execute` returns an AsyncIterable that the AI SDK must
+   * see *unwrapped* so preliminary chunks reach the UI message stream.
+   * Think's default `_wrapToolsWithDecision` awaits the execute, detects
+   * AsyncIterable, and drains it down to the last value (so it can run
+   * `beforeToolCall` first). That collapses streaming. We override the
+   * wrap below to pass these tools through untouched.
+   *
+   * Trade-off: `beforeToolCall` doesn't fire for streaming tools. We
+   * don't use it for anything in this agent.
+   */
+  private static readonly STREAMING_TOOLS = new Set<string>(["exec"]);
+
+  /**
    * Per-turn reflection budget + duplicate-call tracker. Think's flat
    * `maxSteps` counts every model round-trip equally; this lets cheap
    * exploration (read/grep) run free while still catching agents that
@@ -128,6 +142,19 @@ export class Agent extends Think<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+
+    // Patch Think's tool-wrapper to pass streaming tools through without
+    // collapsing their AsyncIterable execute. Done as an instance-level
+    // monkey patch (rather than a subclass override) because the method
+    // is declared private in Think's .d.ts and TypeScript blocks both
+    // override and super-call. The runtime function lives on the
+    // prototype with a leading underscore; splitStreamingTools wraps
+    // the parent implementation in a tool-set splitter that's unit-
+    // tested in isolation.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const self = this as any;
+    const original = self._wrapToolsWithDecision.bind(this);
+    self._wrapToolsWithDecision = splitStreamingTools(Agent.STREAMING_TOOLS, original);
     this.workspace = new Workspace({
       storage:   this.ctx.storage,
       sandbox:   this.env.Sandbox,
@@ -512,6 +539,7 @@ export class Agent extends Think<Env> {
   override getTools() {
     return this.buildTools();
   }
+
 
   /** Introspection RPC: the set of tool names visible to the LLM. */
   activeToolNames(): string[] {
