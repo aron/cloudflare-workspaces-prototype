@@ -14,13 +14,19 @@ import type { Vfs } from './vfs.js';
 type CB1 = (errno: number) => void;
 type CB2<T> = (errno: number, result: T) => void;
 
-function statDir() {
-  const now = new Date();
-  return { mtime: now, atime: now, ctime: now, size: 0, mode: 0o40755, uid: 0, gid: 0, nlink: 2 };
+// FUSE expects Date objects for mtime/atime/ctime. We pull mtime from
+// the underlying node so repeated getattr() calls return stable values.
+// Build tools and caches keyed on mtime rely on this; returning
+// `new Date()` on every call invalidated them on every stat. atime
+// and ctime are aliased to mtime for now — we don't track them
+// separately, and they should at minimum not race ahead of mtime.
+function statDir(mtime: number) {
+  const m = new Date(mtime);
+  return { mtime: m, atime: m, ctime: m, size: 0, mode: 0o40755, uid: 0, gid: 0, nlink: 2 };
 }
-function statFile(size: number, mode: number) {
-  const now = new Date();
-  return { mtime: now, atime: now, ctime: now, size, mode, uid: 0, gid: 0, nlink: 1 };
+function statFile(size: number, mode: number, mtime: number) {
+  const m = new Date(mtime);
+  return { mtime: m, atime: m, ctime: m, size, mode, uid: 0, gid: 0, nlink: 1 };
 }
 
 export function makeFuseOps(vfs: Vfs, mountPoint: string) {
@@ -41,9 +47,9 @@ export function makeFuseOps(vfs: Vfs, mountPoint: string) {
     getattr(path: string, cb: CB2<object>) {
       const node = vfs.get(toVfs(path));
       if (!node) return cb(Fuse.ENOENT, null as any);
-      if (node.type === 'dir')     return cb(0, statDir());
-      if (node.type === 'symlink') return cb(0, statFile(node.target.length, 0o120777));
-      cb(0, statFile(node.size, node.mode));
+      if (node.type === 'dir')     return cb(0, statDir(node.mtime));
+      if (node.type === 'symlink') return cb(0, statFile(node.target.length, 0o120777, node.mtime));
+      cb(0, statFile(node.size, node.mode, node.mtime));
     },
 
     open(path: string, flags: number, cb: CB2<number>) {

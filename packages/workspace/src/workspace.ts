@@ -17,7 +17,7 @@ import { ContainerConnection } from "./container-connection.js";
 import { ensureWorkspaceServer } from "./container-startup.js";
 import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
 import { asFactory } from "./mounts/index.js";
-import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
+import { pathStartsWith, type ContainerRpc, type ExecResult, type GrepHit, type FileStat, type VfsChange } from "./shared/index.js";
 
 export interface WorkspaceOptions {
   /** DO storage to mount the VFS on. */
@@ -238,7 +238,7 @@ export class Workspace {
   async findFiles(directory: string, pattern?: string): Promise<Array<{ path: string; type: "file" | "dir" }>> {
     await this.ensureMountsIndexed();
     return this.vfs.snapshot().entries
-      .filter(e => e.path.startsWith(directory))
+      .filter(e => pathStartsWith(e.path, directory))
       .filter(e => !pattern || e.path.includes(pattern))
       .map(e => ({ path: e.path, type: e.type }));
   }
@@ -248,7 +248,7 @@ export class Workspace {
     await this.ensureMountsIndexed();
     const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
     const { entries } = this.vfs.snapshot();
-    const files = entries.filter(e => e.type === "file" && e.path.startsWith(path));
+    const files = entries.filter(e => e.type === "file" && pathStartsWith(e.path, path));
     // Hydrate any mount stubs in scope, bounded-concurrent.
     await this.hydrateMany(files.map(f => f.path));
     const hits: GrepHit[] = [];

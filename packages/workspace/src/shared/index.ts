@@ -122,3 +122,25 @@ export interface ContainerRpc {
   pullDirty(since?: number, ignore?: string[]):      Promise<DirtyBulk>;
   exec(command: string, cwd?: string):               Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
+
+/**
+ * Directory-aware path containment check.
+ *
+ * Returns true iff `path` is either exactly `dir` or a descendant of it.
+ * Unlike a raw `path.startsWith(dir)`, this rejects sibling-prefix matches
+ * such as `/workspace/foobar` being treated as a child of `/workspace/foo`.
+ *
+ * Trailing slashes on `dir` are normalized away so `/workspace/foo` and
+ * `/workspace/foo/` are equivalent. The root `/` is the only directory
+ * where the trailing slash is part of its identity.
+ *
+ * The check is purely lexical; neither argument is canonicalized here.
+ * Callers that accept untrusted input should canonicalize first (see
+ *).
+ */
+export function pathStartsWith(path: string, dir: string): boolean {
+  const base = dir.length > 1 && dir.endsWith("/") ? dir.slice(0, -1) : dir;
+  if (path === base) return true;
+  const prefix = base === "/" ? "/" : base + "/";
+  return path.startsWith(prefix);
+}
