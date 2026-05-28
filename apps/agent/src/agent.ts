@@ -57,6 +57,8 @@ import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
 import { splitStreamingTools } from "./streaming-tools.js";
+import { ExecOutputBuffer, type LogEvent } from "./exec-buffer.js";
+import { ExecInflight } from "./exec-inflight.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
@@ -647,11 +649,7 @@ export class Agent extends Think<Env> {
           ),
           cwd: z.string().optional().describe("Working directory, defaults to /tmp"),
         }),
-        execute: async ({ command, cwd }, opts) => {
-          return this.runCancellable(opts, () => ws.exec(command, cwd), {
-            onError: err => ({ error: String(err), exitCode: 1, stdout: "", stderr: "" }),
-          });
-        },
+        execute: this._execStreamingTool(ws),
       })),
 
       ...pick("git_clone", createGitCloneTool({
@@ -728,6 +726,124 @@ export class Agent extends Think<Env> {
   // controller. raceWithSignal then resolves the tool with an `aborted`
   // result, the same shape it produces for the turn-level Stop, so the model
   // sees a terminal answer and the queue drains.
+
+  /**
+   * Build the streaming exec tool's execute function.
+   *
+   * Returned function is an async generator: each yield is a cumulative
+   * snapshot of the running process. The AI SDK's tool layer emits each
+   * preliminary yield as a `tool-output-available` chunk with
+   * `preliminary: true` so the UI sees live state; the model only ever
+   * sees the final yield. Think's default `_wrapToolsWithDecision`
+   * would drain the iterator before the AI SDK sees it; the constructor
+   * monkey-patches around that for exec (see STREAMING_TOOLS).
+   *
+   * Lifecycle:
+   *   1. startProcess (pushes DO→container delta first)
+   *   2. record toolCallId→processId in the inflight table
+   *   3. loop on streamProcessLogs, fold each LogEvent into the buffer,
+   *      yield throttled snapshots (every 100 ms, or immediately on
+   *      exit/error)
+   *   4. on abort: kill SIGTERM, wait briefly, fall through to yield an
+   *      aborted snapshot
+   *   5. always: clear the inflight row and pull dirty files back into
+   *      the VFS so the model sees what the command wrote
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _execStreamingTool(ws: any) {
+    const self = this;
+    const FLUSH_MS = 100;
+    return async function* (
+      { command, cwd }: { command: string; cwd?: string },
+      opts: { toolCallId: string; abortSignal?: AbortSignal },
+    ) {
+      const buf = new ExecOutputBuffer();
+      const startedAt = Date.now();
+      const inflight = self._inflight();
+
+      // 1. Start the process. A failure here is a tool-level error;
+      //    yield once and exit.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let proc: any;
+      try {
+        proc = await ws.startProcess(command, { cwd: cwd ?? "/tmp" });
+      } catch (err) {
+        const details = err instanceof Error ? err.message : String(err);
+        yield buf.snapshot("", { error: { details }, exitCode: -1, durationMs: Date.now() - startedAt });
+        return;
+      }
+
+      // 2. Record so onStart can recover us if the DO is evicted mid-run.
+      inflight.record(opts.toolCallId, proc.id);
+
+      // 3. Stream logs. Yield an initial running snapshot so the UI
+      //    transitions to the live view immediately.
+      yield buf.snapshot(proc.id);
+      let lastFlush = Date.now();
+
+      // Wire turn-level abort to SIGTERM. We don't await the kill — the
+      // stream's exit/error event will close the loop naturally.
+      const onAbort = () => {
+        try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+      };
+      if (opts.abortSignal) {
+        if (opts.abortSignal.aborted) onAbort();
+        else opts.abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      try {
+        const stream = await ws.streamProcessLogs(proc.id, { signal: opts.abortSignal });
+        for await (const event of stream as AsyncIterable<LogEvent>) {
+          buf.apply(event);
+          const now = Date.now();
+          const terminal = event.type === "exit" || event.type === "error";
+          if (terminal || now - lastFlush >= FLUSH_MS) {
+            lastFlush = now;
+            yield buf.snapshot(proc.id, { durationMs: now - startedAt });
+          }
+          if (terminal) break;
+        }
+      } catch (err) {
+        if (opts.abortSignal?.aborted) {
+          yield buf.snapshot(proc.id, {
+            error: { details: "aborted" },
+            exitCode: 143,
+            durationMs: Date.now() - startedAt,
+          });
+        } else {
+          const details = err instanceof Error ? err.message : String(err);
+          yield buf.snapshot(proc.id, {
+            error: { details },
+            durationMs: Date.now() - startedAt,
+          });
+        }
+      } finally {
+        if (opts.abortSignal) {
+          opts.abortSignal.removeEventListener("abort", onAbort);
+        }
+        inflight.clear(opts.toolCallId);
+        // Pull files the container wrote back into the VFS. Errors are
+        // non-fatal; we just leave the VFS out of sync with the container
+        // until the next exec.
+        try { await ws.pullDirtyAfter(); } catch { /* best effort */ }
+      }
+    };
+  }
+
+  /**
+   * Lazily build the ExecInflight tracker. The table is created on
+   * first access and reused across calls.
+   */
+  private _inflightCache: ExecInflight | null = null;
+  private _inflight(): ExecInflight {
+    if (!this._inflightCache) {
+      // SqlStorage is structurally compatible with our SqlStorageLike.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._inflightCache = new ExecInflight((this.ctx.storage as any).sql);
+      this._inflightCache.ensureTable();
+    }
+    return this._inflightCache;
+  }
 
   /**
    * Wrap a tool's work so it observes both the turn-level abort signal and a
