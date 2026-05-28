@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS vfs_chunks (
 -- vfs_chunks(path, idx, data) schema doesn't trip a "no such column: hash"
 -- error on first boot before the rewrite runs.
 
+CREATE TABLE IF NOT EXISTS vfs_manifests (
+  hash    BLOB    PRIMARY KEY,            -- sha256(encoded)
+  size    INTEGER NOT NULL,                -- total file size in bytes
+  encoded BLOB    NOT NULL                 -- canonical encoding (v1: 0x01 || repeated (32-byte hash || varint offset || varint size))
+);
+
 CREATE TABLE IF NOT EXISTS vfs_changes (
   seq  INTEGER PRIMARY KEY,
   path TEXT    NOT NULL,
@@ -117,6 +123,33 @@ function migrate(sql: SqlStorage): void {
   // Always ensure the by-hash index exists, whether we just rebuilt the
   // table or booted onto an already-v2 schema.
   sql.exec(`CREATE INDEX IF NOT EXISTS vfs_chunks_by_hash ON vfs_chunks(hash)`);
+
+  // : vfs_nodes.manifest_hash + vfs_manifests. The
+  // CREATE TABLE in SCHEMA handled the table; older deploys are still
+  // missing the column on vfs_nodes. Add it and backfill from the
+  // existing vfs_chunks rows so every live file row carries a manifest.
+  const nodeColsAfter = new Set(
+    [...sql.exec<{ name: string }>(`PRAGMA table_info(vfs_nodes)`)].map(r => r.name),
+  );
+  if (!nodeColsAfter.has("manifest_hash")) {
+    sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN manifest_hash BLOB`);
+    backfillManifests(sql);
+  }
+}
+
+/**
+ * Walk every file in vfs_nodes, compute its manifest from the current
+ * vfs_chunks rows, and stamp the manifest_hash column. Used by the
+ * stage-2 migration; idempotent because the manifest hash is
+ * deterministic and INSERT OR IGNORE on vfs_manifests dedups.
+ */
+function backfillManifests(sql: SqlStorage): void {
+  const files = [...sql.exec<{ path: string }>(
+    `SELECT path FROM vfs_nodes WHERE type = 'file'`,
+  )];
+  for (const { path } of files) {
+    putManifestForPath(sql, path);
+  }
 }
 
 /**
@@ -129,6 +162,81 @@ function sha256(bytes: Uint8Array): Uint8Array {
   const h = createHash("sha256");
   h.update(bytes);
   return new Uint8Array(h.digest());
+}
+
+// ---- manifest helpers ----
+//
+// The manifest is the *content layout* of a file: an ordered list of
+// (chunk hash, offset, size) tuples. Its hash input is the chunk list
+// only — path, mode, mtime, mount_root, and stub_size all live on
+// vfs_nodes. Folding any of those into the hash input would break
+// dedup: identical bytes written one second apart at different paths
+// would produce different manifest hashes.
+//
+// Canonical encoding v1:
+//   [0x01]                              version tag, 1 byte
+//   then for each chunk in idx order:
+//     [32-byte hash]                    sha256(chunk bytes) — the vfs_blobs key
+//     [varint offset]                   byte offset of chunk start in the file
+//     [varint size]                     chunk byte length
+//
+// Varints are LEB128 unsigned: 7 data bits per byte, MSB = "more bytes follow".
+// Empty files encode as just [0x01].
+
+function encodeVarint(value: number, out: number[]): void {
+  // Non-negative integers only; bytes upstream are bounded by CHUNK_SIZE
+  // and file size limits in .
+  let v = value;
+  while (v >= 0x80) {
+    out.push((v & 0x7f) | 0x80);
+    v >>>= 7;
+  }
+  out.push(v & 0x7f);
+}
+
+/**
+ * Build the canonical encoding of a chunk list. `chunks` is the
+ * vfs_chunks rows for one file, already ordered by `idx`. The encoding
+ * is deterministic for any given chunk sequence, which is what makes
+ * the manifest hash content-addressable.
+ */
+function encodeManifest(chunks: ReadonlyArray<{ hash: Uint8Array; size: number }>): Uint8Array {
+  const out: number[] = [0x01];
+  let offset = 0;
+  for (const c of chunks) {
+    if (c.hash.length !== 32) {
+      throw new Error(`expected 32-byte chunk hash, got ${c.hash.length}`);
+    }
+    for (let i = 0; i < 32; i++) out.push(c.hash[i]);
+    encodeVarint(offset, out);
+    encodeVarint(c.size, out);
+    offset += c.size;
+  }
+  return new Uint8Array(out);
+}
+
+/**
+ * Recompute the manifest for `path` from the live vfs_chunks rows,
+ * insert the manifest row if its hash is new, and stamp
+ * vfs_nodes.manifest_hash. Safe to call on a path that has no chunks
+ * (empty file): a stable "empty" manifest — just the version byte —
+ * still gets recorded and the node points at it.
+ */
+function putManifestForPath(sql: SqlStorage, path: string): void {
+  const chunks = [...sql.exec<{ hash: ArrayBuffer; size: number }>(
+    `SELECT hash, size FROM vfs_chunks WHERE path = ? ORDER BY idx`, path,
+  )].map(r => ({ hash: new Uint8Array(r.hash), size: r.size }));
+  const encoded = encodeManifest(chunks);
+  const manifestHash = sha256(encoded);
+  const totalSize = chunks.reduce((n, c) => n + c.size, 0);
+  sql.exec(
+    `INSERT OR IGNORE INTO vfs_manifests(hash, size, encoded) VALUES (?, ?, ?)`,
+    manifestHash, totalSize, encoded,
+  );
+  sql.exec(
+    `UPDATE vfs_nodes SET manifest_hash = ? WHERE path = ?`,
+    manifestHash, path,
+  );
 }
 
 export class Vfs {
@@ -272,6 +380,7 @@ export class Vfs {
       const slice = content.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
       this.putChunkRow(path, i, slice);
     }
+    putManifestForPath(this.sql, path);
   }
 
   async writeFileFromStream(path: string, stream: ReadableStream<Uint8Array>, mode = 0o100644): Promise<void> {
@@ -311,6 +420,7 @@ export class Vfs {
     for (const { idx, bytes } of chunks) {
       this.putChunkRow(path, idx, bytes);
     }
+    putManifestForPath(this.sql, path);
   }
 
   /**
