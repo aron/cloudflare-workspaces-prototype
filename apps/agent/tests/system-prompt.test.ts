@@ -73,6 +73,30 @@ describe("buildSystemPrompt — capabilities overview", () => {
   });
 });
 
+describe("buildSystemPrompt — file serving", () => {
+  it("tells the model the URL shape for serving workspace files", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
+  });
+
+  it("mentions inline embedding (images) and the download attribute pattern", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/!\[/);
+    expect(prompt).toMatch(/download/);
+  });
+
+  it("substitutes the threadId into URL examples when provided", () => {
+    const prompt = buildSystemPrompt({ threadId: "abc123" });
+    expect(prompt).toMatch(/\/api\/threads\/abc123\/files\/workspace\/diagram\.png/);
+    expect(prompt).not.toMatch(/<threadId>/);
+  });
+
+  it("falls back to <threadId> placeholder when no id is provided", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
+  });
+});
+
 describe("buildSystemPrompt — guidelines", () => {
   it("includes the file-exploration preference and always-on bullets", () => {
     const prompt = buildSystemPrompt({});

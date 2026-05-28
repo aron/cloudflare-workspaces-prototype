@@ -29,6 +29,8 @@ export interface BuildSystemPromptOptions {
   cwd?: string;
   /** Discovered skills enumerated in the prompt's `<available_skills>` block. */
   skills?: Skill[];
+  /** Current thread's id, substituted into the file-serving URL examples. */
+  threadId?: string;
   /**
    * Override "now" — exposed for tests. Production callers leave this
    * unset and get the current date in YYYY-MM-DD form.
@@ -46,6 +48,19 @@ Workspace:
 - All files live under /workspace. Use absolute paths.
 - The build container has network access; the deployed Worker does not
   (\`globalOutbound: null\`).`;
+
+function fileServing(threadId: string): string {
+  const tid = threadId || "<threadId>";
+  return [
+    "Serving workspace files:",
+    `- Any file in the workspace can be linked at \`/api/threads/${tid}/files/<absolute-path>\`. The path after \`/files/\` is the absolute VFS path; \`/workspace/foo.png\` becomes \`/api/threads/${tid}/files/workspace/foo.png\`.`,
+    `- Embed images inline with Markdown: \`![alt text](/api/threads/${tid}/files/workspace/diagram.png)\`.`,
+    `- Offer downloadable artifacts with an anchor and the \`download\` attribute, e.g.`,
+    `  \`<a href="/api/threads/${tid}/files/workspace/build.zip?download" download>Download build.zip</a>\`.`,
+    "- Add `?download` to the URL to force a Content-Disposition: attachment header so the browser saves the file instead of rendering it.",
+    "- Don't fabricate file paths \u2014 only link files you actually created or that the user provided.",
+  ].join("\n");
+}
 
 const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["read",            "read a file from the workspace"],
@@ -86,7 +101,8 @@ When a skill file references a relative path, resolve it against the skill direc
 export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const cwd    = opts.cwd ?? "/workspace";
   const skills = opts.skills ?? [];
-  const now    = opts.now ?? new Date();
+  const now      = opts.now ?? new Date();
+  const threadId = opts.threadId ?? "";
 
   const tools = TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
   const guidelines = GUIDELINES.map(g => `- ${g}`).join("\n");
@@ -95,6 +111,8 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
     IDENTITY,
     "",
     WORKSPACE_NOTE,
+    "",
+    fileServing(threadId),
     "",
     "Available tools:",
     tools,

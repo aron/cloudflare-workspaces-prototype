@@ -54,6 +54,7 @@ import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
 import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
+import { guessMimeType } from "./mime.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
 import type { DeployResult } from "./worker/deploy.js";
@@ -192,7 +193,7 @@ export class Agent extends Think<Env> {
    * loaded on demand via the read tool.
    */
   override getSystemPrompt(): string {
-    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills });
+    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills, threadId: this.name });
   }
 
   /**
@@ -347,6 +348,40 @@ export class Agent extends Think<Env> {
         entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
+    }
+
+    // GET /files/<absolute path> — stream a workspace file with a
+    // sensible Content-Type. The agent advertises these URLs in chat
+    // so the user can view images / download artifacts directly.
+    // Path after the /files/ prefix is treated as the absolute VFS
+    // path (we re-prepend the leading slash that URL parsing eats).
+    const filesPrefix = "/files/";
+    const filesIdx = url.pathname.indexOf(filesPrefix);
+    if (request.method === "GET" && filesIdx !== -1) {
+      const rel = url.pathname.slice(filesIdx + filesPrefix.length);
+      if (!rel) return new Response("missing path", { status: 400 });
+      const abs = decodeURIComponent(rel.startsWith("/") ? rel : `/${rel}`);
+      // Reject `..` segments so a crafted URL can't escape the VFS.
+      if (abs.split("/").includes("..")) {
+        return new Response("bad path", { status: 400 });
+      }
+      const stat = await this.workspace.stat(abs);
+      if (!stat || stat.type !== "file") {
+        return new Response("not found", { status: 404 });
+      }
+      const bytes = await this.workspace.readFile(abs);
+      if (!bytes) return new Response("not found", { status: 404 });
+      const filename = abs.slice(abs.lastIndexOf("/") + 1);
+      const download = url.searchParams.get("download") !== null;
+      const headers: Record<string, string> = {
+        "content-type":   guessMimeType(abs),
+        "content-length": String(bytes.byteLength),
+        "cache-control":  "private, max-age=0, must-revalidate",
+        "content-disposition": download
+          ? `attachment; filename="${filename.replace(/"/g, "")}"`
+          : `inline; filename="${filename.replace(/"/g, "")}"`,
+      };
+      return new Response(bytes as BodyInit, { headers });
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/tar")) {
