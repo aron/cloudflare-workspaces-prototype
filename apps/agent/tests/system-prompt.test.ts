@@ -28,11 +28,101 @@ describe("buildSystemPrompt — identity & shape", () => {
     expect(prompt).toMatch(/\nCurrent date: \d{4}-\d{2}-\d{2}\nCurrent working directory: /);
   });
 
-  it("includes the workspace + worker-egress reminder", () => {
+  it("includes the workspace-paths reminder", () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/All files live under \/workspace/);
-    expect(prompt).toMatch(/build container has network access/);
-    expect(prompt).toMatch(/deployed Worker does not/);
+  });
+
+  // The Cloudflare-Worker egress posture moved out of WORKSPACE_NOTE
+  // and into ARCHITECTURE_NOTE alongside the other plane-by-plane
+  // details. Keep the bullet's wording asserted somewhere so a
+  // future copy-edit can't drop it silently.
+  it("calls out that the deployed Worker has no outbound network", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/globalOutbound: null/);
+    expect(prompt).toMatch(/sandbox container does have/);
+  });
+});
+
+describe("buildSystemPrompt — execution environment", () => {
+  // The architecture section is the model's grounding when a user
+  // asks where their code runs, why exec is slow, or whether the
+  // deployed Worker has internet. The wording matters for those
+  // answers — pin the structural claims here so a future copy-edit
+  // can't accidentally collapse the three planes back together.
+
+  it("names the three planes the agent operates across", () => {
+    const prompt = buildSystemPrompt({});
+    // Each plane has a heading-style bullet — the exact name is the
+    // anchor the model uses when summarising back to the user.
+    expect(prompt).toMatch(/- Agent \(this conversation\):/);
+    expect(prompt).toMatch(/- Sandbox container:/);
+    expect(prompt).toMatch(/- Deployed Worker:/);
+  });
+
+  it("identifies the agent as a Durable Object owning the VFS", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/Durable Object/);
+    expect(prompt).toMatch(/VFS/);
+    expect(prompt).toMatch(/SQLite/);
+  });
+
+  it("places exec/startProcess in the sandbox container, not the DO", () => {
+    const prompt = buildSystemPrompt({});
+    // The section explicitly says these tools run inside the
+    // container so the model doesn't conflate them with the cheap
+    // in-DO file tools.
+    expect(prompt).toMatch(/`exec`, `startProcess`[\s\S]*run inside it/);
+  });
+
+  it("explains that file tools sync to the container around exec", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/synced/);
+    expect(prompt).toMatch(/before each `exec`/);
+    expect(prompt).toMatch(/pulled back after/);
+  });
+
+  it("distinguishes the deployed Worker from the agent runtime", () => {
+    const prompt = buildSystemPrompt({});
+    // The deployed Worker is a separate execution plane built by
+    // worker_deploy — not the same Worker the agent is in.
+    expect(prompt).toMatch(/Deployed Worker:[\s\S]*worker_deploy/);
+    expect(prompt).toMatch(/isolation from the agent's runtime/);
+  });
+
+  it("contrasts deployed Worker (no egress) with sandbox container (has egress)", () => {
+    // The most common confusion this section heads off: a user asks
+    // "can my Worker call an API?" — the answer is no, but builds and
+    // npm install work because the container itself does have
+    // network. Pin both halves of the contrast.
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/globalOutbound: null/);
+    expect(prompt).toMatch(/no internet access at runtime/);
+    expect(prompt).toMatch(/sandbox container does have[\s\S]*network/);
+  });
+
+  it("lists latency tiers so the model can pick tools accordingly", () => {
+    // The workspace-ignore section already mentions exec round-trips;
+    // here we make the relative cost of all three tiers explicit, so
+    // the perf hint isn't tied only to the ignore-list discussion.
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/Latency tiers/);
+    expect(prompt).toMatch(/File tools[\s\S]*single-digit ms/);
+    expect(prompt).toMatch(/`exec`[\s\S]*tens of ms/);
+    expect(prompt).toMatch(/`worker_deploy`[\s\S]*seconds/);
+  });
+
+  it("places the architecture section between identity and the tool list", () => {
+    // Architecture before tools so the tool descriptions land on a
+    // populated mental model; after identity so the model knows who
+    // it is before learning where it runs.
+    const prompt = buildSystemPrompt({});
+    const identityIdx = prompt.indexOf("expert TypeScript developer");
+    const archIdx = prompt.indexOf("Execution environment");
+    const toolsIdx = prompt.indexOf("Available tools:");
+    expect(identityIdx).toBeGreaterThanOrEqual(0);
+    expect(archIdx).toBeGreaterThan(identityIdx);
+    expect(toolsIdx).toBeGreaterThan(archIdx);
   });
 });
 

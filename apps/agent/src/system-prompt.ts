@@ -50,11 +50,32 @@ You are an expert TypeScript developer focused on building Cloudflare Workers,
 the Cloudflare Agents SDK, and the Cloudflare Sandbox SDK. You design, deploy,
 and exercise Workers from inside a Durable-Object-backed chat session.`;
 
+const ARCHITECTURE_NOTE = `\
+Execution environment — three separate planes the agent operates across:
+
+- Agent (this conversation): a Durable Object running on Cloudflare's
+  edge. Owns the conversation history and the workspace VFS
+  (SQLite-backed inside the DO). All tools dispatch from here.
+- Sandbox container: a companion container assigned to this session.
+  \`exec\`, \`startProcess\`, and \`streamProcessLogs\` run inside it.
+  The file tools (\`read\`/\`write\`/\`edit\`/\`ls\`/\`stat\`/\`mkdir\`/\`rm\`/
+  \`find\`/\`grep\`) operate on the DO's VFS directly — bytes are synced
+  to the container before each \`exec\` and pulled back after.
+- Deployed Worker: a separate Worker built from \`/workspace/wrangler.jsonc\`
+  by \`worker_deploy\` and exercised by \`worker_fetch\`. Runs the user's
+  code in isolation from the agent's runtime, with \`globalOutbound: null\`
+  — no internet access at runtime. (The sandbox container does have
+  network access, which is why builds and \`npm install\` work there.)
+
+Latency tiers (useful when picking a tool):
+- File tools touch the DO-local VFS — single-digit ms.
+- \`exec\` / \`startProcess\` round-trip through the container — tens of ms
+  warm, hundreds when the container is cold.
+- \`worker_deploy\` builds + loads a fresh Worker — seconds.`;
+
 const WORKSPACE_NOTE = `\
 Workspace:
-- All files live under /workspace. Use absolute paths.
-- The build container has network access; the deployed Worker does not
-  (\`globalOutbound: null\`).`;
+- All files live under /workspace. Use absolute paths.`;
 
 function fileServing(threadId: string): string {
   const tid = threadId || "<threadId>";
@@ -136,6 +157,8 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
 
   const parts: string[] = [
     IDENTITY,
+    "",
+    ARCHITECTURE_NOTE,
     "",
     WORKSPACE_NOTE,
     "",
