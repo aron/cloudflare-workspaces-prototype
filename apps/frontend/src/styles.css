@@ -268,3 +268,20 @@ html { scroll-behavior: smooth; }
 [data-streamdown="table"] td {
   border-color: var(--color-kumo-line) !important;
 }
+
+/* Streamdown headings — render every level as plain bold text at body
+   size. The library defaults to a typographic scale (text-3xl/2xl/xl/...)
+   which is visually heavy inside chat bubbles. We flatten all six levels
+   so authored Markdown headings act as inline section labels instead of
+   document-level titles. */
+[data-streamdown="heading-1"],
+[data-streamdown="heading-2"],
+[data-streamdown="heading-3"],
+[data-streamdown="heading-4"],
+[data-streamdown="heading-5"],
+[data-streamdown="heading-6"] {
+  font-size: 1em !important;
+  line-height: inherit !important;
+  font-weight: 600 !important;
+  margin: 0.5em 0 0.25em !important;
+}
