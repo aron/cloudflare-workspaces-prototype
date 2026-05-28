@@ -243,15 +243,23 @@ export class Vfs {
   rename(oldPath: string, newPath: string): void {
     if (!this.nodes.has(oldPath)) return;
     this.ensureParent(newPath);
+    const now = Date.now();
     // Walk and move the entire subtree. Each moved node gets a fresh
-    // rev so a pull sees the new path; the old paths show up as
-    // tombstones via the dirty-pull pipeline once wires
-    // them up.
+    // rev so the new paths surface on the next pull as upserts; each
+    // old path gets a tombstone so the DO mirrors the delete side of
+    // the move. Suppressed in applying mode so a remote-pushed rename
+    // doesn't echo back.
     const move = (oldP: string, newP: string) => {
       const node = this.nodes.get(oldP);
       if (!node) return;
       this.nodes.delete(oldP);
       this.nodes.set(newP, { ...node, rev: this.bumpRev() });
+      if (!this.applying && oldP !== '/') {
+        this.tombstones.set(oldP, { rev: this.bumpRev(), ts: now });
+        // Clear any pending dirty state for the old path so it can't
+        // leak into the next pull as a phantom upsert.
+        this.dirty.clear(oldP);
+      }
       const kids = this.children.get(oldP);
       if (kids) {
         this.children.delete(oldP);
