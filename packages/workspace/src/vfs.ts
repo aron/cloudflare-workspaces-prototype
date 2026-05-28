@@ -2,16 +2,20 @@
  * Worker-side virtual filesystem backed by Durable Object SQLite.
  *
  * Tables:
- *   vfs_seq    — monotonic counter, stamps every write for incremental sync
- *   vfs_nodes  — one row per path: metadata only (type, mode, mtime, seq)
- *   vfs_chunks — file content split into CHUNK_SIZE byte chunks (raw binary)
+ *   vfs_seq     — monotonic counter, stamps every write for incremental sync
+ *   vfs_nodes   — one row per path: metadata only (type, mode, mtime, seq, mount_root, stub_size)
+ *   vfs_blobs   — content-addressed chunk store keyed by sha256(bytes)
+ *   vfs_chunks  — (path, idx) → vfs_blobs.hash mapping; one row per chunk slot
  *   vfs_changes — tombstones for deleted paths
  *
- * Files are chunked uniformly at 512 KB per chunk to stay under SQLITE_MAX_LENGTH.
- * Content is never base64-encoded — it travels as ReadableStream<Uint8Array>
- * over the capnweb wire and is stored as raw BLOB in SQLite.
+ * Files are chunked uniformly at CHUNK_SIZE per chunk (see shared/index.ts)
+ * to stay under SQLITE_MAX_LENGTH. Content lives in vfs_blobs and is shared
+ * across paths and versions whenever its sha256 collides — identical bytes
+ * cost one row. Bytes travel over capnweb as ReadableStream<Uint8Array> and
+ * are stored as raw BLOB in SQLite (no base64).
  */
 
+import { createHash } from "node:crypto";
 import { CHUNK_SIZE, type VfsEntry, type VfsChange } from "./shared/index.js";
 
 
@@ -32,12 +36,23 @@ CREATE TABLE IF NOT EXISTS vfs_nodes (
   stub_size   INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS vfs_blobs (
+  hash      BLOB    PRIMARY KEY,        -- 32 bytes, sha256(bytes)
+  size      INTEGER NOT NULL,            -- length(bytes), denormalized for SUM()
+  bytes     BLOB    NOT NULL,
+  last_seen INTEGER NOT NULL              -- ms since epoch; bumped on ref (stage 4 GC)
+);
+
 CREATE TABLE IF NOT EXISTS vfs_chunks (
-  path    TEXT    NOT NULL,
-  idx     INTEGER NOT NULL,
-  data    BLOB    NOT NULL,
+  path TEXT    NOT NULL,
+  idx  INTEGER NOT NULL,
+  hash BLOB    NOT NULL,                  -- references vfs_blobs.hash
+  size INTEGER NOT NULL,                  -- denormalized for fast stat() / SUM()
   PRIMARY KEY (path, idx)
 );
+-- The vfs_chunks_by_hash index is created inside migrate() so a legacy
+-- vfs_chunks(path, idx, data) schema doesn't trip a "no such column: hash"
+-- error on first boot before the rewrite runs.
 
 CREATE TABLE IF NOT EXISTS vfs_changes (
   seq  INTEGER PRIMARY KEY,
@@ -57,11 +72,63 @@ CREATE TABLE IF NOT EXISTS vfs_changes (
  * to re-run on every DO boot.
  */
 function migrate(sql: SqlStorage): void {
-  const cols = new Set(
+  const nodeCols = new Set(
     [...sql.exec<{ name: string }>(`PRAGMA table_info(vfs_nodes)`)].map(r => r.name),
   );
-  if (!cols.has("mount_root")) sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN mount_root TEXT`);
-  if (!cols.has("stub_size"))  sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN stub_size INTEGER`);
+  if (!nodeCols.has("mount_root")) sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN mount_root TEXT`);
+  if (!nodeCols.has("stub_size"))  sql.exec(`ALTER TABLE vfs_nodes ADD COLUMN stub_size INTEGER`);
+
+  // : rewrite legacy vfs_chunks(path, idx, data) rows
+  // into vfs_chunks(path, idx, hash, size) + vfs_blobs(hash, size, bytes,
+  // last_seen). SCHEMA's CREATE TABLE IF NOT EXISTS is a no-op when the
+  // legacy table already exists, so we detect the `data` column here and
+  // do the rebuild in place. Idempotent: bails out cleanly once the v2
+  // shape is in effect.
+  const chunkCols = new Set(
+    [...sql.exec<{ name: string }>(`PRAGMA table_info(vfs_chunks)`)].map(r => r.name),
+  );
+  if (chunkCols.has("data") && !chunkCols.has("hash")) {
+    sql.exec(`CREATE TABLE vfs_chunks_v2 (
+      path TEXT    NOT NULL,
+      idx  INTEGER NOT NULL,
+      hash BLOB    NOT NULL,
+      size INTEGER NOT NULL,
+      PRIMARY KEY (path, idx)
+    )`);
+    const now = Date.now();
+    const legacy = [...sql.exec<{ path: string; idx: number; data: ArrayBuffer }>(
+      `SELECT path, idx, data FROM vfs_chunks`,
+    )];
+    for (const row of legacy) {
+      const bytes = new Uint8Array(row.data);
+      const hash = sha256(bytes);
+      sql.exec(
+        `INSERT OR IGNORE INTO vfs_blobs(hash, size, bytes, last_seen) VALUES (?, ?, ?, ?)`,
+        hash, bytes.length, bytes, now,
+      );
+      sql.exec(
+        `INSERT INTO vfs_chunks_v2(path, idx, hash, size) VALUES (?, ?, ?, ?)`,
+        row.path, row.idx, hash, bytes.length,
+      );
+    }
+    sql.exec(`DROP TABLE vfs_chunks`);
+    sql.exec(`ALTER TABLE vfs_chunks_v2 RENAME TO vfs_chunks`);
+  }
+  // Always ensure the by-hash index exists, whether we just rebuilt the
+  // table or booted onto an already-v2 schema.
+  sql.exec(`CREATE INDEX IF NOT EXISTS vfs_chunks_by_hash ON vfs_chunks(hash)`);
+}
+
+/**
+ * sha256 of `bytes` as a Uint8Array. Stage 1 uses node:crypto's sync
+ * createHash, which is available in workerd under `nodejs_compat`. The
+ * synchronous shape matters: writeFile / writeChunks / applyChangesSync
+ * are all sync, and the per-chunk hash has to live on the same call.
+ */
+function sha256(bytes: Uint8Array): Uint8Array {
+  const h = createHash("sha256");
+  h.update(bytes);
+  return new Uint8Array(h.digest());
 }
 
 export class Vfs {
@@ -86,7 +153,7 @@ export class Vfs {
     let size = 0;
     if (type === "file") {
       const d = [...this.sql.exec<{ size: number }>(
-        `SELECT COALESCE(SUM(length(data)), 0) AS size FROM vfs_chunks WHERE path = ?`, path
+        `SELECT COALESCE(SUM(size), 0) AS size FROM vfs_chunks WHERE path = ?`, path
       )];
       size = d[0]?.size ?? 0;
       // Unhydrated stub — use the size recorded by the mount's index pass.
@@ -95,13 +162,17 @@ export class Vfs {
     return { type: type as "file" | "dir", mode, mtime, size };
   }
 
-  /** Read a file into a Uint8Array. */
+  /** Read a file into a Uint8Array. Joins vfs_chunks → vfs_blobs by hash. */
   readFile(path: string): Uint8Array | null {
-    const chunks = [...this.sql.exec<{ data: ArrayBuffer }>(
-      `SELECT data FROM vfs_chunks WHERE path = ? ORDER BY idx`, path
+    const chunks = [...this.sql.exec<{ bytes: ArrayBuffer }>(
+      `SELECT b.bytes AS bytes
+         FROM vfs_chunks c JOIN vfs_blobs b ON b.hash = c.hash
+        WHERE c.path = ?
+        ORDER BY c.idx`,
+      path,
     )];
     if (!chunks.length) return null;
-    const parts = chunks.map(c => new Uint8Array(c.data));
+    const parts = chunks.map(c => new Uint8Array(c.bytes));
     const total = parts.reduce((n, p) => n + p.length, 0);
     const out = new Uint8Array(total);
     let offset = 0;
@@ -111,12 +182,16 @@ export class Vfs {
 
   /** Read a file as a ReadableStream — used by the sync protocol. */
   readFileAsStream(path: string): ReadableStream<Uint8Array> {
-    const chunks = [...this.sql.exec<{ data: ArrayBuffer }>(
-      `SELECT data FROM vfs_chunks WHERE path = ? ORDER BY idx`, path
+    const chunks = [...this.sql.exec<{ bytes: ArrayBuffer }>(
+      `SELECT b.bytes AS bytes
+         FROM vfs_chunks c JOIN vfs_blobs b ON b.hash = c.hash
+        WHERE c.path = ?
+        ORDER BY c.idx`,
+      path,
     )];
     return new ReadableStream<Uint8Array>({
       start(controller) {
-        for (const c of chunks) controller.enqueue(new Uint8Array(c.data));
+        for (const c of chunks) controller.enqueue(new Uint8Array(c.bytes));
         controller.close();
       },
     });
@@ -135,13 +210,16 @@ export class Vfs {
     if (end <= byteOffset) return;
     const firstIdx = Math.floor(byteOffset / CHUNK_SIZE);
     const lastIdx  = Math.floor((end - 1) / CHUNK_SIZE);
-    const rows = this.sql.exec<{ idx: number; data: ArrayBuffer }>(
-      `SELECT idx, data FROM vfs_chunks WHERE path = ? AND idx BETWEEN ? AND ? ORDER BY idx`,
+    const rows = this.sql.exec<{ idx: number; bytes: ArrayBuffer }>(
+      `SELECT c.idx AS idx, b.bytes AS bytes
+         FROM vfs_chunks c JOIN vfs_blobs b ON b.hash = c.hash
+        WHERE c.path = ? AND c.idx BETWEEN ? AND ?
+        ORDER BY c.idx`,
       path, firstIdx, lastIdx,
     );
     for (const row of rows) {
       const chunkStart = row.idx * CHUNK_SIZE;
-      const buf = new Uint8Array(row.data);
+      const buf = new Uint8Array(row.bytes);
       const sliceStart = Math.max(0, byteOffset - chunkStart);
       const sliceEnd   = Math.min(buf.length, end - chunkStart);
       if (sliceEnd > sliceStart) yield buf.subarray(sliceStart, sliceEnd);
@@ -192,7 +270,7 @@ export class Vfs {
     const numChunks = Math.max(1, Math.ceil(content.length / CHUNK_SIZE));
     for (let i = 0; i < numChunks; i++) {
       const slice = content.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      this.sql.exec(`INSERT INTO vfs_chunks(path, idx, data) VALUES (?, ?, ?)`, path, i, slice);
+      this.putChunkRow(path, i, slice);
     }
   }
 
@@ -231,11 +309,7 @@ export class Vfs {
       path, mode, mtime, seq, mountRoot,
     );
     for (const { idx, bytes } of chunks) {
-      this.sql.exec(
-        `INSERT INTO vfs_chunks(path, idx, data) VALUES (?, ?, ?)
-           ON CONFLICT(path, idx) DO UPDATE SET data=excluded.data`,
-        path, idx, bytes,
-      );
+      this.putChunkRow(path, idx, bytes);
     }
   }
 
@@ -403,6 +477,29 @@ export class Vfs {
   }
 
   // ---- private helpers ----
+
+  /**
+   * Write one chunk row, inserting the blob row first if its hash is new.
+   * Centralises the content-addressed write path so writeFile / writeChunks
+   * (and any future incremental chunker) cannot drift.
+   *
+   * Bumps the blob's `last_seen` on every reference so stage-4 GC's safety
+   * window measures "unreferenced since" rather than "never touched."
+   */
+  private putChunkRow(path: string, idx: number, bytes: Uint8Array): void {
+    const hash = sha256(bytes);
+    const now = Date.now();
+    this.sql.exec(
+      `INSERT INTO vfs_blobs(hash, size, bytes, last_seen) VALUES (?, ?, ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen`,
+      hash, bytes.length, bytes, now,
+    );
+    this.sql.exec(
+      `INSERT INTO vfs_chunks(path, idx, hash, size) VALUES (?, ?, ?, ?)
+         ON CONFLICT(path, idx) DO UPDATE SET hash = excluded.hash, size = excluded.size`,
+      path, idx, hash, bytes.length,
+    );
+  }
 
   private nextSeq(): number {
     this.sql.exec(`UPDATE vfs_seq SET val = val + 1 WHERE id = 1`);
