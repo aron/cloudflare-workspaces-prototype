@@ -239,6 +239,35 @@ function putManifestForPath(sql: SqlStorage, path: string): void {
   );
 }
 
+/**
+ * Codes raised by Vfs invariant checks . Stable strings so
+ * callers can branch on the kind of violation without string-matching.
+ *
+ *   FILE_AT_DIR_PATH — mkdir(p) but p already exists as a file.
+ *   DIR_AT_FILE_PATH — writeFile / writeChunks / writeStub at p but p
+ *                      already exists as a directory.
+ *   PARENT_NOT_DIR   — a write at p but an ancestor of p is a file.
+ *
+ * Throw-by-default applies only to *direct* callers. When `vfs.applying`
+ * is true, the remote change-log is authoritative: type mismatches are
+ * treated as implicit type changes (file ↔ dir) instead of throws.
+ */
+export type VfsErrorCode =
+  | "FILE_AT_DIR_PATH"
+  | "DIR_AT_FILE_PATH"
+  | "PARENT_NOT_DIR";
+
+export class VfsError extends Error {
+  readonly code: VfsErrorCode;
+  readonly path: string;
+  constructor(code: VfsErrorCode, path: string, message: string) {
+    super(message);
+    this.name = "VfsError";
+    this.code = code;
+    this.path = path;
+  }
+}
+
 export class Vfs {
   // While true, mutating ops don't advance `seq` or record delete tombstones —
   // used by applyChanges() so remote-pushed rows don't echo back as new
@@ -367,6 +396,7 @@ export class Vfs {
   // ---- writes ----
 
   writeFile(path: string, content: Uint8Array, mode = 0o100644, mountRoot: string | null = null): void {
+    this.assertWritableAsFile(path);
     const seq = this.applying ? this.currentSeq() : this.nextSeq();
     const mtime = Date.now();
     this.ensureParentDirs(path);
@@ -406,6 +436,7 @@ export class Vfs {
     mode: number = 0o100644,
     mountRoot: string | null = null,
   ): void {
+    this.assertWritableAsFile(path);
     const seq = this.applying ? this.currentSeq() : this.nextSeq();
     const mtime = Date.now();
     this.ensureParentDirs(path);
@@ -430,6 +461,7 @@ export class Vfs {
    * so writes can be rejected and the change-set push knows to hydrate first.
    */
   writeStub(path: string, mode: number, mtime: number, mountRoot: string, size: number | null = null): void {
+    this.assertWritableAsFile(path);
     const seq = this.nextSeq();
     this.ensureParentDirs(path);
     this.sql.exec(
@@ -441,8 +473,13 @@ export class Vfs {
 
   mkdir(path: string, mode = 0o40755, mountRoot: string | null = null): void {
     if (path === "/") return;
+    this.assertWritableAsDir(path);
     const seq = this.applying ? this.currentSeq() : this.nextSeq();
     this.ensureParentDirs(path);
+    // INSERT OR IGNORE: if a directory row already exists at `path`,
+    // mkdir is a no-op (idempotent). A file row at `path` is the case
+    // assertWritableAsDir() handles — it either throws (direct caller)
+    // or replaces (applying = true).
     this.sql.exec(
       `INSERT OR IGNORE INTO vfs_nodes(path, type, mode, mtime, seq, mount_root) VALUES (?, 'dir', ?, ?, ?, ?)`,
       path, mode, Date.now(), seq, mountRoot,
@@ -620,11 +657,75 @@ export class Vfs {
     return [...this.sql.exec<{ val: number }>(`SELECT val FROM vfs_seq WHERE id = 1`)][0]?.val ?? 0;
   }
 
+  /**
+   * Walk every ancestor of `path` and create it as a directory if missing.
+   * If an ancestor already exists as a *file*, that's a structural error:
+   *   - direct callers get PARENT_NOT_DIR
+   *   - applying remote changes coerces the file to a dir (file rows
+   *     and their chunks are removed first)
+   */
   private ensureParentDirs(path: string): void {
     const parts = path.split("/").filter(Boolean);
     for (let i = 1; i < parts.length; i++) {
-      this.mkdir("/" + parts.slice(0, i).join("/"));
+      const ancestor = "/" + parts.slice(0, i).join("/");
+      const t = this.nodeTypeAt(ancestor);
+      if (t === "file") {
+        if (!this.applying) {
+          throw new VfsError("PARENT_NOT_DIR", ancestor,
+            `ancestor is a file, not a directory: ${ancestor}`);
+        }
+        // Apply path: drop the file row + chunks and let mkdir below
+        // replace it with a dir. deleteFile clears chunks for path and
+        // its (nonexistent) subtree.
+        this.sql.exec(`DELETE FROM vfs_chunks WHERE path = ?`, ancestor);
+        this.sql.exec(`DELETE FROM vfs_nodes  WHERE path = ?`, ancestor);
+      }
+      // Either missing or already a dir — mkdir() is idempotent for
+      // existing dirs and creates the row if missing. Recursion through
+      // mkdir's own ensureParentDirs handles deeper ancestors.
+      this.mkdir(ancestor);
     }
+  }
+
+  /** 'file', 'dir', or null if no node exists at `path`. */
+  private nodeTypeAt(path: string): "file" | "dir" | null {
+    const rows = [...this.sql.exec<{ type: string }>(
+      `SELECT type FROM vfs_nodes WHERE path = ?`, path,
+    )];
+    if (!rows.length) return null;
+    return rows[0].type === "dir" ? "dir" : "file";
+  }
+
+  /**
+   * Reject the write if `path` exists as a directory. In applying mode
+   * the dir (and its subtree) is removed first so the file row can
+   * land. Direct callers must handle the throw — we never silently
+   * replace a directory with a file.
+   */
+  private assertWritableAsFile(path: string): void {
+    const t = this.nodeTypeAt(path);
+    if (t !== "dir") return;
+    if (!this.applying) {
+      throw new VfsError("DIR_AT_FILE_PATH", path,
+        `cannot write file at directory path: ${path}`);
+    }
+    // Apply path: drop the existing dir and its entire subtree.
+    this.deleteFile(path);
+  }
+
+  /**
+   * Reject the mkdir if `path` exists as a file. In applying mode the
+   * file (chunks + row) is removed first so the dir row can land.
+   */
+  private assertWritableAsDir(path: string): void {
+    const t = this.nodeTypeAt(path);
+    if (t !== "file") return;
+    if (!this.applying) {
+      throw new VfsError("FILE_AT_DIR_PATH", path,
+        `cannot mkdir over existing file: ${path}`);
+    }
+    this.sql.exec(`DELETE FROM vfs_chunks WHERE path = ?`, path);
+    this.sql.exec(`DELETE FROM vfs_nodes  WHERE path = ?`, path);
   }
 }
 
