@@ -47,6 +47,7 @@ import { deleteThread, fetchRoomMessages } from "@/lib/api";
 import type { AppMessage } from "@/lib/api";
 import { FileViewer, type FileViewerEntry } from "@/components/FileViewer";
 import { PathAutocomplete } from "@/components/PathAutocomplete";
+import { ExecToolView } from "@/components/ExecToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
@@ -345,6 +346,23 @@ export function ThreadPanel({
                       const output = (part as { output?: unknown }).output;
                       const errorText = (part as { errorText?: string }).errorText;
                       const toolCallId = (part as { toolCallId?: string }).toolCallId;
+
+                      // Custom chrome for exec — streams stdout/stderr live,
+                      // colours green on exit 0, red on non-zero or error.
+                      if (name === "exec") {
+                        return (
+                          <ExecToolView
+                            key={i}
+                            input={input as { command?: string; cwd?: string } | undefined}
+                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                            output={output as any}
+                            errorText={errorText}
+                            state={part.state}
+                            toolCallId={toolCallId}
+                            onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
+                          />
+                        );
+                      }
                       // "Running" states: the model has emitted the call but no
                       // result has landed yet. Show a Cancel affordance so the
                       // user can fail a wedged tool without nuking the whole turn.
