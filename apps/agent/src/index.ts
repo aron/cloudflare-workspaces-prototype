@@ -124,6 +124,15 @@ app.all("/api/rooms/:id", (c) => {
 // ---- /api/threads/:threadId/* -------------------------------------------
 //
 // Forward to the Agent DO that owns a thread (threadId == Agent DO name).
+// Hono's `app.all` doesn't include HEAD in its method list. The file
+// viewer's HEAD-then-GET probe relies on HEAD reaching the DO, so we
+// register it explicitly here (same forwarder either way).
+app.on("HEAD", "/api/threads/:id/*", (c) => {
+  const id    = c.req.param("id");
+  const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
+});
+
 app.all("/api/threads/:id/*", (c) => {
   const id    = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);

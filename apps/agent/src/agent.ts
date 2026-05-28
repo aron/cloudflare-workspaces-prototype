@@ -376,7 +376,8 @@ export class Agent extends Think<Env> {
     // path (we re-prepend the leading slash that URL parsing eats).
     const filesPrefix = "/files/";
     const filesIdx = url.pathname.indexOf(filesPrefix);
-    if (request.method === "GET" && filesIdx !== -1) {
+    const isHead = request.method === "HEAD";
+    if ((request.method === "GET" || isHead) && filesIdx !== -1) {
       const rel = url.pathname.slice(filesIdx + filesPrefix.length);
       if (!rel) return new Response("missing path", { status: 400 });
       const abs = decodeURIComponent(rel.startsWith("/") ? rel : `/${rel}`);
@@ -388,18 +389,21 @@ export class Agent extends Think<Env> {
       if (!stat || stat.type !== "file") {
         return new Response("not found", { status: 404 });
       }
-      const bytes = await this.workspace.readFile(abs);
-      if (!bytes) return new Response("not found", { status: 404 });
+      // For HEAD we still want to report content-length, so stat is
+      // enough — skip the readFile.
       const filename = abs.slice(abs.lastIndexOf("/") + 1);
       const download = url.searchParams.get("download") !== null;
       const headers: Record<string, string> = {
         "content-type":   guessMimeType(abs),
-        "content-length": String(bytes.byteLength),
+        "content-length": String(stat.size ?? 0),
         "cache-control":  "private, max-age=0, must-revalidate",
         "content-disposition": download
           ? `attachment; filename="${filename.replace(/"/g, "")}"`
           : `inline; filename="${filename.replace(/"/g, "")}"`,
       };
+      if (isHead) return new Response(null, { headers });
+      const bytes = await this.workspace.readFile(abs);
+      if (!bytes) return new Response("not found", { status: 404 });
       return new Response(bytes as BodyInit, { headers });
     }
 
