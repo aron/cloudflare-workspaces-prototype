@@ -1,0 +1,21 @@
+{
+  "name": "@workspace-example/basic-exec",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build --workspace=@cloudflare/workspace",
+    "dev": "wrangler dev --ip 0.0.0.0",
+    "deploy": "npm run build --workspace=@cloudflare/workspace && wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.9.2",
+    "@cloudflare/workspace": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250410.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.94.0"
+  }
+}

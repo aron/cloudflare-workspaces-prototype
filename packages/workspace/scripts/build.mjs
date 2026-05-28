@@ -40,6 +40,11 @@ const common = {
     // instead of esbuild trying (and failing) to bundle them under
     // platform:neutral.
     "isomorphic-git",
+    // node:crypto is provided by workerd under `nodejs_compat`. Marking it
+    // external keeps esbuild from trying to bundle a polyfill (which it
+    // can't do under platform:neutral) and leaves the import as-is for the
+    // consumer's runtime to resolve. Used by vfs.ts's sha256 helper.
+    "node:crypto",
   ],
 };
 

@@ -6,18 +6,21 @@
  *   - direct file ops that round-trip nothing through the container
  *
  * Construction is cheap: nothing networks until you call `exec()` or
- * `warmup()`. Sync watermarks (pushSeq / pullSinceMs) are persisted to the
+ * `warmup()`. Sync watermarks (pushSeq / pullSinceRev) are persisted to the
  * DO storage so reconnects/restarts resume cleanly.
  */
 
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, parseSSEStream, type LogEvent, type Process, type Sandbox } from "@cloudflare/sandbox";
 
 import { Vfs } from "./vfs.js";
 import { ContainerConnection } from "./container-connection.js";
 import { ensureWorkspaceServer } from "./container-startup.js";
 import type { Mount, MountInput, MountContext, MountWriteApi } from "./mounts/index.js";
 import { asFactory } from "./mounts/index.js";
-import type { ContainerRpc, ExecResult, GrepHit, FileStat, VfsChange } from "./shared/index.js";
+import { pathStartsWith, type ContainerRpc, type ExecResult, type GrepHit, type FileStat, type VfsChange } from "./shared/index.js";
+import { createQueue, serialize, type Queue } from "./serialize.js";
+import { parseWorkspacePath } from "./path.js";
+import { chunkHashUnion, assembleFileBytes, hashKey } from "./pull-assembly.js";
 
 export interface WorkspaceOptions {
   /** DO storage to mount the VFS on. */
@@ -76,8 +79,11 @@ export class Workspace {
   private resolvedSandboxName: string | null = null;
 
   // Sync watermarks (persisted in _workspace_watermark)
-  private pushSeq     = 0;  // last VFS `seq` pushed to the container
-  private pullSinceMs = 0;  // last container-side mtime seen on pull
+  private pushSeq      = 0;  // last VFS `seq` pushed to the container
+  // Last container-side monotonic revision seen on pull .
+  // Replaces the old wall-clock mtime watermark, which lost same-millisecond
+  // writes once it advanced past them.
+  private pullSinceRev = 0;
 
   // ---- mounts ----
   /** Normalized mount roots (no trailing slash), sorted longest-first for prefix matching. */
@@ -96,14 +102,29 @@ export class Workspace {
   /** Memoised in-flight ensureContainerProcess promise; clears on rejection so callers can retry. */
   private ensurePromise: Promise<void> | null = null;
 
+  // ---- per-workspace mutex ----
+  /**
+   * FIFO queue serializing all mutating + sync entry points (exec,
+   * writeFile, mkdir, deleteFile).  Without this, concurrent calls
+   * could read overlapping watermarks, interleave mount-side writes,
+   * and race the Vfs.applying flag through async gaps.  Pure reads
+   * (readFile, readdir, stat, findFiles, grep, listFilesUnder) stay
+   * outside the queue — readers shouldn't wait on writers.
+   */
+  private mutex: Queue = createQueue();
+
   constructor(opts: WorkspaceOptions) {
     this.opts = { port: 4567, ...opts };
     this.sql = (opts.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
     this.vfs = new Vfs(this.sql);
     this.sql.exec(WATERMARK_TABLE);
     for (const r of this.sql.exec(`SELECT k, v FROM _workspace_watermark`) as Iterable<{ k: string; v: number }>) {
-      if (r.k === "pushSeq")     this.pushSeq     = r.v;
-      if (r.k === "pullSinceMs") this.pullSinceMs = r.v;
+      if (r.k === "pushSeq")      this.pushSeq      = r.v;
+      // Stage-1 migration: read the new key if present,
+      // and tolerate the legacy `pullSinceMs` row by leaving the rev
+      // watermark at 0 (the next pull re-fetches everything from
+      // rev 0 — a one-time cost on the first boot post-upgrade).
+      if (r.k === "pullSinceRev") this.pullSinceRev = r.v;
     }
 
     // Normalize and reconcile configured mounts against the persisted state.
@@ -174,81 +195,97 @@ export class Workspace {
   // for API consistency.
 
   async readFile(path: string): Promise<Uint8Array | null> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    await this.ensureContentLoaded(path);
-    return this.vfs.readFile(path);
+    await this.ensureContentLoaded(cp);
+    return this.vfs.readFile(cp);
   }
 
   async writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    // Preserve the existing file's mode on overwrite when the caller didn't
-    // specify one — otherwise a plain `writeFile(path, bytes)` would silently
-    // downgrade an executable script (0o100755) to a regular file (0o100644).
-    // Callers that *want* to change the mode pass it explicitly.
-    const effectiveMode = mode ?? this.vfs.stat(path)?.mode ?? 0o100644;
-    const m = this.resolveMountForWrite(path);
-    if (m) {
-      // Push to the backing store first — if it fails, the VFS stays clean.
-      await m.mount.put!(m.relPath, bytes);
-      this.vfs.writeFile(path, bytes, effectiveMode, m.root);
-    } else {
-      this.vfs.writeFile(path, bytes, effectiveMode);
-    }
+    return serialize(this.mutex, async () => {
+      // Preserve the existing file's mode on overwrite when the caller didn't
+      // specify one — otherwise a plain `writeFile(path, bytes)` would silently
+      // downgrade an executable script (0o100755) to a regular file (0o100644).
+      // Callers that *want* to change the mode pass it explicitly.
+      const effectiveMode = mode ?? this.vfs.stat(cp)?.mode ?? 0o100644;
+      const m = this.resolveMountForWrite(cp);
+      if (m) {
+        // Push to the backing store first — if it fails, the VFS stays clean.
+        await m.mount.put!(m.relPath, bytes);
+        this.vfs.writeFile(cp, bytes, effectiveMode, m.root);
+      } else {
+        this.vfs.writeFile(cp, bytes, effectiveMode);
+      }
+    });
   }
 
   async readdir(path: string): Promise<Array<{ name: string; type: "file" | "dir" }>> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    return this.vfs.readdir(path);
+    return this.vfs.readdir(cp);
   }
 
   async stat(path: string): Promise<FileStat | null> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    return this.vfs.stat(path);
+    return this.vfs.stat(cp);
   }
 
   async mkdir(path: string, mode?: number): Promise<void> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    // mkdir is VFS-only even under writable mounts: R2 has no directories,
-    // and synthesizing zero-byte directory markers would surface as files.
-    const m = this.resolveMountForWrite(path);
-    this.vfs.mkdir(path, mode, m ? m.root : null);
+    return serialize(this.mutex, async () => {
+      // mkdir is VFS-only even under writable mounts: R2 has no directories,
+      // and synthesizing zero-byte directory markers would surface as files.
+      const m = this.resolveMountForWrite(cp);
+      this.vfs.mkdir(cp, mode, m ? m.root : null);
+    });
   }
 
   async deleteFile(path: string): Promise<void> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
-    const m = this.resolveMountForWrite(path);
-    if (m) {
-      // Collect every file under `path` (could be a single file or a subtree)
-      // and delete each from the backing store before touching the VFS.
-      const subtree = this.vfs.listFilesUnder(path);
-      const files   = subtree.length ? subtree : (this.vfs.stat(path)?.type === "file" ? [path] : []);
-      const rels    = files.map(f => f.slice(m.root.length + 1));
-      await this.runBounded(rels, r => m.mount.delete!(r));
-    }
-    this.vfs.deleteFile(path);
+    return serialize(this.mutex, async () => {
+      const m = this.resolveMountForWrite(cp);
+      if (m) {
+        // Collect every file under `path` (could be a single file or a subtree)
+        // and delete each from the backing store before touching the VFS.
+        const subtree = this.vfs.listFilesUnder(cp);
+        const files   = subtree.length ? subtree : (this.vfs.stat(cp)?.type === "file" ? [cp] : []);
+        const rels    = files.map(f => f.slice(m.root.length + 1));
+        await this.runBounded(rels, r => m.mount.delete!(r));
+      }
+      this.vfs.deleteFile(cp);
+    });
   }
 
   async listFilesUnder(prefix: string): Promise<string[]> {
+    const cp = parseWorkspacePath(prefix);
     await this.ensureMountsIndexed();
-    return this.vfs.listFilesUnder(prefix);
+    return this.vfs.listFilesUnder(cp);
   }
 
   /** Search filenames under `directory` for `pattern` (substring match). */
+  /** Search filenames under `directory` for `pattern` (substring match). */
   async findFiles(directory: string, pattern?: string): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+    const cp = parseWorkspacePath(directory);
     await this.ensureMountsIndexed();
     return this.vfs.snapshot().entries
-      .filter(e => e.path.startsWith(directory))
+      .filter(e => pathStartsWith(e.path, cp))
       .filter(e => !pattern || e.path.includes(pattern))
       .map(e => ({ path: e.path, type: e.type }));
   }
 
   /** Grep file contents for `pattern`. `path` may be a file or directory. */
   async grep(pattern: string, path: string, opts: { ignoreCase?: boolean } = {}): Promise<GrepHit[]> {
+    const cp = parseWorkspacePath(path);
     await this.ensureMountsIndexed();
     const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
     const { entries } = this.vfs.snapshot();
-    const files = entries.filter(e => e.type === "file" && e.path.startsWith(path));
+    const files = entries.filter(e => e.type === "file" && pathStartsWith(e.path, cp));
     // Hydrate any mount stubs in scope, bounded-concurrent.
     await this.hydrateMany(files.map(f => f.path));
     const hits: GrepHit[] = [];
@@ -277,6 +314,7 @@ export class Workspace {
    */
   async exec(command: string, cwd?: string): Promise<ExecResult> {
     await this.ensureMountsIndexed();
+    return serialize(this.mutex, async () => {
     const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
     const api = await this.getConnection();
 
@@ -295,98 +333,17 @@ export class Workspace {
 
     const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
 
-    // Pull files the container touched. Three cases per change, by the
-    // mount root of its path:
-    //   - outside any mount: applied to the VFS normally.
-    //   - under a read-only mount: dropped (mounts are read-only end-to-end).
-    //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    // Bulk pull: one stream for all file contents instead of one stream
-    // per file.  Cuts capnweb's per-stream materialization round-trips.
-    const ignore = this.opts.pullIgnore ?? ["node_modules"];
-    const bulk = await api.pullDirty(this.pullSinceMs, ignore);
-    // Drain the blob once into a single Buffer-like view so each change
-    // can slice its content out without re-streaming.
-    const blobBytes = await readStreamToUint8Array(bulk.blob);
+    const pulled = await this._pullDirtyAfterLocked();
 
-    // Walk the change list once: keep what we'll apply locally, and (for
-    // writable mounts) what we'll mirror to the mount backend.  Each
-    // entry carries the file's bytes as a subarray view of `blobBytes`
-    // so the sync apply loop and the mount mirror can both reuse them
-    // without re-reading from SQLite.
-    type ApplyEntry = {
-      path: string;
-      op:   "upsert" | "delete";
-      type?: "file" | "dir";
-      mode?: number;
-      mtime?: number;
-      bytes?: Uint8Array;
-      chunks?: Array<{ idx: number; bytes: Uint8Array }>;
-    };
-    type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
-    const applyEntries: ApplyEntry[] = [];
-    const mirrors:      MirrorEntry[] = [];
-    let maxMtime = this.pullSinceMs;
-    for (const c of bulk.changes) {
-      const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type  !== undefined) e.type  = c.type;
-      if (c.mode  !== undefined) e.mode  = c.mode;
-      if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
-      if (c.op === "upsert" && c.type === "file") {
-        if (c.chunks) {
-          // Chunk-mode: each VfsChunkRef names a slice of the blob.
-          e.chunks = c.chunks.map(k => ({
-            idx:   k.idx,
-            bytes: blobBytes.subarray(k.offset, k.offset + k.size),
-          }));
-        } else if (c.contentSize !== undefined) {
-          const off = c.contentOffset ?? 0;
-          e.bytes = blobBytes.subarray(off, off + c.contentSize);
-        }
-      }
-      const root = this.mountRootOf(c.path);
-      if (root === null) {
-        applyEntries.push(e);
-        continue;
-      }
-      const mount = this.configuredMounts.get(root)!;
-      if (!mount.writable) continue;  // read-only mount: drop
-      applyEntries.push(e);
-      mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
-    }
-
-    if (applyEntries.length) {
-      // Wrap the whole pull's SQLite work in one transactionSync so the
-      // DO commits once instead of once per file.  applyChangesSync is
-      // the sync sibling of applyChanges that takes bytes directly.
-      this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
-      this.pullSinceMs = maxMtime;
-    }
-    // Mirror writable-mount changes to R2 using the bytes we already
-    // captured above, so we don't pay a second SQLite read per file.
-    if (mirrors.length) {
-      await this.runBounded(mirrors, async (m) => {
-        if (m.op === "delete") {
-          await m.mount.delete!(m.relPath);
-        } else if (m.type === "file") {
-          // Chunk-mode files don't carry full bytes here — only the
-          // dirty chunks.  Read the merged file out of the VFS so
-          // the mount sees the complete content.
-          const bytes = m.bytes ?? this.vfs.readFile(m.path);
-          if (bytes) await m.mount.put!(m.relPath, bytes);
-        }
-        // dir entries are VFS-only; nothing to mirror.
-      });
-    }
-
-    this.saveWatermarks();
 
     return {
       exitCode: result.exitCode,
       stdout:   result.stdout,
       stderr:   result.stderr,
       pushed:   changes.length,
-      pulled:   applyEntries.length,
+      pulled,
     };
+    });
   }
 
   /**
@@ -396,6 +353,196 @@ export class Workspace {
   async warmup(): Promise<void> {
     await this.ensureMountsIndexed();
     await this.ensureContainerProcess();
+  }
+
+  /**
+   * Start a long-running process in the sandbox container, returning a
+   * `Process` handle the caller can stream logs from, await exit on, or
+   * kill. Performs the same DO→container push as `exec` so the process
+   * sees the latest VFS state.
+   *
+   * Caller is responsible for pulling DO←container deltas after the
+   * process exits via `pullDirtyAfter(...)` — we can't bake that into
+   * the returned handle because the consumer typically wants to stream
+   * logs in parallel with the wait.
+   */
+  async startProcess(
+    command: string,
+    opts: { cwd?: string } = {},
+  ): Promise<Process> {
+    await this.ensureMountsIndexed();
+    return serialize(this.mutex, async () => {
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+      const api = await this.getConnection();
+
+      // Same pre-flight as exec: hydrate stub mounts then push the delta.
+      const stubs = this.vfs.listStubs().map(s => s.path);
+      if (stubs.length) await this.hydrateMany(stubs);
+      const changes = this.vfs.getChangesSince(this.pushSeq);
+      if (changes.length) {
+        await api.applyChanges(changes);
+        this.pushSeq = changes[changes.length - 1].seq;
+      }
+
+      return sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
+    });
+  }
+
+  /**
+   * Stream `LogEvent`s from a running (or recently-running) process.
+   * Decodes the sandbox SDK's SSE wire format so callers iterate
+   * structured events directly.
+   *
+   * Cancellation: pass an `AbortSignal` and we translate `abort` into a
+   * `killProcess(processId)` call worker-side. We do *not* forward the
+   * signal to `sb.streamProcessLogs` itself:
+   *   - workerd refuses to serialize an `AbortSignal` across the DO RPC
+   *     boundary ("AbortSignal serialization is not enabled").
+   *   - the sandbox SDK's HTTP transport drops the option two layers
+   *     down anyway (process-client's `streamProcessLogs` doesn't even
+   *     accept it).
+   * Killing the process stops the sandbox emitting log events; the SSE
+   * stream then closes naturally and the consuming iterator returns.
+   */
+  async streamProcessLogs(
+    processId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AsyncIterable<LogEvent>> {
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    if (options.signal) {
+      const onAbort = () => { void sb.killProcess(processId).catch(() => {}); };
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const stream = await sb.streamProcessLogs(processId);
+    return parseSSEStream<LogEvent>(stream);
+  }
+
+  /**
+   * Look up a process by id. Returns null when the sandbox has lost the
+   * process. Used by the agent's `onStart` recovery sweep to decide
+   * whether to reattach or close out an in-flight exec.
+   */
+  async getProcess(processId: string): Promise<Process | null> {
+    const sb = getSandbox(this.opts.sandbox, await this.sandboxName());
+    try {
+      return await sb.getProcess(processId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Pull file changes the container made into the VFS. Counterpart to
+   * the automatic pull `exec` performs; for `startProcess` callers must
+   * invoke this explicitly once they've decided the process is done
+   * streaming. Returns the count of applied entries.
+   */
+  async pullDirtyAfter(): Promise<number> {
+    return serialize(this.mutex, () => this._pullDirtyAfterLocked());
+  }
+
+  /**
+   * Pull body without the mutex. exec() already holds the mutex when it
+   * calls this; the public pullDirtyAfter() wraps it.
+   */
+  private async _pullDirtyAfterLocked(): Promise<number> {
+    const api = await this.getConnection();
+
+    // Pull files the container touched. Three cases per change, by the
+    // mount root of its path:
+    //   - outside any mount: applied to the VFS normally.
+    //   - under a read-only mount: dropped (mounts are read-only end-to-end).
+    //   - under a writable mount: applied to the VFS, then mirrored to R2.
+    // Manifest-aware pull . The container ships
+    // one record per dirty path with (hash, size)[] per file — no
+    // inline bytes. We then probe our own content-addressed store and
+    // only ask the container for the bytes we don't already have.
+    // Identical content at multiple paths, or content the DO already
+    // holds from a previous pull, costs zero bytes over the wire.
+    const ignore = this.opts.pullIgnore ?? ["node_modules"];
+    const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
+
+    // Collect the union of chunk hashes across this pull, ask our own
+    // Vfs which we lack, and fetch just those from the container.
+    const allHashes = chunkHashUnion(bulk);
+    const wantList  = this.vfs.missingBlobs(allHashes);
+    const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
+    const fetched = new Map<string, Uint8Array>();
+    for (let i = 0; i < wantList.length; i++) {
+      fetched.set(hashKey(wantList[i]), wantBytes[i]);
+    }
+    const lookup = (h: Uint8Array): Uint8Array | null => {
+      return fetched.get(hashKey(h)) ?? this.vfs.readBlob(h);
+    };
+
+    type ApplyEntry = {
+      path: string;
+      op:   "upsert" | "delete";
+      type?: "file" | "dir";
+      mode?: number;
+      mtime?: number;
+      bytes?: Uint8Array;
+    };
+    type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
+    const applyEntries: ApplyEntry[] = [];
+    const mirrors:      MirrorEntry[] = [];
+    for (const c of bulk.changes) {
+      const e: ApplyEntry = { path: c.path, op: c.op };
+      if (c.type  !== undefined) e.type  = c.type;
+      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.mtime !== undefined) e.mtime = c.mtime;
+      if (c.op === "upsert" && c.type === "file" && c.chunks) {
+        // Every byte is content-verified by construction: the lookup
+        // key IS the chunk hash.
+        e.bytes = assembleFileBytes(c.chunks, lookup);
+      }
+      const root = this.mountRootOf(c.path);
+      if (root === null) {
+        applyEntries.push(e);
+        continue;
+      }
+      const mount = this.configuredMounts.get(root)!;
+      if (!mount.writable) continue;
+      applyEntries.push(e);
+      mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
+    }
+
+    if (applyEntries.length) {
+      this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
+    }
+    // Advance the rev watermark even on an empty pull, so a successive
+    // pull doesn't re-scan the same range. The container reports maxRev
+    // = currentRev when nothing changed, so this is safe.
+    this.pullSinceRev = bulk.maxRev;
+    // Mirror writable-mount changes to R2 using the bytes we already
+    // captured above, so we don't pay a second SQLite read per file.
+    if (mirrors.length) {
+      await this.runBounded(mirrors, async (m) => {
+        if (m.op === "delete") {
+          await m.mount.delete!(m.relPath);
+        } else if (m.type === "file") {
+          const bytes = m.bytes ?? this.vfs.readFile(m.path);
+          if (bytes) await m.mount.put!(m.relPath, bytes);
+        }
+      });
+    }
+
+    this.saveWatermarks();
+    return applyEntries.length;
+  }
+
+  /**
+   * Run the worker-side mark-and-sweep GC to
+   * reclaim orphan manifests and blobs left behind by overwrites and
+   * deletes. Runs under the per-workspace mutex so it can never race
+   * a writer mid-flight.
+   *
+   * Callers can pass a tighter safety window than
+   * `Vfs.GC_DEFAULT_WINDOW_MS` (5 min) for tests or aggressive reclaim.
+   */
+  async gc(safetyWindowMs?: number): Promise<{ manifestsFreed: number; blobsFreed: number }> {
+    return serialize(this.mutex, async () => this.vfs.gc(safetyWindowMs));
   }
 
   /**
@@ -596,9 +743,13 @@ export class Workspace {
   }
 
   private saveWatermarks(): void {
+    // : persist the monotonic-revision watermark. The legacy
+    // `pullSinceMs` row is intentionally left in place if present — it
+    // does no harm (we don't read it) and DELETE-on-write would add a
+    // round-trip on every exec for a one-time migration.
     this.sql.exec(
-      `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceMs', ?)`,
-      this.pushSeq, this.pullSinceMs,
+      `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceRev', ?)`,
+      this.pushSeq, this.pullSinceRev,
     );
   }
 }
