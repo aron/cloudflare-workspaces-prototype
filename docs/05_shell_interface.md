@@ -131,7 +131,7 @@ are rejected.
   are hydrated. See [02. Sync Protocol](./02_sync_protocol.md).
 - **After** the command exits (any exit code, including non-zero), the
   DO pulls every dirty change the command produced. Files matching
-  `pullIgnore` (default `["node_modules"]`) stay in the container only.
+  `ignore` (default `["node_modules"]`) stay in the container only.
 - For read-write mounts, container-side writes under the mount root are
   mirrored back to the provider after the pull (provider first, then
   VFS).

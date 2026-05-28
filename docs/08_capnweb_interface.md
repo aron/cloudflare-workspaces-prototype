@@ -41,7 +41,7 @@ interface ContainerRPC {
   // Container → DO. Manifest pull. Per-file (hash, size) chunk lists;
   // no inline bytes. Caller follows up with hasBlobs / getBlobs for
   // the subset it doesn't already have.
-  pullDirty(sinceRev?: number, ignore?: string[]): Promise<ManifestBulk>;
+  pullDirty(sinceRev?: number, ignore?: string[]): ReadableStream<ManifestRecord>;
 
   // Probe which chunk hashes the container has. Used by the manifest
   // pull and by the chunk-mode push.
@@ -49,7 +49,7 @@ interface ContainerRPC {
 
   // Fetch raw bytes for a set of chunk hashes, in request order.
   // Throws if any hash is unknown — callers must dedupe and probe first.
-  getBlobs(hashes: Uint8Array[]): Promise<Uint8Array[]>;
+  getBlobs(hashes: Uint8Array[]): ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>;
 
   // Start a command. Returns a handle whose `events` stream yields
   // stdout / stderr / exit frames as they happen. The stream is the
@@ -66,12 +66,13 @@ interface ContainerRPC {
     events: ReadableStream<ExecEvent>;
   }>;
 
-  // Reattach to an in-flight or recently-completed exec by id. `resume`
-  // controls whether the returned stream starts from the tail (live
-  // events only) or replays the full event log from the beginning.
+  // Reattach to an in-flight or recently-completed exec by id. Pass the
+  // `seq` of the last event the caller already saw to resume from that
+  // point; omit to receive every event from the start of the run; pass
+  // `"tail"` to receive only events produced after the call.
   getExec(input: {
     id:      string;
-    resume?: "tail" | "full";
+    after?:  number | "tail";
   }): Promise<{
     id:     string;
     events: ReadableStream<ExecEvent>;
@@ -85,31 +86,115 @@ interface ContainerRPC {
 }
 
 // All payloads on the wire are binary. The host-side `Workspace.shell`
-// converts to `string` when the caller passes `encoding: "utf8"`.
+// converts to `string` when the caller passes `encoding: "utf8"`. Every
+// event carries a monotonic `seq` (per exec id) so callers can resume
+// from a known point after a disconnect.
 type ExecEvent =
-  | { id: string; name: "stdout"; value: Uint8Array }
-  | { id: string; name: "stderr"; value: Uint8Array }
-  | { id: string; name: "exit";   value: number };
+  | { id: string; seq: number; name: "stdout"; value: Uint8Array }
+  | { id: string; seq: number; name: "stderr"; value: Uint8Array }
+  | { id: string; seq: number; name: "exit";   value: number };
 ```
 
-`VFSEntry`, `VFSChange`, and `ManifestBulk` are defined in
+`VFSEntry`, `VFSChange`, and `ManifestRecord` are defined in
 `src/shared/index.ts`. The schema column references match
 [03. Filesystem Schema](./03_filesystem_schema.md).
 
 ## Pull semantics
 
-The single pull RPC, `pullDirty`, returns a `ManifestBulk`:
+`pullDirty` returns a `ReadableStream<ManifestRecord>` — one record per
+touched path with a `chunks: (hash, size)[]` array. No bytes inline.
+Callers consume records as they arrive, accumulate the union of chunk
+hashes they don't recognise, and follow up with `hasBlobs` /
+`getBlobs` (the latter also returns a stream) for the missing subset.
 
 | Aspect | Value |
 | --- | --- |
-| Round-trips per pull | 1 RPC + 1 `hasBlobs` + 1 `getBlobs` (only if any hashes are missing) |
+| Round-trips per pull | 1 streaming RPC + 1 `hasBlobs` + 1 streaming `getBlobs` (only if any hashes are missing) |
 | Bytes inline | None — manifests carry chunk hashes only |
 | Dedup | Global, content-addressed by `sha256(chunk)` |
 
 Identical content at multiple paths costs exactly one entry on the wire
 and zero `getBlobs` round-trips if the DO already has the blob from a
-previous pull. See [02. Sync Protocol](./02_sync_protocol.md) for how
-this composes into the push/pull cycle.
+previous pull. Streaming both the manifest and the blob fetch keeps
+peak memory bounded on both sides regardless of how much the exec
+touched. See [02. Sync Protocol](./02_sync_protocol.md) for how this
+composes into the push/pull cycle.
+
+## Backpressure on the exec stream
+
+`exec` and `getExec` return a `ReadableStream<ExecEvent>` whose
+consumer-side backpressure is propagated all the way to the spawned
+process. The runner inside the container maintains a fixed-size ring
+buffer per stream (default 4 MiB for stdout, 4 MiB for stderr). When
+a consumer is behind and a buffer is full, the runner stops
+`read()`ing the child's pipes; kernel pipe pressure then blocks the
+child on `write`. Chatty commands self-regulate the same way they
+would under a slow `tee` or `less` on a normal shell.
+
+Callers that need to throttle without relying on the stream's pull
+semantics can use `pause()` / `resume()` on the host-side exec handle
+(see [05. Shell Interface](./05_shell_interface.md)).
+
+## Stream replay and durability
+
+The server keeps the full event log for each exec, keyed by `id`, so
+`getExec({ id, after })` can resume from any `seq` the caller has
+already observed. Retention is bounded:
+
+- The log is kept until the DO acknowledges the `exit` event via
+  `ackExec(id)`, **or** until a TTL after exit (default 5 minutes),
+  **or** until the total log size for one exec exceeds the per-exec
+  cap (default 16 MiB). Whichever comes first wins.
+- Once the in-memory portion of the log crosses a smaller threshold
+  (default 1 MiB), the server spills older events to a local file so
+  long-running execs stay reattachable within the size cap.
+- If the log has been evicted, `getExec` rejects with
+  `ELOG_TRUNCATED` (see error codes below). Callers must be prepared
+  for this and restart the exec if they need a clean replay.
+
+```ts
+interface ContainerRPC {
+  // Release the event log for a completed exec. The DO is expected
+  // to call this once it has durably consumed the events.
+  ackExec(input: { id: string }): Promise<void>;
+}
+```
+
+## Error model
+
+Errors thrown over the wire carry a structured code so callers can
+branch without string-matching:
+
+```ts
+type WireError = {
+  code:    string;   // see table below
+  message: string;
+  detail?: unknown;
+};
+```
+
+| Code | Meaning |
+| --- | --- |
+| `ENOENT` | Path does not exist on the DO side (covers ignored paths, which are invisible to `Workspace.fs`). |
+| `EUNKNOWN_HASH` | `getBlobs` was called for a hash the container has no record of. |
+| `ELOG_TRUNCATED` | `getExec` resume point is older than the retained log. |
+| `ESHUTDOWN` | Server is shutting down; reconnect after the next boot. |
+| `EAUTH` | Handshake auth failed (see [07. Injected Service](./07_injected_service.md)). |
+| `EPROTOCOL` | Wire framing or version mismatch. |
+
+The host-side capnweb adapter rethrows as `WorkspaceError` preserving
+`code`, so application code can `if (err.code === "ENOENT")` rather
+than parse messages.
+
+## Observability
+
+The host-side `Workspace` accepts an optional `onRpcEvent` callback
+fired once per RPC with `{ rpc, durationMs, bytesIn, bytesOut, ok,
+code? }`. Server-side, structured records land in `LOG_FILE` (see
+[07. Injected Service](./07_injected_service.md)). Neither side bakes
+in a tracing dependency — the callback is the integration point for
+OpenTelemetry, Workers Analytics Engine, or whatever the host Worker
+already uses.
 
 ## Open questions
 
@@ -132,17 +217,14 @@ case depends on a particular resolution.
   [07. Injected Service](./07_injected_service.md#open-questions); the
   capnweb side will likely grow a pre-bootstrap auth phase to match
   whatever scheme the injected service settles on.
-- **Backpressure on the exec stream.** `events` is a
-  `ReadableStream<ExecEvent>`, but the wire doesn't currently
-  propagate backpressure back to the spawned process. A chatty
-  command with a slow consumer buffers in the container. We need
-  either an explicit "the consumer is behind, throttle the producer"
-  signal or a documented bound on in-memory event buffering.
-- **Stream replay durability.** `getExec({ resume: "full" })` implies
-  the server keeps the event log for some window. How long? Spillable
-  to disk? Per-exec cap? Today it's "best effort, until the process is
-  reaped"; the contract needs to be tightened before agents can rely
-  on it for long-running execs.
+- **Frame-size and message limits.** The wire has no documented
+  bound on single-frame size, in-flight RPC count, or `getBlobs`
+  batch size. A pathological caller can ask for 100k hashes in one
+  call and pin both sides on a single oversized frame. Working
+  defaults are likely 16 MiB per frame, 256 concurrent RPCs per
+  session, and 1024 hashes per `getBlobs` batch — but they need
+  measurement and an enforcement story (reject loudly? split
+  silently?) before they go in the contract.
 
 See [02. Sync Protocol](./02_sync_protocol.md) for how these RPCs
 compose into a push/pull cycle, and

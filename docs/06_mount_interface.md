@@ -30,7 +30,7 @@ A mount is either **lazy** or **eager**.
 
 `list()` enumerates the tree; `fetch(relPath)` returns one file's bytes.
 The workspace calls `list()` once on first use to insert stubs into
-`cf_nodes`, then calls `fetch()` on demand the first time something
+`cf_vfs_nodes`, then calls `fetch()` on demand the first time something
 reads a stub.
 
 ```ts
@@ -97,16 +97,36 @@ Bare `Mount` objects are also accepted for back-compat.
 Mounts default to `mode: "read-only"`. Writes anywhere under the mount
 root throw `EROFS`, and writes that occur container-side during `exec()`
 are dropped on the post-exec pull (after the bytes are received, before
-they hit `cf_nodes`).
+they hit `cf_vfs_nodes`).
 
-Pass `mode: "read-write"` to opt in to write-through:
+Pass `mode: "read-write"` to opt in to write-through. Container-side
+writes are mirrored to the mount with bounded concurrency after the
+post-exec pull.
+
+### Write-back gating
+
+DO-side writes (`fs.writeFile`, `fs.rm`) are **debounced** before they
+hit the provider. A path is held for `writeBackMs` (default 500 ms)
+after its last DO-side mutation; only the final state in that window
+is mirrored. Burst writes — a build rewriting a manifest a dozen
+times, an editor saving on every keystroke — collapse to one `put`.
+
+Two escape hatches for callers that need precise control:
+
+- `workspace.flushMounts(root?)` — force an immediate mirror of any
+  pending debounced writes.
+- `{ writeBack: "manual" }` on the mount — disables the debounce
+  entirely. Writes accumulate in the VFS and only land on the
+  provider when `flushMounts()` is called.
+
+Mirror order for a single path's final state:
 
 | Operation | Order |
 | --- | --- |
-| `fs.writeFile` | mount `put()` first, then VFS row. Failed `put` leaves the VFS untouched. |
-| `fs.rm` (file) | mount `delete()` first, then VFS row. |
+| `fs.writeFile` (debounced) | VFS row first, then mount `put()` once the debounce fires. Failed `put` leaves the VFS row in place and surfaces via the conflict hook. |
+| `fs.rm` (file, debounced) | VFS row first, then mount `delete()`. |
 | `fs.mkdir` | VFS only (R2-style stores have no directory concept). |
-| `exec` writes | pulled into VFS, then mirrored to the mount with bounded concurrency. |
+| `exec` writes | pulled into VFS, then mirrored to the mount with bounded concurrency after the post-exec pull. |
 
 ## Built-in providers
 
@@ -116,8 +136,10 @@ Lazy mount over an R2 bucket binding.
 
 ```ts
 R2Bucket(env.SHARED_FILES, {
-  prefix: ".agents/skills",   // strip from R2 keys when computing relPaths
-  mode:   "read-only",        // or "read-write"
+  prefix:   ".agents/skills",   // strip from R2 keys when computing relPaths
+  mode:     "read-only",        // or "read-write"
+  ignore:   [".cache"],         // mount-scoped; composed with the global ignore
+  maxBytes: 1 << 30,            // optional quota; throws at index time if exceeded
 });
 ```
 
@@ -161,9 +183,9 @@ const ArtifactBundle = (id: string): MountFactory => ({ sessionId, root, vfs }: 
 
 ## Indexing and persistence
 
-On first call to any `fs`, `shell`, or `prefetch` method, every mount is
-indexed in parallel. Index state is persisted to `_cf_mounts` in SQLite
-so DO restarts don't trigger a re-list.
+On first call to any `fs`, `shell`, or `prefetch` method, every mount
+is indexed in parallel. Index state is persisted to `_cf_vfs_mounts`
+in SQLite so DO restarts don't trigger a re-list.
 
 `workspace.prefetch(root?)` eagerly hydrates lazy stubs under the given
 mount root (or every mount if none supplied). Useful from `onStart` /
@@ -172,28 +194,65 @@ mount root (or every mount if none supplied). Useful from `onStart` /
 Concurrent reads of the same stub share one in-flight `fetch()` —
 deduped per absolute path.
 
-## Open questions
+## Per-mount options
 
+Every mount accepts the following options in addition to its
+provider-specific config:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `"read-only"` | `"read-only"` or `"read-write"`. |
+| `ignore` | `[]` | Path segments hidden from the pull *and* from `Workspace.fs`. Composed with the top-level `ignore` by union. See [02. Sync Protocol → Ignored entries](./02_sync_protocol.md#ignored-entries). |
+| `writeBack` | `"debounce"` | `"debounce"` (default) or `"manual"`. See “Write-back gating” above. |
+| `writeBackMs` | `500` | Debounce window in milliseconds. Ignored when `writeBack: "manual"`. |
+| `maxBytes` | unbounded | Hard cap on total bytes indexed from this mount. Exceeding throws at index time before any data lands in `cf_vfs_nodes`. |
+| `maxEntries` | unbounded | Hard cap on entry count. Same enforcement timing as `maxBytes`. |
+
+The workspace-level `ignore` option (the renamed `pullIgnore`) applies
+to every mount and to top-level paths. Mount-level `ignore` extends it
+for that mount only.
+
+## Mount conflicts
+
+Two writers can target the same path: a DO-side `fs.writeFile` and a
+container-side `exec` that touches the same file. The post-exec pull
+applies container-side state to the VFS, then mirrors back out to the
+mount. Policy: **container-side state wins** — it ran last,
+agentically. The mount is overwritten on mirror.
+
+Callers that want to log or veto the resolution can supply a hook:
+
+```ts
+new Workspace({
+  onMountConflict: ({ root, relPath, doRev, containerRev }) => {
+    // Return `"accept"` (default) or `"keep-do"` to retain the
+    // DO-side write and skip the mount mirror for this path.
+    return "accept";
+  },
+});
+```
+
+Conflicts on read-only mounts are reported but never mirrored; the
+container-side bytes still win inside the VFS, and the read-only
+mount stays untouched.
+
+## Open questions
 These behaviours aren't fully specified yet. File an issue if your use
 case depends on a particular resolution.
 
-- **Single-file mounts.** Today a mount always covers a subtree —
-  `list()` returns a set of entries and the root is treated as a
-  directory. Mounting an individual file (e.g. "this one R2 object
-  shows up at `/workspace/config.json`") isn't expressible without
-  wrapping it in a one-entry lazy mount. Options on the table:
-  detect when a `MountEntry[]` has exactly one file at the root and
-  collapse the directory shim, or add a dedicated `MountFile` factory
-  that bypasses `list()` entirely.
-- **Write-back gating.** Read-write mounts mirror every `fs.writeFile`
-  / `fs.rm` straight through to the provider, and every container-side
-  write under the mount root is mirrored after the post-exec pull. For
-  workloads that produce many transient writes (a build that rewrites
-  a manifest a dozen times, an editor that saves on every keystroke)
-  this is too eager. The intended design is a gate — either
-  time-based (debounce a path for N ms after the last write), explicit
-  (`mount.flush()` / `workspace.flushMounts()`), or commit-style (a
-  scoped `workspace.withMountWrites(async () => { ... })` that batches
-  the writes and mirrors on success). Until that lands, treat
-  `read-write` mounts as best for low-churn data and avoid them for
-  hot build artifacts.
+- **Single-file mounts → file-inside-a-mounted-directory.** A mount
+  always covers a subtree today, and the harder version of this
+  question isn't “how do I mount one R2 object?” but “what happens if
+  a mount root is *itself* nested inside another mount?”
+  Construction-time nesting is rejected, but a writable mount whose
+  `put()` lands a file at a path that a different mount also claims
+  (e.g. via a per-session GitHub mount whose tree contains a
+  config.json that another mount also wants to own) needs a defined
+  resolution. Likely answer: the mount whose root is the longest
+  prefix of the path wins, but the contract hasn't been written.
+- **Mount lifecycle.** Mounts have `materialize` or `list`/`fetch` but
+  no “tear-down” or “refresh” hook. A `GitHubRepo` mount that wants to
+  pull `main` periodically has no place to run `git fetch`. Likely
+  shape: optional `refresh()` on the mount plus a
+  `workspace.refreshMount(root)` entry point; default is a no-op so
+  existing mounts keep working. Tracked for a future iteration.

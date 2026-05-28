@@ -32,20 +32,28 @@ Data flows in two directions, on its own clock:
 A typical `exec()` round-trip:
 
 1. **Push.** The DO sends every change with a higher revision than the
-   container has seen. The container suppresses its own dirty-tracking
-   while applying so deletes don't bounce back.
+   container has seen, **coalesced to one record per path** (the latest
+   state wins — five rewrites of the same path between execs cost one
+   record on the wire, not five). The container suppresses its own
+   dirty-tracking while applying so deletes don't bounce back.
 2. **Hydrate.** Lazy-mount stubs the command might touch are fetched
    from their providers and included in the same push batch. See
    [06. Mount Interface](./06_mount_interface.md).
 3. **Exec.** The command runs. FUSE writes are captured by the
    in-container VFS as they happen, each stamped with a fresh revision.
 4. **Pull.** The DO asks the container for every change since its
-   pull watermark. The container returns a *manifest*: one record per
-   touched path with a `chunks: (hash, size)[]` array. No bytes inline.
-5. **Diff.** The DO unions all chunk hashes from the manifest, probes
-   which it already has, and fetches only the missing bytes.
-6. **Apply.** Manifests + new blobs land in the DO's SQLite. The DO
-   advances its pull watermark to the container's reported max revision.
+   pull watermark. The container returns a **stream of manifest
+   records** — one per touched path with a `chunks: (hash, size)[]`
+   array. No bytes inline. The DO consumes records as they arrive so
+   peak memory stays bounded regardless of how much the exec touched.
+5. **Diff.** The DO unions all chunk hashes from the manifest stream,
+   probes which it already has, and fetches only the missing bytes.
+6. **Apply.** Manifests + new blobs land in the DO's SQLite **in
+   bounded transactions** (default cap: 64 MiB of new bytes or 1024
+   paths, whichever first). `pullRev` advances per committed batch so a
+   crash mid-pull resumes cleanly via `sinceRev = pullRev` on the next
+   call. After the final batch the DO advances `pullRev` to the
+   container's reported max revision.
 
 `writeFile` / `mkdir` / `rm` outside of `exec()` follow the same shape:
 step 1 is "this single change", steps 3–6 are skipped. `workspace.push()`
@@ -76,11 +84,22 @@ one name.
 | `pullRev` | DO | Last container-side `rev` the DO has consumed. |
 | `currentRev` | DO | Latest `rev` stamped on a DO-side mutation. |
 | `currentRev` | Container | Latest `rev` stamped on a container-side mutation. |
+| `appliedPushRev` | Container | Largest DO `rev` the container has fully applied. Echoed on every push response and pull stream. |
 
-The DO watermarks live in the `_cf_watermark` table so they survive DO
-restarts. The container's revision is in-memory only; if the container
+The DO watermarks live in the `_cf_vfs_watermark` table so they survive DO
+restarts. The container's revisions are in-memory only; if the container
 restarts, the next push from the DO is treated as an authoritative
 baseline.
+
+### Cross-side invariant
+
+Every `pullDirty` and `applyChanges` response carries the container's
+current `appliedPushRev`. The DO asserts `appliedPushRev >= pushRev` on
+every response. The two sides never share a single clock, but echoing
+the largest applied DO rev makes the "container is caught up with the
+DO's pushes" invariant inspectable on the wire instead of load-bearing
+in-process state. A regression in the suppress-dirty-tracking apply path
+trips the assertion immediately rather than corrupting data silently.
 
 ## Wire shape
 
@@ -89,10 +108,10 @@ manifest:
 
 | RPC | Returns | Notes |
 | --- | --- | --- |
-| `applyChanges` | `{ rev }` | DO → container. Applies a batch of changes. |
-| `pullDirty(sinceRev?, ignore?)` | `ManifestBulk` | Container → DO. One record per touched path with `chunks: (hash, size)[]`. No bytes inline. |
+| `applyChanges` | `{ rev, appliedPushRev }` | DO → container. Applies a coalesced batch of changes. |
+| `pullDirty(sinceRev?, ignore?)` | `ReadableStream<ManifestRecord>` | Container → DO. Streams one record per touched path with `chunks: (hash, size)[]`. No bytes inline. Each record carries the container's `appliedPushRev`. |
 | `hasBlobs(hashes[])` | `Uint8Array[]` | Probes which chunk hashes the container has stored. |
-| `getBlobs(hashes[])` | `Uint8Array[]` | Streams chunk bytes back in request order. |
+| `getBlobs(hashes[])` | `ReadableStream<{ hash, bytes }>` | Streams chunk bytes back in request order. |
 
 Identical content at multiple paths (or unchanged chunks within an
 edited file) shows up exactly once on the wire. See
@@ -104,6 +123,16 @@ edited file) shows up exactly once on the wire. See
   closed WebSocket and self-destructs. The next call transparently
   rebuilds against the still-running workspace-server (or restarts it
   if needed). `pushRev` and `pullRev` mean the catch-up is incremental.
+- **Container crash mid-apply.** `applyChanges` is atomic from the DO's
+  perspective. The container is permitted to lose all state on crash;
+  the next push treats the container as empty (`appliedPushRev = 0`).
+  Partial application must not survive a crash. Today the in-memory
+  VFS satisfies this trivially — the process dies and restarts empty.
+  A future on-disk container mirror will need a staging-dir-then-rename
+  or WAL to preserve the same invariant.
+- **DO restart mid-pull.** `pullRev` advances per committed apply batch,
+  so the new DO instance resumes from the last durably-committed batch
+  via `pullDirty(sinceRev = pullRev)`.
 - **DO restart.** Watermarks are persisted, so the new DO instance
   picks up where the old one left off. The container keeps the
   workspace-server process alive across the gap.
@@ -113,7 +142,7 @@ edited file) shows up exactly once on the wire. See
 
 ## Ignore lists
 
-The `pullIgnore` option hides path segments from the pull. Excluded
+The `ignore` option hides path segments from the pull. Excluded
 paths are still written and read inside the container — the bytes just
 never cross the wire back to the DO. This is essential for any large
 directory of derived files: `node_modules`, `.next`, `target`,
@@ -124,28 +153,129 @@ next pull.
 The default is `["node_modules"]`. Pass `[]` to disable, or your own
 list to extend.
 
-### Ignored entries in the DO
+### Ignored entries
 
-Ignored paths are not invisible to the DO — they appear in `readdir`
-and `stat` as stub entries with no content, so tools that walk the tree
-still see something at those paths. Their size and mtime reflect what
-the container reported.
+Ignored paths are **invisible to the `Workspace.fs` API**. They do not
+appear in `readdir`, `stat` returns `ENOENT`, and `readFile` returns
+`ENOENT`. The bytes still live inside the container, so anything that
+*uses* the ignored files — `exec("node ...")`, build tools, anything
+running container-side — keeps working. The exclusion only affects what
+crosses the wire **and** what the DO-side API surfaces.
 
-Reading the bytes of an ignored stub throws `EIGNORED` (a workspace-
-specific error code). Stubs also carry an `ignored: true` flag on
-their `stat()` result, so callers can detect and skip them up-front
-without relying on the error path:
+This is a deliberately narrow surface for the initial release. Whether
+ignored entries should be representable to the DO at all (as stubs, as
+a separate shell-only namespace, or not at all) is left to a future
+iteration — see [Future considerations](#future-considerations).
 
-```ts
-const s = await fs.stat("/workspace/node_modules/react/index.js");
-if (s.ignored) {
-  // Exists in the container, not pulled back to the DO.
-  // Use exec to read it container-side, or skip.
-  return;
-}
-const text = await fs.readFile("/workspace/node_modules/react/index.js", "utf8");
-```
+## Future considerations
 
-The bytes are still live inside the container, so anything that *uses*
-the ignored files (`exec("node ...")`, build tools, etc.) keeps working
-— the exclusion only affects what crosses the wire.
+Items deferred from the initial design. File an issue if a real use
+case depends on a particular resolution.
+
+### Representing ignored entries to the DO
+
+Today ignored paths are entirely invisible to `Workspace.fs`. That is
+the simplest contract but it loses one piece of information: tools that
+want to enumerate "everything the agent's exec can see" can't get it
+from the DO. Two options worth weighing later:
+
+- **Stub entries with an `ignored` flag** on `stat()`, surfaced via
+  `readdir`. Easy to retrofit; surprising for tools that walk the tree
+  and don't check the flag.
+- **An explicit shell-only namespace** — e.g. `workspace.shell.readdir`
+  returns container-only entries, `workspace.fs.readdir` stays clean.
+  Cleaner separation, larger API surface.
+
+Either way, the bytes never cross the wire; the question is purely how
+much the DO admits exists.
+
+### Bloom/cuckoo filter over `cf_vfs_blobs.hash`
+
+Every pull does a `hasBlobs` probe round-trip. With tens of thousands
+of chunks per pull the bytes are small but the latency is real. A DO-
+side probabilistic filter rebuilt lazily from `cf_vfs_blobs` would let the
+DO skip the probe for chunks it can prove it doesn't have, falling
+back to `hasBlobs` only for likely-present hits. No protocol change
+needed; pure DO-side optimisation.
+
+### Push backpressure
+
+A long-running exec can dirty container state faster than the DO can
+pull. Today the in-memory container VFS caps this by OOMing, which is
+a bad answer. Once a disk-backed container mirror lands the bound
+shifts to path count, but the same problem persists. Likely shape: a
+soft cap on the dirty set (say, 256 MiB pending bytes or 100k paths)
+above which FUSE write replies are delayed (real backpressure into the
+writer), or the container opportunistically initiates a push to the DO
+out-of-band rather than waiting for the post-exec pull.
+
+### Prior art and selective reuse
+
+The chunk store + per-file manifest + haves/wants negotiation pattern
+is not novel — git, casync, OSTree, restic and IPFS unixfs all solve
+variants of the same problem. Reusing one of them outright would
+trade implementation we control for a library mismatch we don't.
+Reusing the *formats* and *patterns* without the libraries is the
+better trade for our scale.
+
+**Git pack protocol.** Maps directly onto our model: trees =
+directories, blobs = files, content addressing by sha. The smart
+protocol's haves/wants negotiation is exactly what `hasBlobs` /
+`getBlobs` do today, and isomorphic-git is already in the dependency
+tree for `GitHubRepo`. Where it stops fitting: git's chunking is
+per-blob (whole file), so sub-file dedup costs a repack-driven delta
+search rather than falling out of the addressing. Its mental model is
+history — every push would be a synthetic commit and GC would need
+repack cycles. Its metadata model is poor (executable bit only). The
+binary pack format loses capnweb-text's debuggability. Verdict: *borrow
+the haves/wants pattern and the naming, not the library or the wire
+format.*
+
+**casync.** The closest fit: built by Lennart Poettering for exactly
+this problem. The `.caidx` chunk-index format is an ordered list of
+`(sha256, offset, size)` per file — our `cf_vfs_manifests.encoded` is
+a homebrew of the same shape. The `.castr` chunk store is our
+`cf_vfs_blobs`. Buzhash content-defined chunking solves the
+head-insertion problem in this appendix. Full POSIX metadata
+(symlinks, hardlinks, xattrs, mode, mtime) is built in. The blocker
+is implementation: casync is C, the only good port is Go (`desync`),
+and a production-grade TypeScript implementation does not exist. A
+WASM build is possible but the carrying cost is larger than our
+current sync implementation.
+
+**OSTree, restic, borg, IPFS unixfs.** All have the right data shape
+but the wrong centre of gravity — OS images, backup snapshots, or a
+full P2P network stack. None has a clean TypeScript runtime story for
+a DO. Worth knowing about; not worth pulling in.
+
+**Where to spend the reuse budget**
+
+Three concrete borrows give us most of the upside with no runtime
+dependency:
+
+1. **Adopt casync's `.caidx` format as our manifest encoding.** Our
+   current encoding is already structurally identical; switching to
+   the published spec costs nothing and we gain free debuggability
+   (`casync mtree`, `desync index` on the file from any container)
+   and trivial export of a workspace as `.caidx` + `.castr` for
+   backup or migration. Spec borrow, not code borrow.
+2. **Rename `hasBlobs` / `getBlobs` to align with git's haves/wants
+   vocabulary** — anyone who has read `git fetch` source recognises
+   the pattern instantly. The semantics are already the same; this
+   is purely a naming alignment.
+3. **When content-defined chunking lands (see above), vendor a
+   FastCDC / buzhash implementation rather than rolling our own.**
+   The algorithms are subtle (boundary stability, min/max bounds,
+   rolling-hash window selection) and good MIT-licensed TS ports
+   exist. This is the one place where reinventing the wheel hurts.
+
+**Where to *not* spend it**
+
+- Don't take `isomorphic-git` as the sync engine. The history model
+  fights the live-tree model on every push.
+- Don't take `libcasync` (or a WASM build) as a runtime dep. The
+  protocol surface we maintain is ~6 RPCs and a few hundred lines of
+  logic; replacing it with a library mismatch is a net loss at our
+  scale.
+- Don't adopt IPFS CIDs / multihash. The indirection buys nothing
+  inside a single DO + container pair.
