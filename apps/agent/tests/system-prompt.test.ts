@@ -41,12 +41,12 @@ describe("buildSystemPrompt — tool list", () => {
     const prompt = buildSystemPrompt({});
     const expected = [
       "read", "write", "edit",
-      "listDirectory", "stat", "mkdir", "deleteFile",
-      "findFiles", "grep",
+      "ls", "stat", "mkdir", "rm",
+      "find", "grep",
       "exec",
-      "webFetch", "webSearch",
-      "gitClone", "gitCreateRepo", "gitListRepos",
-      "gitCommit", "gitPush", "gitShare",
+      "webfetch", "websearch",
+      "git_clone", "git_create_repo", "git_list_repos",
+      "git_commit", "git_push", "git_share",
       "worker_deploy", "worker_fetch",
     ];
     for (const name of expected) {
@@ -59,9 +59,9 @@ describe("buildSystemPrompt — tool list", () => {
     expect(prompt).toMatch(/In addition to the tools above, you may have access to other custom tools/);
   });
 
-  it("describes gitShare as the way to hand a URL back to the user for local checkout", () => {
+  it("describes git_share as the way to hand a URL back to the user for local checkout", () => {
     const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/\n- gitShare: [^\n]*URL/);
+    expect(prompt).toMatch(/\n- git_share: [^\n]*URL/);
   });
 });
 
@@ -76,7 +76,7 @@ describe("buildSystemPrompt — capabilities overview", () => {
 describe("buildSystemPrompt — guidelines", () => {
   it("includes the file-exploration preference and always-on bullets", () => {
     const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/Prefer grep \/ findFiles \/ listDirectory over exec/);
+    expect(prompt).toMatch(/Prefer grep \/ find \/ ls over exec/);
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
     expect(prompt).toMatch(/Use worker_deploy \+ worker_fetch to test Workers, not exec/);

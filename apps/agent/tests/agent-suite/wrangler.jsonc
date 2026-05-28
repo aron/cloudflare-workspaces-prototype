@@ -32,7 +32,7 @@
     }
   ],
   // Pin vars so dev secrets in .dev.vars can't leak into tests — vitest-pool-workers
-  // otherwise inherits the dev env. BRAVE_API_KEY is a dummy so the webSearch tool
+  // otherwise inherits the dev env. BRAVE_API_KEY is a dummy so the websearch tool
   // registers under getTools() (tests inspect tool-name visibility, no network).
   // OpenAI key is force-cleared so the Workers AI fallback model is selected.
   "vars": {

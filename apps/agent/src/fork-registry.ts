@@ -2,11 +2,11 @@
  * SQLite-backed `ForkRegistry` for the agent's Durable Object.
  *
  * Stores one row per working-tree dir → per-session Artifacts fork.
- * Used by `gitPush` and `gitShare` so the same fork is reused across
+ * Used by `git_push` and `git_share` so the same fork is reused across
  * tool calls and DO restarts.
  *
  * Schema lives on the DO's own `sql` handle (the same one Workspace
- * uses, but in its own private table). One small write per `gitPush`
+ * uses, but in its own private table). One small write per `git_push`
  * call; reads are constant-time.
  */
 

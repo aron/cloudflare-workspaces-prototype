@@ -12,7 +12,7 @@ OPENAI_API_KEY=sk-...
 # CLOUDFLARE_API_TOKEN=
 
 # --- web search ---
-# Optional: enables the webSearch tool. Get a key at https://api-dashboard.search.brave.com/
+# Optional: enables the websearch tool. Get a key at https://api-dashboard.search.brave.com/
 # BRAVE_API_KEY=
 
 # --- identity (local dev) ---

@@ -18,7 +18,7 @@ describe("LoopTracker — step accounting", () => {
   let t: LoopTracker;
   beforeEach(() => {
     t = new LoopTracker({
-      readOnlyTools: new Set(["read", "grep", "listDirectory"]),
+      readOnlyTools: new Set(["read", "grep", "ls"]),
       reflectionBudget: 5,
       loopWindow: 10,
       loopThreshold: 3,

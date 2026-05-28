@@ -105,8 +105,8 @@ export class Agent extends Think<Env> {
 
   /** Tools that read state but never mutate it — free in the budget. */
   private static readonly READ_ONLY_TOOLS = new Set<string>([
-    "read", "listDirectory", "stat", "findFiles", "grep",
-    "webFetch", "webSearch", "gitListRepos",
+    "read", "ls", "stat", "find", "grep",
+    "webfetch", "websearch", "git_list_repos",
   ]);
 
   /**
@@ -421,7 +421,7 @@ export class Agent extends Think<Env> {
 
   /**
    * Tools the agentic loop sees this turn. Single fixed tool set —
-   * the agent has one persona, so there's no gating. webSearch is
+   * the agent has one persona, so there's no gating. websearch is
    * registered only when BRAVE_API_KEY is configured.
    */
   override getTools() {
@@ -453,14 +453,14 @@ export class Agent extends Think<Env> {
       ...pick("read",  createReadTool({ store: new WorkspaceFileStore(ws) })),
       ...pick("write", createWriteTool({ store: new WorkspaceFileStore(ws) })),
       ...pick("edit",  createEditTool({ store: new WorkspaceFileStore(ws) })),
-      ...pick("webFetch", createWebFetchTool({ ai: this.env.AI })),
+      ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
       ...(this.env.BRAVE_API_KEY
-        ? pick("webSearch", createWebSearchTool({
+        ? pick("websearch", createWebSearchTool({
             provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
           }))
         : {}),
 
-      ...pick("listDirectory", tool({
+      ...pick("ls", tool({
         description: "List files and directories at a path",
         inputSchema: z.object({ path: z.string().describe("Absolute directory path, e.g. /workspace") }),
         execute: async ({ path }) => ({ path, entries: await ws.readdir(path) }),
@@ -482,13 +482,13 @@ export class Agent extends Think<Env> {
         execute: async ({ path }) => { await ws.mkdir(path); return { path, created: true }; },
       })),
 
-      ...pick("deleteFile", tool({
+      ...pick("rm", tool({
         description: "Delete a file or directory (recursive)",
         inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
         execute: async ({ path }) => { await ws.deleteFile(path); return { path, deleted: true }; },
       })),
 
-      ...pick("findFiles", tool({
+      ...pick("find", tool({
         description: "Search for files matching a pattern under a directory",
         inputSchema: z.object({
           directory: z.string().describe("Directory to search under, e.g. /workspace"),
@@ -516,15 +516,15 @@ export class Agent extends Think<Env> {
       ...pick("exec", tool({
         description:
           "Run a shell command in the workspace sandbox. " +
-          "Prefer the dedicated tools first: read/write/edit/listDirectory/stat/" +
-          "mkdir/deleteFile/findFiles/grep for file ops, worker_deploy/worker_fetch " +
+          "Prefer the dedicated tools first: read/write/edit/ls/stat/" +
+          "mkdir/rm/find/grep for file ops, worker_deploy/worker_fetch " +
           "for Cloudflare Workers, run for compiled WASM binaries. " +
           "Primary use: compilation and build-tool invocation (zig, go, npm, etc.). " +
           "Fallback use: after the same dedicated tool has failed at least twice " +
           "in a row on the same input with errors that look like tool-level bugs " +
           "(not user input errors), it is acceptable to drop down to `exec` to " +
           "achieve the same effect \u2014 e.g. `cat`/`sed`/`mv` when `read`/`edit` " +
-          "keeps erroring, `ls` when `listDirectory` fails. When you do this, " +
+          "keeps erroring, shell `ls` when the `ls` tool fails. When you do this, " +
           "say so briefly in your response so the human can see the workaround " +
           "and report the underlying bug. Do not use `exec` as a first attempt " +
           "for anything a dedicated tool covers.",
@@ -541,25 +541,25 @@ export class Agent extends Think<Env> {
         },
       })),
 
-      ...pick("gitClone", createGitCloneTool({
+      ...pick("git_clone", createGitCloneTool({
         workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),
-      ...pick("gitCreateRepo", createGitCreateRepoTool({
+      ...pick("git_create_repo", createGitCreateRepoTool({
         workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),
-      ...pick("gitListRepos", createGitListReposTool({
+      ...pick("git_list_repos", createGitListReposTool({
         artifacts: this.env.Artifacts,
       })),
-      ...pick("gitCommit", createGitCommitTool({
+      ...pick("git_commit", createGitCommitTool({
         workspace: gitWorkspace,
       })),
-      ...pick("gitPush", createGitPushTool({
+      ...pick("git_push", createGitPushTool({
         workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),
-      ...pick("gitShare", createGitShareTool({
+      ...pick("git_share", createGitShareTool({
         workspace: gitWorkspace,
         artifacts: this.env.Artifacts,
       })),

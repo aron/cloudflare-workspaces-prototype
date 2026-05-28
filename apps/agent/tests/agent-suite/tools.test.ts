@@ -3,7 +3,7 @@
  *
  * Personas are gone — there is no more `extraTools` gating. The agent
  * always exposes the same surface: the file-ops set, exec, web tools
- * (webSearch only when BRAVE_API_KEY is set), and the Worker tools.
+ * (websearch only when BRAVE_API_KEY is set), and the Worker tools.
  *
  * We expose the active tool-name set via a small introspection RPC
  * (`activeToolNames()`) rather than driving a model turn — the contract
@@ -23,12 +23,12 @@ async function freshAgent(): Promise<DurableObjectStub<Agent>> {
 
 const EXPECTED_TOOLS = [
   "read", "write", "edit",
-  "listDirectory", "stat", "mkdir", "deleteFile",
-  "findFiles", "grep",
+  "ls", "stat", "mkdir", "rm",
+  "find", "grep",
   "exec",
-  "webFetch", "webSearch",  // webSearch only because BRAVE_API_KEY is set in wrangler.test
+  "webfetch", "websearch",  // websearch only because BRAVE_API_KEY is set in wrangler.test
   "worker_deploy", "worker_fetch",
-  "gitClone", "gitCommit", "gitPush", "gitShare",
+  "git_clone", "git_commit", "git_push", "git_share",
 ] as const;
 
 describe("Agent — getTools()", () => {
