@@ -87,6 +87,45 @@ export interface DirtyBulk {
   maxRev:  number;
 }
 
+// ---- : manifest-aware pull -----------------------
+
+/**
+ * One chunk in a file's manifest: its sha256 hash and byte length.
+ * Order in the surrounding `chunks` array is the chunk index in the
+ * file. No offsets — unlike VfsChunkRef, manifests are byte-free on
+ * the wire; the receiver fetches missing blobs out-of-band via
+ * `getBlobs(hashes)`.
+ */
+export interface ManifestChunk {
+  hash: Uint8Array;  // 32-byte sha256(chunk_bytes)
+  size: number;      // <= CHUNK_SIZE; last chunk may be shorter
+}
+
+/**
+ * Manifest-aware change record. Files carry `chunks` (the ordered
+ * (hash, size) list); dirs carry just mode/mtime; deletes carry just
+ * the path. Drop-in replacement for VfsChangeLite on the stage-3 wire.
+ */
+export interface ManifestChange {
+  seq:    number;
+  path:   string;
+  op:     "upsert" | "delete";
+  type?:  "file" | "dir";
+  mode?:  number;
+  mtime?: number;
+  chunks?: ManifestChunk[];
+}
+
+/**
+ * Stage-3 pull return shape. No blob; the receiver computes its
+ * missing set via `hasBlobs(union of chunk hashes)` and streams it
+ * back via `getBlobs(missing)`.
+ */
+export interface ManifestBulk {
+  changes: ManifestChange[];
+  maxRev:  number;
+}
+
 export interface FileStat {
   type:  "file" | "dir";
   mode:  number;
@@ -134,6 +173,26 @@ export interface ContainerRpc {
    * `DirtyBulk.maxRev` use the monotonic-revision protocol .
    */
   pullDirty(sinceRev?: number, ignore?: string[]):      Promise<DirtyBulk>;
+  /**
+   * Manifest-aware pull . Returns one record per
+   * dirty path with a `chunks: (hash, size)[]` array instead of inline
+   * bytes. The caller follows up with `hasBlobs` + `getBlobs` for the
+   * subset of chunk hashes it doesn't already have. Identical content
+   * at multiple paths is one entry per blob hash on the wire.
+   */
+  pullDirtyV2(sinceRev?: number, ignore?: string[]):    Promise<ManifestBulk>;
+  /**
+   * Given a list of chunk hashes, return the subset the container has
+   * stored. Used by the manifest-aware pull and by the chunk-mode push
+   * (DO -> container).
+   */
+  hasBlobs(hashes: Uint8Array[]):                       Promise<Uint8Array[]>;
+  /**
+   * Return the bytes for each hash, in request order. Throws if any
+   * hash isn't present — callers must dedupe and probe via hasBlobs
+   * first.
+   */
+  getBlobs(hashes: Uint8Array[]):                       Promise<Uint8Array[]>;
   exec(command: string, cwd?: string):               Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 

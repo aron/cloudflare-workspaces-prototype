@@ -20,6 +20,7 @@ import { asFactory } from "./mounts/index.js";
 import { pathStartsWith, type ContainerRpc, type ExecResult, type GrepHit, type FileStat, type VfsChange } from "./shared/index.js";
 import { createQueue, serialize, type Queue } from "./serialize.js";
 import { parseWorkspacePath } from "./path.js";
+import { chunkHashUnion, assembleFileBytes, hashKey } from "./pull-assembly.js";
 
 export interface WorkspaceOptions {
   /** DO storage to mount the VFS on. */
@@ -437,13 +438,27 @@ export class Workspace {
     //   - outside any mount: applied to the VFS normally.
     //   - under a read-only mount: dropped (mounts are read-only end-to-end).
     //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    // Bulk pull: one stream for all file contents instead of one stream
-    // per file.  Cuts capnweb's per-stream materialization round-trips.
+    // Manifest-aware pull . The container ships
+    // one record per dirty path with (hash, size)[] per file — no
+    // inline bytes. We then probe our own content-addressed store and
+    // only ask the container for the bytes we don't already have.
+    // Identical content at multiple paths, or content the DO already
+    // holds from a previous pull, costs zero bytes over the wire.
     const ignore = this.opts.pullIgnore ?? ["node_modules"];
-    const bulk = await api.pullDirty(this.pullSinceRev, ignore);
-    // Drain the blob once into a single Buffer-like view so each change
-    // can slice its content out without re-streaming.
-    const blobBytes = await readStreamToUint8Array(bulk.blob);
+    const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
+
+    // Collect the union of chunk hashes across this pull, ask our own
+    // Vfs which we lack, and fetch just those from the container.
+    const allHashes = chunkHashUnion(bulk);
+    const wantList  = this.vfs.missingBlobs(allHashes);
+    const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
+    const fetched = new Map<string, Uint8Array>();
+    for (let i = 0; i < wantList.length; i++) {
+      fetched.set(hashKey(wantList[i]), wantBytes[i]);
+    }
+    const lookup = (h: Uint8Array): Uint8Array | null => {
+      return fetched.get(hashKey(h)) ?? this.vfs.readBlob(h);
+    };
 
     type ApplyEntry = {
       path: string;
@@ -452,7 +467,6 @@ export class Workspace {
       mode?: number;
       mtime?: number;
       bytes?: Uint8Array;
-      chunks?: Array<{ idx: number; bytes: Uint8Array }>;
     };
     type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
     const applyEntries: ApplyEntry[] = [];
@@ -462,16 +476,10 @@ export class Workspace {
       if (c.type  !== undefined) e.type  = c.type;
       if (c.mode  !== undefined) e.mode  = c.mode;
       if (c.mtime !== undefined) e.mtime = c.mtime;
-      if (c.op === "upsert" && c.type === "file") {
-        if (c.chunks) {
-          e.chunks = c.chunks.map(k => ({
-            idx:   k.idx,
-            bytes: blobBytes.subarray(k.offset, k.offset + k.size),
-          }));
-        } else if (c.contentSize !== undefined) {
-          const off = c.contentOffset ?? 0;
-          e.bytes = blobBytes.subarray(off, off + c.contentSize);
-        }
+      if (c.op === "upsert" && c.type === "file" && c.chunks) {
+        // Every byte is content-verified by construction: the lookup
+        // key IS the chunk hash.
+        e.bytes = assembleFileBytes(c.chunks, lookup);
       }
       const root = this.mountRootOf(c.path);
       if (root === null) {

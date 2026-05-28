@@ -8,7 +8,15 @@
  */
 
 import type { Vfs } from "./vfs.js";
-import { CHUNK_SIZE, type VfsChange, type VfsChangeLite, type VfsChunkRef } from "../shared/index.js";
+import {
+  CHUNK_SIZE,
+  type ManifestBulk,
+  type ManifestChange,
+  type ManifestChunk,
+  type VfsChange,
+  type VfsChangeLite,
+  type VfsChunkRef,
+} from "../shared/index.js";
 import { makeIgnore } from "./ignore.js";
 
 /**
@@ -171,4 +179,127 @@ export function computeDirtyNodes(
     change: { ...e.change, seq: i },
     bytes: e.bytes,
   }));
+}
+
+// ---- : manifest-aware pull --------------------------
+
+/**
+ * Compute the manifest-aware pull from a container Vfs. Same selection
+ * as `computeBulkPull` (rev > sinceRev, plus tombstones), but every
+ * file entry carries `chunks: (hash, size)[]` from the container's
+ * per-chunk hash index instead of inline bytes. The caller (DO side)
+ * follows up with `hasBlobs` + `getBlobs` to fetch only the byte slices
+ * it doesn't already have.
+ *
+ * `maxRev` semantics match `computeBulkPull`.
+ */
+export function computeManifestPull(
+  vfs: Vfs,
+  sinceRev: number,
+  ignore?: string[],
+): ManifestBulk {
+  const isIgnored = makeIgnore(ignore);
+  type Entry = { rev: number; change: ManifestChange };
+  const entries: Entry[] = [];
+
+  for (const { path, node } of vfs.allFiles()) {
+    if (node.type === "symlink") continue;  // wire format doesn't carry symlinks yet
+    if (node.rev <= sinceRev) continue;
+    if (isIgnored(path)) continue;
+    if (node.type !== "file") {
+      entries.push({
+        rev: node.rev,
+        change: { seq: 0, path, op: "upsert", type: "dir", mode: node.mode, mtime: node.mtime },
+      });
+      continue;
+    }
+    // File: ask the Vfs for its per-chunk hash view. The hashes are
+    // computed lazily on first read of any dirty slot — see
+    // vfs.chunkHashes().
+    const hashes = vfs.chunkHashes(path);
+    const chunks: ManifestChunk[] = hashes.map((hash, idx) => ({
+      hash,
+      size: chunkSizeAt(node.size, idx),
+    }));
+    entries.push({
+      rev: node.rev,
+      change: { seq: 0, path, op: "upsert", type: "file", mode: node.mode, mtime: node.mtime, chunks },
+    });
+  }
+  for (const { path, rev, ts } of vfs.getTombstones(sinceRev)) {
+    if (isIgnored(path)) continue;
+    entries.push({
+      rev,
+      change: { seq: 0, path, op: "delete", mtime: ts },
+    });
+  }
+  entries.sort((a, b) => a.rev - b.rev);
+  const changes: ManifestChange[] = entries.map((e, i) => ({ ...e.change, seq: i }));
+  return { changes, maxRev: vfs.currentRev() };
+}
+
+/**
+ * Compute the byte length of chunk `idx` for a file of `size` bytes.
+ * All chunks are CHUNK_SIZE except the last one, which is the tail.
+ */
+function chunkSizeAt(size: number, idx: number): number {
+  const numChunks = Math.max(1, Math.ceil(size / CHUNK_SIZE));
+  if (idx < numChunks - 1) return CHUNK_SIZE;
+  // Last chunk: file size minus all prior full chunks. Empty files
+  // have one zero-length chunk.
+  return size - (numChunks - 1) * CHUNK_SIZE;
+}
+
+/**
+ * Return the byte slices for each requested hash, in request order.
+ * The hash → bytes lookup walks the Vfs's per-file chunk-hash index;
+ * because identical content shares hashes, the first match wins.
+ *
+ * Throws if any requested hash isn't held by the Vfs. Callers must
+ * dedupe and probe via hasBlobs() first.
+ */
+export function getBlobs(vfs: Vfs, hashes: Uint8Array[]): Buffer[] {
+  // Build a one-shot hash → (path, idx) index. Cheap relative to the
+  // request scope and avoids quadratic scans for multi-hash requests.
+  const index = new Map<string, { path: string; idx: number }>();
+  for (const { path, node } of vfs.allFiles()) {
+    if (node.type !== "file") continue;
+    const hs = vfs.chunkHashes(path);
+    for (let i = 0; i < hs.length; i++) {
+      const key = hashKey(hs[i]);
+      if (!index.has(key)) index.set(key, { path, idx: i });
+    }
+  }
+  const out: Buffer[] = [];
+  for (const h of hashes) {
+    const hit = index.get(hashKey(h));
+    if (!hit) throw new Error(`getBlobs: unknown hash ${Buffer.from(h).toString("hex")}`);
+    out.push(readChunkBytes(vfs, hit.path, hit.idx));
+  }
+  return out;
+}
+
+/**
+ * Return the subset of `hashes` the container does NOT have. Helper
+ * for the wire-level dedup probe (manifest-aware pull, piece 3).
+ */
+export function missingBlobs(vfs: Vfs, hashes: Uint8Array[]): Uint8Array[] {
+  const have = new Set<string>();
+  for (const { path, node } of vfs.allFiles()) {
+    if (node.type !== "file") continue;
+    for (const h of vfs.chunkHashes(path)) have.add(hashKey(h));
+  }
+  return hashes.filter(h => !have.has(hashKey(h)));
+}
+
+function hashKey(h: Uint8Array): string {
+  return Buffer.from(h).toString("latin1");  // raw 32-byte string key
+}
+
+function readChunkBytes(vfs: Vfs, path: string, idx: number): Buffer {
+  const node = vfs.get(path);
+  if (!node || node.type !== "file") throw new Error(`readChunkBytes: not a file: ${path}`);
+  const start = idx * CHUNK_SIZE;
+  const end   = Math.min(node.size, start + CHUNK_SIZE);
+  return node.buf.slice(start, end);
 }

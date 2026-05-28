@@ -317,6 +317,36 @@ export class Vfs {
     return out;
   }
 
+  /**
+   * Look up a content-addressed blob by sha256 hash. Returns null if
+   * the hash isn't in `vfs_blobs`. Used by the manifest-aware pull
+   * to assemble files whose chunks the DO already
+   * has from a prior pull or from a different path.
+   */
+  readBlob(hash: Uint8Array): Uint8Array | null {
+    const rows = [...this.sql.exec<{ bytes: ArrayBuffer }>(
+      `SELECT bytes FROM vfs_blobs WHERE hash = ?`, hash,
+    )];
+    return rows[0] ? new Uint8Array(rows[0].bytes) : null;
+  }
+
+  /**
+   * Given a set of chunk hashes, return the subset that are missing
+   * from `vfs_blobs`. Used by the manifest-aware pull to drive
+   * `getBlobs` over the minimal set.
+   */
+  missingBlobs(hashes: Uint8Array[]): Uint8Array[] {
+    if (hashes.length === 0) return [];
+    const out: Uint8Array[] = [];
+    for (const h of hashes) {
+      const rows = [...this.sql.exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM vfs_blobs WHERE hash = ?`, h,
+      )];
+      if ((rows[0]?.n ?? 0) === 0) out.push(h);
+    }
+    return out;
+  }
+
   /** Read a file as a ReadableStream — used by the sync protocol. */
   readFileAsStream(path: string): ReadableStream<Uint8Array> {
     const chunks = [...this.sql.exec<{ bytes: ArrayBuffer }>(

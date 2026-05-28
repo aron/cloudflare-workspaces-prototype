@@ -21,7 +21,7 @@ import { newWebSocketRpcSession, RpcTarget } from 'capnweb';
 import { createWriteStream } from 'fs';
 import { Vfs } from './vfs.js';
 import { mount } from './fuse-driver.js';
-import type { VfsEntry, VfsChange, VfsChangeLite, DirtyBulk } from '../shared/index.js';
+import type { VfsEntry, VfsChange, VfsChangeLite, DirtyBulk, ManifestBulk } from '../shared/index.js';
 
 const LOG_FILE = process.env.LOG_FILE ?? '/tmp/server.log';
 const logStream = createWriteStream(LOG_FILE, { flags: 'a' });
@@ -62,7 +62,7 @@ async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Uint8
 
 // Pull-scope matcher used by getDirtyNodes / pullDirty.  See ./ignore.ts.
 import { makeIgnore } from './ignore.js';
-import { computeBulkPull, computeDirtyNodes } from './pull.js';
+import { computeBulkPull, computeDirtyNodes, computeManifestPull, getBlobs as readBlobs, missingBlobs } from './pull.js';
 
 // ---- RpcTarget served to the DO ----
 
@@ -242,6 +242,39 @@ class ContainerRpc extends RpcTarget {
     try { scan(MOUNT); } catch {}
     return results;
   }
+
+  // ---- : manifest-aware pull --------------------
+
+  async pullDirtyV2(sinceRev = 0, ignore?: string[]): Promise<ManifestBulk> {
+    if (!this.fuseActive) {
+      // The no-FUSE fallback has no in-memory Vfs to source chunk
+      // hashes from. Callers that hit this branch should stay on
+      // pullDirty (bytes-carrying) until we add a fallback hasher.
+      throw new Error('pullDirtyV2 requires FUSE-active mode');
+    }
+    const out = computeManifestPull(this.vfs, sinceRev, ignore);
+    // Optimistic clear of dirty state, same contract as pullDirty:
+    // if the DO's apply fails the file's rev is still > sinceRev so
+    // the next pull catches it again.
+    for (const c of out.changes) {
+      if (c.op === 'upsert' && c.type === 'file') this.vfs.dirty.clear(c.path);
+    }
+    return out;
+  }
+
+  async hasBlobs(hashes: Uint8Array[]): Promise<Uint8Array[]> {
+    if (!this.fuseActive) throw new Error('hasBlobs requires FUSE-active mode');
+    // Container reports MISSING hashes — caller subtracts mentally:
+    // requested - missing = present. We picked this direction so the
+    // typical case (peer mostly has nothing) ships short payloads.
+    return missingBlobs(this.vfs, hashes);
+  }
+
+  async getBlobs(hashes: Uint8Array[]): Promise<Uint8Array[]> {
+    if (!this.fuseActive) throw new Error('getBlobs requires FUSE-active mode');
+    return readBlobs(this.vfs, hashes).map(b => new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
+  }
+
 }
 
 // ---- main ----
