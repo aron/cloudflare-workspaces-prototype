@@ -55,6 +55,7 @@ import { readIdentity } from "./identity.js";
 import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
+import { resolveOrphanToolCalls } from "./orphan-tools.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { WorkerDeployer } from "./worker/deploy.js";
@@ -218,8 +219,33 @@ export class Agent extends Think<Env> {
    *     `store: false` + `include: reasoning.encrypted_content` so
    *     reasoning is round-tripped inline rather than referenced by id.
    */
-  override beforeTurn(ctx?: TurnContext) {
+  override async beforeTurn(ctx?: TurnContext) {
     this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+
+    // Patch dangling tool calls before the model sees them. A tool
+    // result that never lands (exec timeout, container loss, DO eviction
+    // mid-call) leaves the part in `input-available` / `input-streaming`
+    // / `approval-requested`. convertToModelMessages then emits the
+    // assistant's tool call with no matching tool-result row, the
+    // provider rejects it, and the thread wedges. Rewrite those parts
+    // to `output-error: cancelled` so the SDK emits a proper result row,
+    // and persist the patch so reconnects and future turns see it too.
+    const swept = resolveOrphanToolCalls(this.messages);
+    if (swept.changed) {
+      console.warn(
+        `[Agent] patched ${swept.patched.length} orphan tool call(s):`,
+        swept.patched,
+      );
+      for (let i = 0; i < swept.messages.length; i++) {
+        const patched = swept.messages[i];
+        const original = this.messages[i];
+        if (patched !== original) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await this.updateMessageInHistory(patched as any);
+        }
+      }
+    }
+
     // Reset per-turn budget/loop state at the start of a fresh user
     // turn. Continuation turns (auto-continue after tool result, or
     // our injected reflection itself) keep the counters so the guard
@@ -255,14 +281,15 @@ export class Agent extends Think<Env> {
    * require a real model call. Used by tests to assert the persona
    * prompt, ZDR posture, and that a model object is constructable.
    */
-  previewTurnConfig(): {
+  async previewTurnConfig(): Promise<{
     systemPrompt: string;
-    providerOptions: ReturnType<Agent["beforeTurn"]>["providerOptions"];
+    providerOptions: Awaited<ReturnType<Agent["beforeTurn"]>>["providerOptions"];
     modelDefined: boolean;
-  } {
+  }> {
+    const cfg = await this.beforeTurn();
     return {
       systemPrompt: this.getSystemPrompt(),
-      providerOptions: this.beforeTurn().providerOptions,
+      providerOptions: cfg.providerOptions,
       modelDefined: (() => {
         // getModel() may throw if the AI binding is absent (tests).
         try { return this.getModel() !== undefined; } catch { return false; }
