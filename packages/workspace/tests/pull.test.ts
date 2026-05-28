@@ -46,15 +46,14 @@ describe("computeBulkPull", () => {
     }
   });
 
-  test("skips files whose mtime is <= since (already-pulled watermark)", async () => {
+  test("skips files whose rev is <= sinceRev (already-pulled watermark)", () => {
     const vfs = new Vfs();
     vfs.mkdir("/workspace");
     vfs.putFile("/workspace/old.txt", TEXT("x"));
-    // Bump time so the next write is strictly later.  Vfs uses Date.now();
-    // a 5ms gap is enough on every realistic clock.
-    await new Promise(r => setTimeout(r, 5));
-    const watermark = Date.now();
-    await new Promise(r => setTimeout(r, 5));
+    // Watermark snapshot: any subsequent mutation gets a strictly
+    // larger rev. removed the dependency on wall-clock
+    // mtime here — same-millisecond writes are still distinguishable.
+    const watermark = vfs.currentRev();
     vfs.putFile("/workspace/new.txt", TEXT("y"));
 
     const { changes } = computeBulkPull(vfs, watermark);

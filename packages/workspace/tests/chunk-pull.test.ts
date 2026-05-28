@@ -48,7 +48,7 @@ describe("computeBulkPull (chunk mode)", () => {
     vfs.dirty.clear("/workspace/big");
 
     // Edit a single byte at the start of chunk 1.
-    const since = Date.now();
+    const since = vfs.currentRev();
     // sleep 5ms so the next mtime > since
     const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
     return sleep(5).then(() => {
@@ -78,7 +78,7 @@ describe("computeBulkPull (chunk mode)", () => {
     vfs.mkdir("/workspace");
     vfs.putFile("/workspace/big", BUF(Math.floor(CHUNK_SIZE * 2.5), 0xaa));
     vfs.dirty.clear("/workspace/big");
-    const since = Date.now();
+    const since = vfs.currentRev();
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       // Write 2 bytes starting one byte before the chunk-1 boundary.
       vfs.write("/workspace/big", Buffer.from([0x11, 0x22]), CHUNK_SIZE - 1);
@@ -106,7 +106,7 @@ describe("computeBulkPull (chunk mode)", () => {
     const tailBytes = 10;
     vfs.putFile("/workspace/short-tail", BUF(CHUNK_SIZE + tailBytes, 0xaa));
     vfs.dirty.clear("/workspace/short-tail");
-    const since = Date.now();
+    const since = vfs.currentRev();
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       vfs.write("/workspace/short-tail", Buffer.from([0xff]), CHUNK_SIZE + 5);
       const out = computeBulkPull(vfs, since);
@@ -124,7 +124,7 @@ describe("computeBulkPull (chunk mode)", () => {
     vfs.mkdir("/workspace");
     vfs.putFile("/workspace/x", BUF(CHUNK_SIZE * 2, 0xaa));
     vfs.dirty.clear("/workspace/x");
-    const since = Date.now();
+    const since = vfs.currentRev();
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       vfs.write("/workspace/x", Buffer.from([0xff]), 0);
       // Subsequent whole-file replace.  Whole-file wins.
@@ -143,7 +143,7 @@ describe("computeBulkPull (chunk mode)", () => {
     vfs.putFile("/workspace/file1", BUF(CHUNK_SIZE * 2, 0xaa));
     vfs.dirty.clear("/workspace/file1");
     // file2: brand new (whole-file mode)
-    const since = Date.now();
+    const since = vfs.currentRev();
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       vfs.write("/workspace/file1", Buffer.from([0x55]), CHUNK_SIZE);  // dirties chunk 1
       vfs.putFile("/workspace/file2", Buffer.from("brand new"));        // whole-file
@@ -179,7 +179,7 @@ describe("dirty-state lifecycle around pulls", () => {
     vfs.mkdir("/workspace");
     vfs.putFile("/workspace/a", BUF(CHUNK_SIZE * 2, 0xaa));
     vfs.dirty.clear("/workspace/a");
-    const since = Date.now();
+    const since = vfs.currentRev();
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       vfs.write("/workspace/a", Buffer.from([0xff]), CHUNK_SIZE);
       computeBulkPull(vfs, since);
@@ -211,7 +211,7 @@ describe("end-to-end: whole-file pull then chunk pull", () => {
     for (const c of r1.changes) {
       if (c.op === "upsert" && c.type === "file") vfs.dirty.clear(c.path);
     }
-    const since = c1.mtime!;
+    const since = r1.maxRev;
 
     return new Promise<void>(r => setTimeout(r, 5)).then(() => {
       vfs.write("/workspace/big", Buffer.from([0xff]), CHUNK_SIZE);

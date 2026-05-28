@@ -144,23 +144,28 @@ class ContainerRpc extends RpcTarget {
    */
   async pullDirty(since = 0, ignore?: string[]): Promise<DirtyBulk> {
     if (this.fuseActive) {
-      const { changes, blob } = computeBulkPull(this.vfs, since, ignore);
+      const { changes, blob, maxRev } = computeBulkPull(this.vfs, since, ignore);
       // Clear dirty state for every file we shipped.  Optimistic: if
-      // the DO's apply fails the file's mtime is still > since so the
+      // the DO's apply fails the file's rev is still > since so the
       // next pull catches it again — just in whole-file mode this time.
-      // Symmetric to the existing pullSinceMs-advances-on-success rule.
+      // Symmetric to the existing watermark-advances-on-success rule.
       for (const c of changes) {
         if (c.op === "upsert" && c.type === "file") this.vfs.dirty.clear(c.path);
       }
-      return { changes, blob: bufToStream(blob) };
+      return { changes, blob: bufToStream(blob), maxRev };
     }
     // No-FUSE fallback: scan the real /workspace directory.  Same wire
     // shape as the FUSE path so the DO doesn't need to know which side
-    // produced the result.
+    // produced the result.  This path retains millisecond-mtime
+    // selection (no in-memory Vfs to provide a monotonic rev); it is
+    // dev/test only. The maxRev we return is the largest mtime seen,
+    // which is correct for watermark advancement modulo the same-ms
+    // race fixes for the FUSE path.
     const isIgnored = makeIgnore(ignore);
     type Entry = { ts: number; change: VfsChangeLite; buf?: Buffer };
     const entries: Entry[] = [];
     const stack: string[] = [MOUNT];
+    let maxMs = since;
     while (stack.length) {
       const dir = stack.pop()!;
       let dirents: fs.Dirent[];
@@ -171,12 +176,14 @@ class ContainerRpc extends RpcTarget {
         if (ent.isDirectory()) {
           const st = fs.statSync(abs);
           if (st.mtimeMs > since) {
+            if (st.mtimeMs > maxMs) maxMs = st.mtimeMs;
             entries.push({ ts: st.mtimeMs, change: { seq: 0, path: abs, op: 'upsert', type: 'dir', mode: 0o40755, mtime: st.mtimeMs } });
           }
           stack.push(abs);
         } else if (ent.isFile()) {
           const st = fs.statSync(abs);
           if (st.mtimeMs > since) {
+            if (st.mtimeMs > maxMs) maxMs = st.mtimeMs;
             const buf = fs.readFileSync(abs);
             entries.push({
               ts: st.mtimeMs,
@@ -199,7 +206,7 @@ class ContainerRpc extends RpcTarget {
       off += e.buf!.length;
     }
     const changes: VfsChangeLite[] = entries.map((e, i) => ({ ...e.change, seq: i }));
-    return { changes, blob: bufToStream(blob) };
+    return { changes, blob: bufToStream(blob), maxRev: maxMs };
   }
 
   async getDirtyNodes(since = 0, ignore?: string[]): Promise<VfsChange[]> {

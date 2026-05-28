@@ -6,7 +6,7 @@
  *   - direct file ops that round-trip nothing through the container
  *
  * Construction is cheap: nothing networks until you call `exec()` or
- * `warmup()`. Sync watermarks (pushSeq / pullSinceMs) are persisted to the
+ * `warmup()`. Sync watermarks (pushSeq / pullSinceRev) are persisted to the
  * DO storage so reconnects/restarts resume cleanly.
  */
 
@@ -76,8 +76,11 @@ export class Workspace {
   private resolvedSandboxName: string | null = null;
 
   // Sync watermarks (persisted in _workspace_watermark)
-  private pushSeq     = 0;  // last VFS `seq` pushed to the container
-  private pullSinceMs = 0;  // last container-side mtime seen on pull
+  private pushSeq      = 0;  // last VFS `seq` pushed to the container
+  // Last container-side monotonic revision seen on pull .
+  // Replaces the old wall-clock mtime watermark, which lost same-millisecond
+  // writes once it advanced past them.
+  private pullSinceRev = 0;
 
   // ---- mounts ----
   /** Normalized mount roots (no trailing slash), sorted longest-first for prefix matching. */
@@ -102,8 +105,12 @@ export class Workspace {
     this.vfs = new Vfs(this.sql);
     this.sql.exec(WATERMARK_TABLE);
     for (const r of this.sql.exec(`SELECT k, v FROM _workspace_watermark`) as Iterable<{ k: string; v: number }>) {
-      if (r.k === "pushSeq")     this.pushSeq     = r.v;
-      if (r.k === "pullSinceMs") this.pullSinceMs = r.v;
+      if (r.k === "pushSeq")      this.pushSeq      = r.v;
+      // Stage-1 migration: read the new key if present,
+      // and tolerate the legacy `pullSinceMs` row by leaving the rev
+      // watermark at 0 (the next pull re-fetches everything from
+      // rev 0 — a one-time cost on the first boot post-upgrade).
+      if (r.k === "pullSinceRev") this.pullSinceRev = r.v;
     }
 
     // Normalize and reconcile configured mounts against the persisted state.
@@ -392,7 +399,7 @@ export class Workspace {
     // Bulk pull: one stream for all file contents instead of one stream
     // per file.  Cuts capnweb's per-stream materialization round-trips.
     const ignore = this.opts.pullIgnore ?? ["node_modules"];
-    const bulk = await api.pullDirty(this.pullSinceMs, ignore);
+    const bulk = await api.pullDirty(this.pullSinceRev, ignore);
     // Drain the blob once into a single Buffer-like view so each change
     // can slice its content out without re-streaming.
     const blobBytes = await readStreamToUint8Array(bulk.blob);
@@ -409,12 +416,11 @@ export class Workspace {
     type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
     const applyEntries: ApplyEntry[] = [];
     const mirrors:      MirrorEntry[] = [];
-    let maxMtime = this.pullSinceMs;
     for (const c of bulk.changes) {
       const e: ApplyEntry = { path: c.path, op: c.op };
       if (c.type  !== undefined) e.type  = c.type;
       if (c.mode  !== undefined) e.mode  = c.mode;
-      if (c.mtime !== undefined) { e.mtime = c.mtime; if (c.mtime > maxMtime) maxMtime = c.mtime; }
+      if (c.mtime !== undefined) e.mtime = c.mtime;
       if (c.op === "upsert" && c.type === "file") {
         if (c.chunks) {
           e.chunks = c.chunks.map(k => ({
@@ -439,8 +445,13 @@ export class Workspace {
 
     if (applyEntries.length) {
       this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
-      this.pullSinceMs = maxMtime;
     }
+    // Advance the rev watermark even on an empty pull, so a successive
+    // pull doesn't re-scan the same range. The container reports maxRev
+    // = currentRev when nothing changed, so this is safe.
+    this.pullSinceRev = bulk.maxRev;
+    // Mirror writable-mount changes to R2 using the bytes we already
+    // captured above, so we don't pay a second SQLite read per file.
     if (mirrors.length) {
       await this.runBounded(mirrors, async (m) => {
         if (m.op === "delete") {
@@ -654,9 +665,13 @@ export class Workspace {
   }
 
   private saveWatermarks(): void {
+    // : persist the monotonic-revision watermark. The legacy
+    // `pullSinceMs` row is intentionally left in place if present — it
+    // does no harm (we don't read it) and DELETE-on-write would add a
+    // round-trip on every exec for a one-time migration.
     this.sql.exec(
-      `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceMs', ?)`,
-      this.pushSeq, this.pullSinceMs,
+      `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceRev', ?)`,
+      this.pushSeq, this.pullSinceRev,
     );
   }
 }

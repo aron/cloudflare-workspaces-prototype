@@ -75,10 +75,16 @@ export interface VfsChunkRef {
  * Return shape of the bulk pull: one stream for the concatenated bytes
  * of every file in `changes`, in the order those files appear.  Empty
  * blob if there are no file upserts.
+ *
+ * `maxRev` is the container-side monotonic revision the receiver should
+ * adopt after a successful apply . It equals `since` when
+ * nothing changed and `vfs.currentRev()` when changes were collected;
+ * either way, advancing to `maxRev` makes the next pull strictly after.
  */
 export interface DirtyBulk {
   changes: VfsChangeLite[];
   blob:    ReadableStream<Uint8Array>;
+  maxRev:  number;
 }
 
 export interface FileStat {
@@ -113,13 +119,21 @@ export interface ExecOptions {
 export interface ContainerRpc {
   snapshot():                                        Promise<{ entries: VfsEntry[]; seq: number }>;
   applyChanges(changes: VfsChange[]):                Promise<{ seq: number }>;
-  getDirtyNodes(since?: number, ignore?: string[]):  Promise<VfsChange[]>;
+  /**
+   * Return every node and tombstone with rev strictly greater than
+   * `sinceRev` (: monotonic container-side revision). The
+   * parameter is unchanged on the wire but the semantics moved from
+   * wall-clock mtime to revision; the no-FUSE fallback retains mtime
+   * selection for dev/test only.
+   */
+  getDirtyNodes(sinceRev?: number, ignore?: string[]):  Promise<VfsChange[]>;
   /**
    * Bulk pull: lightweight metadata records plus a single byte stream
    * holding every file's content concatenated.  Cuts capnweb's
-   * per-stream round-trips down to one stream total.
+   * per-stream round-trips down to one stream total.  `sinceRev` and
+   * `DirtyBulk.maxRev` use the monotonic-revision protocol .
    */
-  pullDirty(since?: number, ignore?: string[]):      Promise<DirtyBulk>;
+  pullDirty(sinceRev?: number, ignore?: string[]):      Promise<DirtyBulk>;
   exec(command: string, cwd?: string):               Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
