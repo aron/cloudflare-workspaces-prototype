@@ -286,7 +286,14 @@ export class Agent extends Think<Env> {
       return;
     }
     // Pull dirty files; same rationale as the live tool's finally clause.
-    try { await ws.pullDirtyAfter(); } catch { /* best effort */ }
+    // Failures here mean the VFS stays out of sync with the container until
+    // the next exec — log them at warn so the asymmetry is visible instead of
+    // silently degrading.
+    try {
+      await ws.pullDirtyAfter();
+    } catch (err) {
+      console.warn("[Agent] pullDirtyAfter failed during exec recovery:", err);
+    }
     await this._patchExecPart(toolCallId, buf.snapshot(processId));
   }
 
@@ -925,10 +932,14 @@ export class Agent extends Think<Env> {
           opts.abortSignal.removeEventListener("abort", onAbort);
         }
         inflight.clear(opts.toolCallId);
-        // Pull files the container wrote back into the VFS. Errors are
-        // non-fatal; we just leave the VFS out of sync with the container
-        // until the next exec.
-        try { await ws.pullDirtyAfter(); } catch { /* best effort */ }
+        // Pull files the container wrote back into the VFS. Errors leave the
+        // VFS out of sync with the container until the next exec — log them
+        // at warn so the asymmetry is visible instead of silently degrading.
+        try {
+          await ws.pullDirtyAfter();
+        } catch (err) {
+          console.warn("[Agent] pullDirtyAfter failed after exec:", err);
+        }
       }
     };
   }

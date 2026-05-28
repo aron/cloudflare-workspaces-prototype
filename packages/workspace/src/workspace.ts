@@ -71,6 +71,33 @@ CREATE TABLE IF NOT EXISTS _workspace_mounts (
 );
 `;
 
+/**
+ * One change to apply to the DO-side VFS during a pull. Produced by
+ * `_pullDirtyV2` (manifest path) or `_pullDirtyLegacy` (bytes path) and
+ * consumed by `vfs.applyChangesSync` and the writable-mount mirror loop.
+ */
+type ApplyEntry = {
+  path:  string;
+  op:    "upsert" | "delete";
+  type?: "file" | "dir";
+  mode?: number;
+  mtime?: number;
+  bytes?: Uint8Array;
+};
+type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
+
+/**
+ * True if `err` is the capnweb-side error raised when the container's
+ * `ContainerRpc` doesn't expose `method`. capnweb's read loop throws a
+ * plain `TypeError` with the message `'<method>' is not a function.` when
+ * the peer's bootstrap stub lacks the call, so we match by both the
+ * TypeError shape and the literal method name. Anything else (real RPC
+ * errors, transport failures, etc.) still propagates.
+ */
+export function isMissingRpcMethod(err: unknown, method: string): boolean {
+  return err instanceof TypeError && err.message.includes(`'${method}' is not a function`);
+}
+
 export class Workspace {
   readonly vfs: Vfs;
   private opts: WorkspaceOptions & { port: number };
@@ -454,59 +481,26 @@ export class Workspace {
     //   - outside any mount: applied to the VFS normally.
     //   - under a read-only mount: dropped (mounts are read-only end-to-end).
     //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    // Manifest-aware pull . The container ships
-    // one record per dirty path with (hash, size)[] per file — no
+    const ignore = this.opts.pullIgnore ?? ["node_modules"];
+
+    // Prefer the manifest-aware pull . The container
+    // ships one record per dirty path with (hash, size)[] per file — no
     // inline bytes. We then probe our own content-addressed store and
     // only ask the container for the bytes we don't already have.
-    // Identical content at multiple paths, or content the DO already
-    // holds from a previous pull, costs zero bytes over the wire.
-    const ignore = this.opts.pullIgnore ?? ["node_modules"];
-    const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
-
-    // Collect the union of chunk hashes across this pull, ask our own
-    // Vfs which we lack, and fetch just those from the container.
-    const allHashes = chunkHashUnion(bulk);
-    const wantList  = this.vfs.missingBlobs(allHashes);
-    const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
-    const fetched = new Map<string, Uint8Array>();
-    for (let i = 0; i < wantList.length; i++) {
-      fetched.set(hashKey(wantList[i]), wantBytes[i]);
+    //
+    // Fallback: an older container image that predates pullDirtyV2 only
+    // exposes the legacy `pullDirty` (bytes-carrying bulk blob). capnweb
+    // surfaces the missing method as `TypeError: '...' is not a function`
+    // from inside its read loop. We catch *only* that shape so genuine
+    // pull failures still propagate.
+    let result: { changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number };
+    try {
+      result = await this._pullDirtyV2(api, ignore);
+    } catch (err) {
+      if (!isMissingRpcMethod(err, "pullDirtyV2")) throw err;
+      result = await this._pullDirtyLegacy(api, ignore);
     }
-    const lookup = (h: Uint8Array): Uint8Array | null => {
-      return fetched.get(hashKey(h)) ?? this.vfs.readBlob(h);
-    };
-
-    type ApplyEntry = {
-      path: string;
-      op:   "upsert" | "delete";
-      type?: "file" | "dir";
-      mode?: number;
-      mtime?: number;
-      bytes?: Uint8Array;
-    };
-    type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
-    const applyEntries: ApplyEntry[] = [];
-    const mirrors:      MirrorEntry[] = [];
-    for (const c of bulk.changes) {
-      const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type  !== undefined) e.type  = c.type;
-      if (c.mode  !== undefined) e.mode  = c.mode;
-      if (c.mtime !== undefined) e.mtime = c.mtime;
-      if (c.op === "upsert" && c.type === "file" && c.chunks) {
-        // Every byte is content-verified by construction: the lookup
-        // key IS the chunk hash.
-        e.bytes = assembleFileBytes(c.chunks, lookup);
-      }
-      const root = this.mountRootOf(c.path);
-      if (root === null) {
-        applyEntries.push(e);
-        continue;
-      }
-      const mount = this.configuredMounts.get(root)!;
-      if (!mount.writable) continue;
-      applyEntries.push(e);
-      mirrors.push({ ...e, root, mount, relPath: c.path.slice(root.length + 1) });
-    }
+    const { changes: applyEntries, mirrors, maxRev } = result;
 
     if (applyEntries.length) {
       this.opts.storage.transactionSync(() => this.vfs.applyChangesSync(applyEntries));
@@ -514,7 +508,7 @@ export class Workspace {
     // Advance the rev watermark even on an empty pull, so a successive
     // pull doesn't re-scan the same range. The container reports maxRev
     // = currentRev when nothing changed, so this is safe.
-    this.pullSinceRev = bulk.maxRev;
+    this.pullSinceRev = maxRev;
     // Mirror writable-mount changes to R2 using the bytes we already
     // captured above, so we don't pay a second SQLite read per file.
     if (mirrors.length) {
@@ -530,6 +524,100 @@ export class Workspace {
 
     this.saveWatermarks();
     return applyEntries.length;
+  }
+
+  /**
+   * Manifest-aware pull. Returns the apply set, mirror set, and watermark
+   * the caller should adopt. Pure data transform — no side effects on
+   * `this.vfs` / `this.pullSinceRev`; `_pullDirtyAfterLocked` is the
+   * single place that commits those.
+   */
+  private async _pullDirtyV2(
+    api: ContainerRpc,
+    ignore: string[],
+  ): Promise<{ changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number }> {
+    const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
+
+    // Collect the union of chunk hashes across this pull, ask our own
+    // Vfs which we lack, and fetch just those from the container.
+    const allHashes = chunkHashUnion(bulk);
+    const wantList  = this.vfs.missingBlobs(allHashes);
+    const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
+    const fetched = new Map<string, Uint8Array>();
+    for (let i = 0; i < wantList.length; i++) {
+      fetched.set(hashKey(wantList[i]), wantBytes[i]);
+    }
+    const lookup = (h: Uint8Array): Uint8Array | null => {
+      return fetched.get(hashKey(h)) ?? this.vfs.readBlob(h);
+    };
+
+    const applyEntries: ApplyEntry[] = [];
+    const mirrors:      MirrorEntry[] = [];
+    for (const c of bulk.changes) {
+      const e: ApplyEntry = { path: c.path, op: c.op };
+      if (c.type  !== undefined) e.type  = c.type;
+      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.mtime !== undefined) e.mtime = c.mtime;
+      if (c.op === "upsert" && c.type === "file" && c.chunks) {
+        // Every byte is content-verified by construction: the lookup
+        // key IS the chunk hash.
+        e.bytes = assembleFileBytes(c.chunks, lookup);
+      }
+      this._routeApplyEntry(e, applyEntries, mirrors);
+    }
+    return { changes: applyEntries, mirrors, maxRev: bulk.maxRev };
+  }
+
+  /**
+   * Legacy bulk pull. Used when the container doesn't expose pullDirtyV2
+   * (older image in front of a newer DO). Bytes ride inline in a single
+   * bulk blob; no DO-side dedup. Same return shape as `_pullDirtyV2` so
+   * the caller doesn't care which branch ran.
+   */
+  private async _pullDirtyLegacy(
+    api: ContainerRpc,
+    ignore: string[],
+  ): Promise<{ changes: ApplyEntry[]; mirrors: MirrorEntry[]; maxRev: number }> {
+    const bulk = await api.pullDirty(this.pullSinceRev, ignore);
+    const blobBytes = await readStreamToUint8Array(bulk.blob);
+
+    const applyEntries: ApplyEntry[] = [];
+    const mirrors:      MirrorEntry[] = [];
+    for (const c of bulk.changes) {
+      const e: ApplyEntry = { path: c.path, op: c.op };
+      if (c.type  !== undefined) e.type  = c.type;
+      if (c.mode  !== undefined) e.mode  = c.mode;
+      if (c.mtime !== undefined) e.mtime = c.mtime;
+      if (c.op === "upsert" && c.type === "file" && c.contentSize !== undefined) {
+        const off = c.contentOffset ?? 0;
+        e.bytes = blobBytes.subarray(off, off + c.contentSize);
+      }
+      this._routeApplyEntry(e, applyEntries, mirrors);
+    }
+    return { changes: applyEntries, mirrors, maxRev: bulk.maxRev };
+  }
+
+  /**
+   * Sort one apply entry into the VFS-apply list and/or the writable-
+   * mount mirror list. Shared by the V2 and legacy pull paths.
+   *   - outside any mount: applied to the VFS normally.
+   *   - under a read-only mount: dropped (mounts are read-only end-to-end).
+   *   - under a writable mount: applied to the VFS *and* mirrored to R2.
+   */
+  private _routeApplyEntry(
+    e: ApplyEntry,
+    applyEntries: ApplyEntry[],
+    mirrors: MirrorEntry[],
+  ): void {
+    const root = this.mountRootOf(e.path);
+    if (root === null) {
+      applyEntries.push(e);
+      return;
+    }
+    const mount = this.configuredMounts.get(root)!;
+    if (!mount.writable) return;
+    applyEntries.push(e);
+    mirrors.push({ ...e, root, mount, relPath: e.path.slice(root.length + 1) });
   }
 
   /**

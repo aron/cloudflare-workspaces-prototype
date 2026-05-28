@@ -96,8 +96,14 @@ export class ExecAgent extends DurableObject<Env> {
             if (event.type === "exit" || event.type === "error") break;
           }
           // Pull files the process wrote so callers can read them back via
-          // a follow-up endpoint. Failures here are non-fatal.
-          try { await ws.pullDirtyAfter(); } catch { /* best effort */ }
+          // a follow-up endpoint. Errors leave the VFS out of sync with the
+          // container until the next exec; log them so the asymmetry is
+          // visible instead of silently degrading.
+          try {
+            await ws.pullDirtyAfter();
+          } catch (err) {
+            console.warn("[basic-exec] pullDirtyAfter failed after stream:", err);
+          }
         } catch (err) {
           const details = err instanceof Error ? err.message : String(err);
           controller.enqueue(encoder.encode(JSON.stringify({
