@@ -296,3 +296,150 @@ dependency:
   scale.
 - Don't adopt IPFS CIDs / multihash. The indirection buys nothing
   inside a single DO + container pair.
+
+### Appendix: alternatives to FUSE for on-demand filesystem seeding
+
+The sync protocol is intentionally independent of the container access
+mechanism. `pushChanges`, `fetchChanges`, `hasObjects`, `fetchObjects`,
+and `pushObjects` can be driven by any layer that can observe file access
+and mutations inside the container. However, one requirement sharply
+constrains the viable alternatives:
+
+> Arbitrary unmodified tools must be able to touch a path under the
+> workspace and have the file or directory materialize on demand, at the
+> moment of access.
+
+A plain container-local checkout plus pre/post sync does not preserve
+that property. It can preserve eventual state, but not on-demand
+path-resolution semantics. To keep lazy seeding, some layer must
+intercept path lookup, directory open, file open, read, page fault, or
+the syscall boundary before normal tools observe the missing content.
+
+#### Preferred option: keep FUSE as a lazy facade over a native cache
+
+The best practical design is still FUSE, but with a narrower role:
+FUSE should be the lazy namespace/interception layer, not the primary
+storage layer.
+
+```text
+DO SQLite / mounts / content-addressed chunks
+        ⇅ sync protocol
+workspace-server
+        ⇅ hydrate / flush / dirty tracking
+native cache at /var/lib/workspace/cache
+        ⇅
+FUSE mount at /workspace
+```
+
+On first access, FUSE receives `lookup`, `opendir`, `open`, or `read`.
+The workspace-server resolves the path against VFS metadata, fetches any
+missing chunks or provider bytes, materializes the result into the native
+cache, and serves the request from that cache. Subsequent reads can hit
+the container filesystem and kernel page cache rather than repeatedly
+round-tripping through remote storage.
+
+This preserves the killer feature:
+
+- arbitrary tools keep using normal paths under `/workspace`;
+- files and directories can be seeded exactly when first touched;
+- the existing change/object sync protocol still handles push and pull;
+- large trees do not need to be pre-materialized;
+- hot file contents can live in a normal container-local cache;
+- FUSE remains the correctness boundary for namespace virtualization,
+  but the cache becomes the data plane.
+
+This design should prefer FUSE features and implementation choices that
+reduce hot-path overhead: kernel page cache, writeback cache where safe,
+`readdirplus` where useful, aggressive local chunk/file caching, and
+metadata invalidation keyed by the DO/container revision watermarks.
+
+#### Best non-FUSE option: fanotify permission events + placeholders
+
+If the platform exposes the required Linux capabilities, the strongest
+non-FUSE alternative is a native directory populated with lazy
+placeholders and guarded by a `fanotify` permission-event daemon.
+
+```text
+/workspace                         normal container directory
+/workspace/src/index.ts            sparse/lazy placeholder
+workspace-server                   fanotify daemon + hydrator
+DO SQLite / providers / chunks     durable source data
+```
+
+On `open` of a lazy file, the kernel delivers a `FAN_OPEN_PERM` event to
+the workspace-server. The server hydrates the placeholder from the DO or
+mount provider, atomically installs the real content, and then allows the
+original open to proceed. For lazy directories, a directory-open event can
+trigger population of immediate children before `getdents()` observes the
+contents.
+
+This can preserve much of the on-demand behavior while moving hydrated
+file IO onto the native filesystem. It is attractive because `fanotify`
+is mostly on the cold path: first open of a lazy file, first open of a
+lazy directory, and optionally write-open events for dirty tracking.
+
+The caveats are significant:
+
+- `fanotify` permission events may require capabilities unavailable in
+  the container runtime;
+- placeholders must return plausible `stat` metadata before hydration;
+- sparse placeholders must never be readable as zero-filled content due
+  to an open/read race;
+- directory materialization must happen before tools observe an empty
+  directory;
+- write-open flags need careful policy: hydrate-before-write,
+  overwrite-without-hydrate for `O_TRUNC`, or reject under read-only
+  mounts;
+- rename/delete of unhydrated placeholders needs a precise tombstone or
+  copy-on-write state machine.
+
+Because of those caveats, this is a credible prototype path but a riskier
+public-package substrate than FUSE.
+
+#### Other alternatives considered
+
+**autofs-style triggers.** Good for lazy subtree materialization, but not
+precise enough for file-level hydration and usually requires mount
+privileges. It is useful when the unit of laziness is a directory tree,
+not an individual file.
+
+**Kernel network filesystems: NFS, 9P, virtiofs, WebDAV, SMB/CIFS.**
+These preserve on-demand access because the kernel filesystem client asks
+a server for metadata and bytes as tools touch paths. In practice they
+have the same deployment problem as FUSE — mount privileges and runtime
+support — while adding protocol mismatch, authentication, and metadata
+semantics issues. They are worth using only if the platform provides one
+as a managed primitive.
+
+**seccomp user notification or ptrace syscall brokerage.** This can
+intercept `openat`, `statx`, `getdents64`, `renameat`, and related
+syscalls without a filesystem mount. It is powerful but operationally
+unattractive: process supervision, fork/exec, signals, path resolution,
+race freedom, and performance all become hard. Treat it as a last resort,
+not a preferred workspace substrate.
+
+**`LD_PRELOAD` wrappers.** Easy to prototype but not complete. Static
+binaries, direct syscalls, Go/Rust programs, scrubbed environments, and
+subprocesses can bypass the wrapper. It may be useful for controlled
+commands but does not satisfy the arbitrary-tool requirement.
+
+**Platform-native lazy volumes.** The ideal long-term answer would be a
+container runtime primitive that exposes lazy lookup/read/write/readdir
+callbacks or a managed workspace volume backed by the DO/chunk store. If
+available, this would replace the need to ship FUSE. Until then, it is an
+aspirational target rather than an implementation choice.
+
+#### Recommendation
+
+Keep the sync protocol layered below the access mechanism:
+
+```text
+access interception layer:  FUSE | fanotify | platform lazy volume
+materialization/cache:      native files + metadata DB + object cache
+sync protocol:              ChangeEntry + chunks + haves/wants
+source of truth:            DO SQLite
+```
+
+For v1, prefer FUSE as a lazy facade over a native cache. Track
+`fanotify` + placeholders as the best non-FUSE fallback only if the
+container platform exposes the necessary permission-event support.
