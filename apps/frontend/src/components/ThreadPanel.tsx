@@ -8,7 +8,7 @@
  * "quoted root" so the thread always has its own context.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
@@ -45,6 +45,10 @@ import {
 
 import { deleteThread, fetchRoomMessages } from "@/lib/api";
 import type { AppMessage } from "@/lib/api";
+import { FileViewer, type FileViewerEntry } from "@/components/FileViewer";
+import { PathAutocomplete } from "@/components/PathAutocomplete";
+import { parseBangInput } from "@/lib/bang-parser.js";
+import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
 import { initials, relTime } from "@/lib/utils";
 
@@ -78,6 +82,10 @@ export function ThreadPanel({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [steerQueue, setSteerQueue] = useState<string[]>([]);
+  const [viewerEntries, setViewerEntries] = useState<FileViewerEntry[]>([]);
+  const autocompleteHandlers = useRef<{
+    moveUp(): void; moveDown(): void; accept(): void; isOpen(): boolean;
+  } | null>(null);
 
   const doDeleteThread = useCallback(async () => {
     setDeleting(true);
@@ -128,13 +136,39 @@ export function ThreadPanel({
   const submit = useCallback(() => {
     const text = input.trim();
     if (!text) return;
+
+    // Intercept !/<absolute-path> as an inline file-viewer command. Local-only:
+    // never reaches the agent, never persisted.
+    const parsed = parseBangInput(text);
+    if (parsed.kind === "bang") {
+      setInput("");
+      setViewerEntries(prev => [...prev, {
+        id:        crypto.randomUUID(),
+        createdAt: Date.now(),
+        path:      parsed.path,
+        url:       `/api/threads/${threadId}/files${parsed.path}`,
+      }]);
+      return;
+    }
+    if (parsed.kind === "invalid") {
+      // Surface the validation error without sending anything. A toast
+      // would be nicer but we don't have one in this app; the user gets
+      // immediate feedback by seeing their input stay put.
+      console.warn(`[viewer] invalid path: ${parsed.reason}`);
+      return;
+    }
+
     setInput("");
     if (turnInFlight) {
       setSteerQueue(q => [...q, text]);
     } else {
       sendMessage({ role: "user", parts: [{ type: "text", text }] });
     }
-  }, [input, turnInFlight, sendMessage]);
+  }, [input, turnInFlight, sendMessage, threadId]);
+
+  const dismissViewerEntry = useCallback((id: string) => {
+    setViewerEntries(prev => prev.filter(e => e.id !== id));
+  }, []);
 
   // ── Steering ──────────────────────────────────────────────────────────
   //
@@ -348,6 +382,10 @@ export function ThreadPanel({
             return null;
           })}
 
+          {viewerEntries.map(entry => (
+            <FileViewer key={entry.id} entry={entry} onDismiss={dismissViewerEntry} />
+          ))}
+
           {turnInFlight && (
             <div className="text-sm text-kumo-inactive">●●●</div>
           )}
@@ -355,12 +393,29 @@ export function ThreadPanel({
       </div>
 
       <div className="flex-shrink-0 bg-kumo-base px-4 pb-3 pt-2">
-        <div className={`prompt-input rounded-2xl border px-3.5 pb-2 pt-3 ${turnInFlight ? "border-kumo-brand/40" : ""}`}>
+        <div className={`prompt-input relative rounded-2xl border px-3.5 pb-2 pt-3 ${turnInFlight ? "border-kumo-brand/40" : ""}`}>
+          <PathAutocomplete
+            threadId={threadId}
+            text={input}
+            onAccept={(entry) => {
+              const next = acceptCompletion(input, entry);
+              setInput(next.text);
+            }}
+            registerHandlers={(h) => { autocompleteHandlers.current = h; }}
+          />
           <MentionTextarea
             rows={1}
             value={input}
             onChange={setInput}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
+            onKeyDown={(e) => {
+              const ac = autocompleteHandlers.current;
+              if (ac?.isOpen()) {
+                if (e.key === "ArrowDown") { e.preventDefault(); ac.moveDown(); return; }
+                if (e.key === "ArrowUp")   { e.preventDefault(); ac.moveUp();   return; }
+                if (e.key === "Tab")       { e.preventDefault(); ac.accept();   return; }
+              }
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+            }}
             placeholder={turnInFlight ? "Steer the agent…" : "Reply…"}
             disabled={status !== "connected"}
             className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
