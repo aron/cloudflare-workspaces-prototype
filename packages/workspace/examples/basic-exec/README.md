@@ -39,6 +39,21 @@ curl -X POST 'http://localhost:8787/exec?session=alice' \
      -d '{"command":"echo hi from alice","cwd":"/tmp"}'
 ```
 
+Streaming variant — the same shape but `POST /exec/stream` returns an
+NDJSON stream (one JSON-encoded `LogEvent` per line, terminated by an
+`exit` or `error` event). Useful for debugging the streaming exec path
+end-to-end:
+
+```bash
+curl -N -X POST http://localhost:8787/exec/stream \
+     -H 'content-type: application/json' \
+     -d '{"command":"for i in 1 2 3; do echo line $i; sleep 1; done"}'
+# {"type":"stdout","data":"line 1\n",...}
+# {"type":"stdout","data":"line 2\n",...}
+# {"type":"stdout","data":"line 3\n",...}
+# {"type":"exit","exitCode":0,...}
+```
+
 The first call to a given session has to cold-start the container (image
 pull + boot + workspace server startup), so expect ~10s on the first
 request and ~ms on subsequent ones.
