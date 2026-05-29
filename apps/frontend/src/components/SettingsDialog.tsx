@@ -46,11 +46,21 @@ export function SettingsDialog({
 
   if (!open) return null;
 
+  // Use `%s` (string formatter) rather than `%d` here. Google user IDs are
+  // 21-digit numbers — well beyond Number.MAX_SAFE_INTEGER — so `%d` would
+  // coerce the string through Number() and silently round the trailing
+  // digits to zero. The Chat webhook then 500s because no user with the
+  // truncated id exists.
   const snippet =
-    `console.log("Google Workspace User Id: %d", document.querySelector('[data-user-email="${me.email}"]').dataset.userId)`;
+    `console.log("Google Workspace User Id: %s", document.querySelector('[data-user-email="${me.email}"]').dataset.userId)`;
 
   const trimmed = value.trim();
   const looksValid = trimmed === "" || /^[0-9]{5,30}$/.test(trimmed);
+  // Heuristic: a real Google user id is 21 random digits, so the odds of
+  // it ending in four+ zeros are 1 in 10000. If we see that pattern the
+  // user almost certainly pasted a precision-lost number from a `%d`
+  // formatter or a JSON viewer that rendered the id as a number.
+  const looksTruncated = /^[0-9]{17,}0{4,}$/.test(trimmed);
 
   async function onSave() {
     setSaving(true);
@@ -124,6 +134,13 @@ export function SettingsDialog({
           {!looksValid && (
             <p className="mt-1 text-xs text-red-400">
               Must be 5–30 digits, or leave empty to clear.
+            </p>
+          )}
+          {looksValid && looksTruncated && (
+            <p className="mt-1 text-xs text-amber-400">
+              This looks like a number that lost precision (trailing zeros).
+              Re-run the console snippet to grab the raw string — don’t
+              copy the id out of a JSON viewer or a <code>%d</code>-formatted log line.
             </p>
           )}
 
