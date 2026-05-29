@@ -88,10 +88,14 @@ type ShareResult = ShareOk | { error: string };
 
 function suggestedCommands(remoteName: string, url: string, branch: string, writeable: boolean): string {
   const base = [
+    // Idempotent guard: `git remote add` fails if `remoteName` already
+    // exists, which it will if the user already pulled a previous share
+    // from this thread. `|| true` so the line is a no-op on first use.
+    `git remote remove ${remoteName} 2>/dev/null || true`,
     `git remote add ${remoteName} "${url}"`,
     `git fetch ${remoteName}`,
-    `git checkout -b review ${remoteName}/${branch}`,
-    "git diff main..review",
+    `git checkout -b review-${remoteName} ${remoteName}/${branch}`,
+    `git diff main..review-${remoteName}`,
   ];
   if (writeable) {
     // Show the push line too so the user knows the URL accepts writes.
@@ -206,7 +210,11 @@ export function createGitShareTool(opts: GitShareToolOptions) {
           : { added: 0, modified: 0, removed: 0 },
         reused: commitOut === null,
         share: { url: share.url, expiresAt: share.expiresAt, scope: share.scope },
-        suggestedCommands: suggestedCommands("agent", share.url, remoteRef, share.scope === "write"),
+        // Per-session remote name so multiple shares from different
+        // threads coexist in the user's clone, and the `remote remove`
+        // guard in suggestedCommands only nukes this thread's previous
+        // remote (not someone else's).
+        suggestedCommands: suggestedCommands(`agent-${sessionId.slice(0, 4)}`, share.url, remoteRef, share.scope === "write"),
       };
     },
   });
