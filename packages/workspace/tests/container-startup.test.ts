@@ -162,15 +162,20 @@ describe("findRunningServer", () => {
 // probePort
 // ---------------------------------------------------------------------------
 
+// Default options for probePort tests: no retry budget and an inert sleep,
+// so a single 503 returns `false` immediately. Retry behaviour gets its
+// own dedicated tests below.
+const NO_RETRY = { retryTimeoutMs: 0, sleep: async () => {}, now: () => 0 };
+
 describe("probePort", () => {
   test("returns true when containerFetch returns 2xx", async () => {
     const sb = makeSandbox({ portUp: true });
-    assert.equal(await probePort(sb, PORT), true);
+    assert.equal(await probePort(sb, PORT, NO_RETRY), true);
   });
 
-  test("returns false when containerFetch returns 5xx", async () => {
+  test("returns false when containerFetch returns 5xx and the retry budget is exhausted", async () => {
     const sb = makeSandbox({ portUp: false });
-    assert.equal(await probePort(sb, PORT), false);
+    assert.equal(await probePort(sb, PORT, NO_RETRY), false);
   });
 
   test("returns false when containerFetch throws (port not bound)", async () => {
@@ -179,7 +184,7 @@ describe("probePort", () => {
       async startProcess() { throw new Error("unused"); },
       async containerFetch() { throw new Error("ECONNREFUSED"); },
     };
-    assert.equal(await probePort(sb, PORT), false);
+    assert.equal(await probePort(sb, PORT, NO_RETRY), false);
   });
 
   test("passes the requested port as the second arg to containerFetch (not via header)", async () => {
@@ -197,8 +202,71 @@ describe("probePort", () => {
         return new Response("", { status: 503 });
       },
     };
-    await probePort(sb, 4567);
+    await probePort(sb, 4567, NO_RETRY);
     assert.equal(observedPort, 4567);
+  });
+
+  test("retries 503 with exponential backoff and recovers when the port comes up", async () => {
+    // The whole point of Fix 2: a brief 503 during container startup
+    // should not declare workspace-server down — wait for the platform
+    // to allocate the instance, then return true.
+    let portUp = false;
+    let calls = 0;
+    const sb: SandboxLike = {
+      async getProcess() { return null; },
+      async startProcess() { throw new Error("unused"); },
+      async containerFetch(_req: Request, port?: number) {
+        if (port !== PORT) throw new Error("wrong port");
+        calls++;
+        if (calls >= 3) portUp = true;
+        return new Response("", { status: portUp ? 200 : 503 });
+      },
+    };
+    const delays: number[] = [];
+    const result = await probePort(sb, PORT, {
+      retryTimeoutMs: 30_000,
+      sleep: async (ms) => { delays.push(ms); },
+      now: () => 0, // budget never drains — recovery, not timeout
+    });
+    assert.equal(result, true);
+    assert.equal(calls, 3, "two 503s then a 200");
+    assert.deepEqual(delays, [3000, 6000]);
+  });
+
+  test("503 retry honours the wall-clock budget and eventually returns false", async () => {
+    const sb = makeSandbox({ portUp: false });
+    const delays: number[] = [];
+    let clock = 0;
+    const result = await probePort(sb, PORT, {
+      retryTimeoutMs: 30_000,
+      sleep: async (ms) => { delays.push(ms); clock += ms; },
+      now: () => clock,
+    });
+    assert.equal(result, false);
+    // Backoff curve: 3s, 6s, 12s, then ~9s capped by remaining budget.
+    assert.deepEqual(delays.slice(0, 3), [3000, 6000, 12000]);
+  });
+
+  test("non-503 5xx returns false immediately without retrying", async () => {
+    // Honest ‘port isn’t bound’ signals shouldn’t be retried — the caller
+    // wants to fall through to startProcess. Only 503 (“no instance” /
+    // “starting”) triggers the retry loop.
+    let calls = 0;
+    const sb: SandboxLike = {
+      async getProcess() { return null; },
+      async startProcess() { throw new Error("unused"); },
+      async containerFetch() {
+        calls++;
+        return new Response("", { status: 500 });
+      },
+    };
+    const result = await probePort(sb, PORT, {
+      retryTimeoutMs: 30_000,
+      sleep: async () => { throw new Error("must not sleep"); },
+      now: () => 0,
+    });
+    assert.equal(result, false);
+    assert.equal(calls, 1, "500 returns immediately, no retry");
   });
 });
 
@@ -209,7 +277,7 @@ describe("probePort", () => {
 describe("ensureWorkspaceServer", () => {
   test("fast-path: server already up, no startProcess, no getProcess", async () => {
     const sb = makeSandbox({ portUp: true });
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.containerFetch, 1);
     assert.equal(sb.calls.getProcess, 0);
     assert.equal(sb.calls.startProcess, 0);
@@ -223,7 +291,7 @@ describe("ensureWorkspaceServer", () => {
       portUp: true,
       getProcessResult: fakeProcess({ status: "failed", waitForPortBehavior: "reject" }),
     });
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     // Fast-path probe succeeds before we even look at the record.
     assert.equal(sb.calls.startProcess, 0);
   });
@@ -239,7 +307,7 @@ describe("ensureWorkspaceServer", () => {
         waitForPortBehavior: "resolve",
       }),
     });
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.startProcess, 0);
     assert.equal(sb.calls.getProcess, 1);
   });
@@ -250,7 +318,7 @@ describe("ensureWorkspaceServer", () => {
       getProcessResult: null,
       startProcess: { kind: "ok", waitForPortBehavior: "resolve" },
     });
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.startProcess, 1);
   });
 
@@ -262,7 +330,7 @@ describe("ensureWorkspaceServer", () => {
       getProcessResult: null,
       startProcess: { kind: "throw" },
     });
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.startProcess, 1);
   });
 
@@ -285,7 +353,7 @@ describe("ensureWorkspaceServer", () => {
       portUp = true;  // winner's server bound the port
       return origStart(...args);
     };
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.startProcess, 1);
   });
 
@@ -296,7 +364,7 @@ describe("ensureWorkspaceServer", () => {
       startProcess: { kind: "ok", waitForPortBehavior: "reject" },
     });
     await assert.rejects(
-      () => ensureWorkspaceServer(sb, PORT),
+      () => ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY }),
       /simulated|ProcessExitedBeforeReady/,
     );
   });
@@ -308,7 +376,7 @@ describe("ensureWorkspaceServer", () => {
       startProcess: { kind: "throw" },
     });
     await assert.rejects(
-      () => ensureWorkspaceServer(sb, PORT),
+      () => ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY }),
       /startProcess failed and port is not up/,
     );
   });
@@ -330,7 +398,7 @@ describe("ensureWorkspaceServer", () => {
       portReady = true;
       return origStart(...args);
     };
-    await ensureWorkspaceServer(sb, PORT);
+    await ensureWorkspaceServer(sb, PORT, { probe: NO_RETRY });
     assert.equal(sb.calls.startProcess, 1);
   });
 });
