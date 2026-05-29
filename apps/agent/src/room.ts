@@ -29,6 +29,7 @@ import {
   buildSnippet,
   extractMentionedUserIds,
   log,
+  pickRoomUrl,
   sendGChatMention,
 } from "./notify.js";
 import { resolveBaseUrl } from "./base-url.js";
@@ -296,15 +297,15 @@ export class Room extends Server<Env> {
     const roomId   = meta?.id ?? "";
     const snippet  = buildSnippet(text);
 
-    // Build a deep-linking URL back to this specific message. Falls back to
-    // omitting the URL when we don't have a base origin to anchor against —
-    // bare paths are useless in Google Chat.
+    // Build a link back to the app, falling through to less-specific paths
+    // when we can't anchor (e.g. no thread). See pickRoomUrl().
     const baseUrl = resolveBaseUrl(this.env, request);
-    const roomUrl = baseUrl && roomId
-      ? (threadId
-        ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#${message.id}`
-        : `${baseUrl}/rooms/${roomId}#${message.id}`)
-      : undefined;
+    const roomUrl = pickRoomUrl({
+      baseUrl,
+      roomId,
+      threadId,
+      messageId: message.id,
+    });
 
     this.ctx.waitUntil((async () => {
       try {

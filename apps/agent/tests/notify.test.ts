@@ -7,6 +7,7 @@ import {
   buildPayload,
   buildSnippet,
   extractMentionedUserIds,
+  pickRoomUrl,
   redactWebhookUrl,
 } from "../src/notify.js";
 
@@ -132,5 +133,32 @@ describe("redactWebhookUrl", () => {
   });
   it("leaves URLs without key/token alone", () => {
     expect(redactWebhookUrl("https://example.test/hook")).toBe("https://example.test/hook");
+  });
+});
+
+describe("pickRoomUrl", () => {
+  const base = "https://hackspace.test";
+  it("prefers a message anchor in a thread when all parts are present", () => {
+    expect(pickRoomUrl({ baseUrl: base, roomId: "r", threadId: "t", messageId: "m" }))
+      .toBe("https://hackspace.test/rooms/r/threads/t#m");
+  });
+  it("falls back to a message anchor in the room when there is no thread", () => {
+    expect(pickRoomUrl({ baseUrl: base, roomId: "r", messageId: "m" }))
+      .toBe("https://hackspace.test/rooms/r#m");
+  });
+  it("falls back to the room when no message id is known", () => {
+    expect(pickRoomUrl({ baseUrl: base, roomId: "r" }))
+      .toBe("https://hackspace.test/rooms/r");
+  });
+  it("falls back to the app origin when no room is known", () => {
+    expect(pickRoomUrl({ baseUrl: base })).toBe("https://hackspace.test");
+  });
+  it("strips a trailing slash on the base URL", () => {
+    expect(pickRoomUrl({ baseUrl: "https://hackspace.test/", roomId: "r" }))
+      .toBe("https://hackspace.test/rooms/r");
+  });
+  it("returns undefined when no baseUrl is configured — a bare path is worse than no link", () => {
+    expect(pickRoomUrl({ roomId: "r", threadId: "t", messageId: "m" })).toBeUndefined();
+    expect(pickRoomUrl({})).toBeUndefined();
   });
 });

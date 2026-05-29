@@ -25,6 +25,7 @@ import {
   buildSnippet,
   extractMentionedUserIds,
   log,
+  pickRoomUrl,
   sendGChatMention,
 } from "./notify.js";
 
@@ -612,9 +613,7 @@ export class Agent extends Think<Env> {
     const roomId   = this._roomId ?? "";
     const threadId = this.name;
     const messageId = (result.message as { id?: string }).id ?? "";
-    const roomUrl = baseUrl && roomId && messageId
-      ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#${messageId}`
-      : undefined;
+    const roomUrl = pickRoomUrl({ baseUrl, roomId, threadId, messageId });
     const snippet = buildSnippet(text);
     const roomName = this._roomName ?? "thread";
 

@@ -56,6 +56,35 @@ export function buildSnippet(text: string): string {
 }
 
 /**
+ * Pick the most-specific link we can build back to the app. Falls through:
+ *
+ *   1. Deep-link to a specific message in a thread
+ *   2. Deep-link to a specific message in a room
+ *   3. Deep-link to the room
+ *   4. The app origin (always a working URL when baseUrl is set)
+ *
+ * Returns undefined only when we have no baseUrl at all — in that case the
+ * payload omits the link entirely rather than emit a bare path that won't
+ * resolve outside the app.
+ */
+export function pickRoomUrl(parts: {
+  baseUrl?:   string;
+  roomId?:    string;
+  threadId?:  string;
+  messageId?: string;
+}): string | undefined {
+  const base = (parts.baseUrl ?? "").replace(/\/+$/, "");
+  if (!base) return undefined;
+  const room   = parts.roomId   ?? "";
+  const thread = parts.threadId ?? "";
+  const msg    = parts.messageId ?? "";
+  if (room && thread && msg) return `${base}/rooms/${room}/threads/${thread}#${msg}`;
+  if (room && msg)           return `${base}/rooms/${room}#${msg}`;
+  if (room)                  return `${base}/rooms/${room}`;
+  return base;
+}
+
+/**
  * Build the JSON payload sent to Google Chat. Exported for testability —
  * the production path goes through {@link sendGChatMention}.
  */
