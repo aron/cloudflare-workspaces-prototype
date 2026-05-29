@@ -39,6 +39,12 @@ describe("buildSnippet", () => {
     expect(out).not.toMatch(/<mention/);
     expect(out).toBe("a @agent b");
   });
+  it("strips legacy <user:ID> tokens down to a generic @user label", () => {
+    expect(buildSnippet("hey <user:abc-123> ship it")).toBe("hey @user ship it");
+  });
+  it("strips legacy <agent:ID> tokens down to a generic @agent label", () => {
+    expect(buildSnippet("talk to <agent:agent> about this")).toBe("talk to @agent about this");
+  });
 });
 
 describe("extractMentionedUserIds", () => {
@@ -57,6 +63,16 @@ describe("extractMentionedUserIds", () => {
   });
   it("returns empty for input with no tokens", () => {
     expect(extractMentionedUserIds("plain text")).toEqual([]);
+  });
+  it("also pulls ids from legacy <user:ID> tokens", () => {
+    expect(extractMentionedUserIds("hi <user:abc> and <user:def>").sort())
+      .toEqual(["abc", "def"]);
+  });
+  it("dedupes across current and legacy formats for the same id", () => {
+    const ids = extractMentionedUserIds(
+      '<mention type="user" id="abc">@x</mention> and <user:abc>',
+    );
+    expect(ids).toEqual(["abc"]);
   });
 });
 

@@ -39,10 +39,17 @@ const SNIPPET_MAX = 240;
  *      not a wall of HTML.
  */
 export function buildSnippet(text: string): string {
-  const stripped = text.replace(
-    /<mention\s+type="(?:user|agent)"\s+id="[A-Za-z0-9._-]{1,128}"\s*>([^<]*)<\/mention>/g,
-    (_match, label: string) => label.trim() || "@user",
-  );
+  const stripped = text
+    // Current format: <mention type="user|agent" id="...">@label</mention>
+    .replace(
+      /<mention\s+type="(?:user|agent)"\s+id="[A-Za-z0-9._-]{1,128}"\s*>([^<]*)<\/mention>/g,
+      (_match, label: string) => label.trim() || "@user",
+    )
+    // Legacy format emitted by pre-migration messages and by older agent
+    // turns that copied the old style from history. Replace with a generic
+    // @user / @agent label so the `<...>` doesn't reach Google Chat.
+    .replace(/<user:[A-Za-z0-9._-]{1,128}>/g,  "@user")
+    .replace(/<agent:[A-Za-z0-9._-]{1,128}>/g, "@agent");
   const cleaned = stripped.replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
   return cleaned.length <= SNIPPET_MAX ? cleaned : cleaned.slice(0, SNIPPET_MAX - 1) + "…";
@@ -119,47 +126,66 @@ export function log(
  * Returns true when the webhook accepted the message (2xx), false otherwise.
  */
 export async function sendGChatMention(n: MentionNotice): Promise<boolean> {
+  // Build the payload once so we can log the exact bytes on failure.
+  // Crucial for diagnosing Google's `INTERNAL` 500s, which never tell you
+  // which field offended them.
+  const payload = buildPayload(n);
+  const requestBody = JSON.stringify(payload);
   try {
     const res = await fetch(n.webhookUrl, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify(buildPayload(n)),
+      body:    requestBody,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       log("warn", "gchat webhook returned non-2xx", {
-        webhook_url: n.webhookUrl,
+        webhook_url:      n.webhookUrl,
         status:           res.status,
         google_chat_user: n.googleChatUserId,
         room_name:        n.roomName,
-        body_preview:     body.slice(0, 200),
+        // Full request payload, both as a parsed object (so the dashboard's
+        // JSON tree view is readable) and as the literal bytes we POSTed
+        // (so we can spot encoding / escaping diffs against curl).
+        payload,
+        request_body:      requestBody,
+        request_body_len:  requestBody.length,
+        // Full response body — Google's `details[].fieldViolations[]` array
+        // sometimes lives past the first 200 chars and we don't want it
+        // truncated when triaging.
+        response_body:     body,
+        response_body_len: body.length,
       });
       return false;
     }
     log("info", "gchat webhook ok", {
-      webhook_url: n.webhookUrl,
+      webhook_url:      n.webhookUrl,
       google_chat_user: n.googleChatUserId,
       room_name:        n.roomName,
     });
     return true;
   } catch (e) {
     log("warn", "gchat webhook fetch failed", {
-      webhook_url: n.webhookUrl,
-      error: (e as Error).message,
+      webhook_url:  n.webhookUrl,
+      payload,
+      request_body: requestBody,
+      error:        (e as Error).message,
     });
     return false;
   }
 }
 
 /**
- * Extract Hackspace user ids from `<mention type="user" id="...">...</mention>`
- * tokens in a message body. Returns unique ids in stable order.
+ * Extract Hackspace user ids from mention tokens in a message body. Accepts
+ * both the current `<mention type="user" id="...">@label</mention>` form and
+ * the legacy `<user:ID>` form that pre-migration messages and older agent
+ * turns emit. Returns unique ids in stable order.
  */
 export function extractMentionedUserIds(text: string): string[] {
   const out = new Set<string>();
-  const re = /<mention\s+type="user"\s+id="([A-Za-z0-9._-]{1,128})"\s*>[^<]*<\/mention>/g;
-  for (const m of text.matchAll(re)) {
-    out.add(m[1]!);
-  }
+  const current = /<mention\s+type="user"\s+id="([A-Za-z0-9._-]{1,128})"\s*>[^<]*<\/mention>/g;
+  for (const m of text.matchAll(current)) out.add(m[1]!);
+  const legacy = /<user:([A-Za-z0-9._-]{1,128})>/g;
+  for (const m of text.matchAll(legacy)) out.add(m[1]!);
   return [...out];
 }
