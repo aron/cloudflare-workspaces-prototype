@@ -1,14 +1,17 @@
 {
-  "name": "cloudflare-workspaces",
+  "name": "cloudflare-workspaces-prototype",
   "private": true,
   "workspaces": [
-    "packages/*",
-    "apps/*"
+    "packages/*"
   ],
   "scripts": {
-    "build":     "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "dev":       "npm run dev    --workspace=@app/agent",
-    "deploy":    "npm run deploy --workspace=@app/agent"
+    "build": "npm run build --workspace=@cloudflare/workspace",
+    "test": "npm test --workspace=@cloudflare/workspace",
+    "build:bin": "npm run build:bin --workspace=@cloudflare/workspace"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.11",
+    "pkg": "^5.8.1",
+    "typescript": "^5.5.4"
   }
 }
