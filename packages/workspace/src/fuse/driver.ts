@@ -4,26 +4,38 @@ const ERRNO = {
   ENOENT: -2,
   EIO: -5,
   EEXIST: -17,
-  ENOTDIR: -20,
+  ENODATA: -61,
   EISDIR: -21,
-  EINVAL: -22,
   ENOTEMPTY: -39,
-  ENOTSUP: -95,
 } as const;
 
 type StatusCallback = (errnoOrBytes: number) => void;
 type ResultCallback<T> = (errno: number, result: T) => void;
+type NotImplementedOperation = (...args: unknown[]) => never;
+
+export class NotImplementedError extends Error {
+  constructor(readonly operation: string) {
+    super(`FUSE operation not implemented: ${operation}`);
+    this.name = "NotImplementedError";
+  }
+}
 
 export interface FuseOps {
+  init(cb?: StatusCallback): void;
+  error: NotImplementedOperation;
   readdir(path: string, cb: ResultCallback<string[]>): void;
   getattr(path: string, cb: ResultCallback<FuseStat | null>): void;
+  fgetattr(path: string, fh: number, cb: ResultCallback<FuseStat | null>): void;
   open(path: string, flags: number, cb: ResultCallback<number>): void;
+  opendir(path: string, flags: number, cb: ResultCallback<number>): void;
   create(path: string, mode: number, cb: ResultCallback<number>): void;
   read(path: string, fh: number, buffer: Buffer, length: number, position: number, cb: StatusCallback): void;
   write(path: string, fh: number, buffer: Buffer, length: number, position: number, cb: StatusCallback): void;
   release(path: string, fh: number, cb: StatusCallback): void;
+  releasedir(path: string, fh: number, cb: StatusCallback): void;
   flush(path: string, fh: number, cb: StatusCallback): void;
   truncate(path: string, size: number, cb: StatusCallback): void;
+  ftruncate(path: string, fh: number, size: number, cb: StatusCallback): void;
   unlink(path: string, cb: StatusCallback): void;
   mkdir(path: string, mode: number, cb: StatusCallback): void;
   rmdir(path: string, cb: StatusCallback): void;
@@ -33,10 +45,16 @@ export interface FuseOps {
   chmod(path: string, mode: number, cb: StatusCallback): void;
   chown(path: string, uid: number, gid: number, cb: StatusCallback): void;
   fsync(path: string, fh: number, datasync: number, cb: StatusCallback): void;
+  fsyncdir(path: string, fh: number, datasync: number, cb: StatusCallback): void;
+  utimens: NotImplementedOperation;
+  readlink: NotImplementedOperation;
+  mknod: NotImplementedOperation;
   setxattr(path: string, name: string, value: Buffer, position: number, flags: number, cb: StatusCallback): void;
-  getxattr(path: string, name: string, position: number, cb: ResultCallback<Buffer | null>): void;
-  listxattr(path: string, cb: ResultCallback<Buffer | null>): void;
+  getxattr(path: string, name: string, position: number, cb: StatusCallback): void;
+  listxattr(path: string, cb: ResultCallback<Buffer>): void;
   removexattr(path: string, name: string, cb: StatusCallback): void;
+  link: NotImplementedOperation;
+  symlink: NotImplementedOperation;
 }
 
 export interface FuseStat {
@@ -58,7 +76,19 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
   const handles = new Map<number, string>();
   let nextHandle = 1;
 
+  const openHandle = (path: string): number => {
+    const handle = nextHandle++;
+    handles.set(handle, path);
+    return handle;
+  };
+
   return {
+    init(cb) {
+      cb?.(0);
+    },
+
+    error: notImplemented("error"),
+
     readdir(path, cb) {
       try {
         const node = vfs.get(path);
@@ -83,6 +113,10 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
       cb(0, statNode(node));
     },
 
+    fgetattr(path, _fh, cb) {
+      this.getattr(path, cb);
+    },
+
     open(path, _flags, cb) {
       const node = vfs.get(path);
       if (node === undefined) {
@@ -94,9 +128,21 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
         return;
       }
 
-      const handle = nextHandle++;
-      handles.set(handle, path);
-      cb(0, handle);
+      cb(0, openHandle(path));
+    },
+
+    opendir(path, _flags, cb) {
+      const node = vfs.get(path);
+      if (node === undefined) {
+        cb(ERRNO.ENOENT, 0);
+        return;
+      }
+      if (node.type !== "dir") {
+        cb(ERRNO.ENOTEMPTY, 0);
+        return;
+      }
+
+      cb(0, openHandle(path));
     },
 
     create(path, mode, cb) {
@@ -107,9 +153,7 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
         }
 
         vfs.createFile(path, 0o100000 | mode);
-        const handle = nextHandle++;
-        handles.set(handle, path);
-        cb(0, handle);
+        cb(0, openHandle(path));
       } catch {
         cb(ERRNO.ENOENT, 0);
       }
@@ -136,11 +180,20 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
       cb(0);
     },
 
+    releasedir(_path, fh, cb) {
+      handles.delete(fh);
+      cb(0);
+    },
+
     flush(_path, _fh, cb) {
       cb(0);
     },
 
     truncate(path, size, cb) {
+      cb(vfs.truncate(path, size) ? 0 : ERRNO.ENOENT);
+    },
+
+    ftruncate(path, _fh, size, cb) {
       cb(vfs.truncate(path, size) ? 0 : ERRNO.ENOENT);
     },
 
@@ -152,7 +205,7 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
       try {
         vfs.mkdir(path, mode);
         cb(0);
-      } catch (error) {
+      } catch {
         cb(vfs.exists(path) ? ERRNO.EEXIST : ERRNO.ENOENT);
       }
     },
@@ -211,18 +264,30 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
       cb(0);
     },
 
-    setxattr(_path, _name, _value, _position, _flags, cb) {
-      cb(ERRNO.ENOTSUP);
+    fsyncdir(_path, _fh, _datasync, cb) {
+      cb(0);
     },
-    getxattr(_path, _name, _position, cb) {
-      cb(ERRNO.ENOTSUP, null);
+
+    utimens: notImplemented("utimens"),
+    readlink: notImplemented("readlink"),
+    mknod: notImplemented("mknod"),
+    setxattr(path, _name, _value, _position, _flags, cb) {
+      cb(vfs.exists(path) ? 0 : ERRNO.ENOENT);
     },
-    listxattr(_path, cb) {
-      cb(ERRNO.ENOTSUP, null);
+
+    getxattr(path, _name, _position, cb) {
+      cb(vfs.exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
-    removexattr(_path, _name, cb) {
-      cb(ERRNO.ENOTSUP);
+
+    listxattr(path, cb) {
+      cb(vfs.exists(path) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
     },
+
+    removexattr(path, _name, cb) {
+      cb(vfs.exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
+    },
+    link: notImplemented("link"),
+    symlink: notImplemented("symlink"),
   };
 }
 
@@ -260,6 +325,12 @@ export async function mountFuse(options: { mountPoint: string; vfs: MemoryVfs })
         });
       });
     },
+  };
+}
+
+function notImplemented(operation: string): NotImplementedOperation {
+  return () => {
+    throw new NotImplementedError(operation);
   };
 }
 

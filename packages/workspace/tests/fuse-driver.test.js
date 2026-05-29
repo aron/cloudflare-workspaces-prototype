@@ -1,11 +1,77 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
-const { makeFuseOps } = require("../dist/fuse/driver.js");
+const { NotImplementedError, makeFuseOps } = require("../dist/fuse/driver.js");
 const { MemoryVfs } = require("../dist/fuse/vfs.js");
 
 const callback = (fn) => new Promise((resolve) => fn((errno, result) => resolve({ errno, result })));
 const status = (fn) => new Promise((resolve) => fn((value) => resolve(value)));
+
+const fuseNativeOperationNames = [
+  "init",
+  "error",
+  "access",
+  "statfs",
+  "fgetattr",
+  "getattr",
+  "flush",
+  "fsync",
+  "fsyncdir",
+  "readdir",
+  "truncate",
+  "ftruncate",
+  "utimens",
+  "readlink",
+  "chown",
+  "chmod",
+  "mknod",
+  "setxattr",
+  "getxattr",
+  "listxattr",
+  "removexattr",
+  "open",
+  "opendir",
+  "read",
+  "write",
+  "release",
+  "releasedir",
+  "create",
+  "unlink",
+  "rename",
+  "link",
+  "symlink",
+  "mkdir",
+  "rmdir",
+];
+
+const notImplementedOperationNames = [
+  "error",
+  "utimens",
+  "readlink",
+  "mknod",
+  "link",
+  "symlink",
+];
+
+test("FUSE ops expose the complete fuse-native operation surface", () => {
+  const ops = makeFuseOps(new MemoryVfs());
+
+  for (const name of fuseNativeOperationNames) {
+    assert.equal(typeof ops[name], "function", `${name} should be defined`);
+  }
+});
+
+test("not-yet-implemented FUSE ops raise NotImplementedError", () => {
+  const ops = makeFuseOps(new MemoryVfs());
+
+  for (const name of notImplementedOperationNames) {
+    assert.throws(
+      () => ops[name](),
+      (error) => error instanceof NotImplementedError && error.operation === name,
+      `${name} should raise NotImplementedError`,
+    );
+  }
+});
 
 test("FUSE ops expose an in-memory filesystem", async () => {
   const vfs = new MemoryVfs();
@@ -33,17 +99,24 @@ test("FUSE ops expose an in-memory filesystem", async () => {
   assert.equal(stat.result.size, bytes.length);
   assert.equal(stat.result.mode & 0o170000, 0o100000);
 
+  const fstat = await callback((cb) => ops.fgetattr("/dir/file.txt", create.result, cb));
+  assert.equal(fstat.errno, 0);
+  assert.equal(fstat.result.size, bytes.length);
+
   assert.equal(await status((cb) => ops.rename("/dir/file.txt", "/dir/renamed.txt", cb)), 0);
   assert.equal(vfs.readFile("/dir/renamed.txt").toString(), "hello fuse");
 
   assert.equal(await status((cb) => ops.truncate("/dir/renamed.txt", 5, cb)), 0);
   assert.equal(vfs.readFile("/dir/renamed.txt").toString(), "hello");
 
+  assert.equal(await status((cb) => ops.ftruncate("/dir/renamed.txt", create.result, 2, cb)), 0);
+  assert.equal(vfs.readFile("/dir/renamed.txt").toString(), "he");
+
   assert.equal(await status((cb) => ops.unlink("/dir/renamed.txt", cb)), 0);
   assert.deepEqual(vfs.readdir("/dir"), []);
 });
 
-test("FUSE ops return errno values instead of throwing", async () => {
+test("FUSE ops return errno values instead of throwing for expected filesystem errors", async () => {
   const ops = makeFuseOps(new MemoryVfs());
 
   const missing = await callback((cb) => ops.getattr("/missing", cb));
