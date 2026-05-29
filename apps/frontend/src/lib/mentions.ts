@@ -23,7 +23,14 @@ const HANDLE_CHAR = /[a-z0-9._-]/i;
 /** Full handle regex used for tokenization. */
 const MENTION_RE = /@([a-z0-9][a-z0-9._-]{0,63})/gi;
 
-export interface MentionRun {
+/**
+ * Token mentions stored on the wire: `<user:HACKSPACE_USER_ID>` and
+ * `<agent:AGENT_ID>`. Hackspace user ids are opaque short ids; agent ids
+ * are short slugs. We accept the same loose `[A-Za-z0-9._-]` body for both.
+ */
+const TOKEN_RE = /<(user|agent):([A-Za-z0-9._-]{1,128})>/g;
+
+export interface HandleMentionRun {
   type:   "mention";
   /** The raw matched text including the leading `@`. */
   raw:    string;
@@ -31,39 +38,72 @@ export interface MentionRun {
   handle: string;
 }
 
+export interface RefMentionRun {
+  type: "ref";
+  /** Full matched token, e.g. `<user:abc123>`. */
+  raw:  string;
+  kind: "user" | "agent";
+  /** The id between the colon and the closing `>`. */
+  id:   string;
+}
+
 export interface TextRun {
   type: "text";
   text: string;
 }
 
-export type Run = TextRun | MentionRun;
+export type Run = TextRun | HandleMentionRun | RefMentionRun;
 
 /**
- * Split `text` into runs. Mentions that don't appear in `known` (lowercased
- * set of valid handles) are emitted as plain text — we don't want random
- * `@symbols` lighting up.
+ * Split `text` into runs. Recognises both the on-the-wire token form
+ * (`<user:ID>` / `<agent:ID>`) and the user-typed legacy form (`@handle`).
  *
- * If `known` is omitted, every well-formed `@handle` token is treated as a
- * mention. Handy for tests; production callers always pass a set.
+ * `known` (lowercased set of valid handles) gates `@handle` matches so
+ * random `@symbols` don't light up. Pass undefined to accept any handle.
+ * Token-form refs are always emitted — callers resolve unknown ids to
+ * a fallback label at render time.
  */
 export function tokenize(text: string, known?: ReadonlySet<string>): Run[] {
   if (!text) return [];
-  const out: Run[] = [];
-  let lastIndex = 0;
+  // Collect matches from both regexes, then walk in order. Two passes is
+  // simpler than interleaving two stateful iterators and the strings are
+  // short.
+  type Hit =
+    | { start: number; end: number; run: HandleMentionRun }
+    | { start: number; end: number; run: RefMentionRun };
+  const hits: Hit[] = [];
+  for (const m of text.matchAll(TOKEN_RE)) {
+    const start = m.index ?? 0;
+    hits.push({
+      start,
+      end: start + m[0]!.length,
+      run: { type: "ref", raw: m[0]!, kind: m[1] as "user" | "agent", id: m[2]! },
+    });
+  }
   for (const m of text.matchAll(MENTION_RE)) {
-    const start  = m.index ?? 0;
-    const raw    = m[0]!;
+    const start = m.index ?? 0;
     const handle = m[1]!.toLowerCase();
     if (known && !known.has(handle)) continue;
-    if (start > lastIndex) {
-      out.push({ type: "text", text: text.slice(lastIndex, start) });
-    }
-    out.push({ type: "mention", raw, handle });
-    lastIndex = start + raw.length;
+    // Skip handles that overlap a token (e.g. the `@` is inside `<user:@x>`
+    // — hypothetical, but cheap to guard).
+    if (hits.some(h => start >= h.start && start < h.end)) continue;
+    hits.push({
+      start,
+      end: start + m[0]!.length,
+      run: { type: "mention", raw: m[0]!, handle },
+    });
   }
-  if (lastIndex < text.length) {
-    out.push({ type: "text", text: text.slice(lastIndex) });
+  hits.sort((a, b) => a.start - b.start);
+
+  const out: Run[] = [];
+  let last = 0;
+  for (const h of hits) {
+    if (h.start < last) continue;  // shouldn't happen post-sort, defensive
+    if (h.start > last) out.push({ type: "text", text: text.slice(last, h.start) });
+    out.push(h.run);
+    last = h.end;
   }
+  if (last < text.length) out.push({ type: "text", text: text.slice(last) });
   return out;
 }
 
@@ -125,4 +165,31 @@ export function applyMention(
   const insert = `@${handle} `;
   const next   = text.slice(0, active.start) + insert + text.slice(active.end);
   return { text: next, caret: active.start + insert.length };
+}
+
+/**
+ * Resolver passed by callers to map a `@handle` to a structured ref. Returns
+ * null when the handle isn't a known user/agent — in that case the handle
+ * stays as plain text in the serialised output.
+ */
+export type HandleResolver =
+  (handle: string) => { kind: "user" | "agent"; id: string } | null;
+
+/**
+ * Serialise `@handle` mentions to `<user:ID>` / `<agent:ID>` tokens for
+ * persistence on the wire. Already-tokenised refs in the input pass through
+ * unchanged. Unknown handles (no resolver match) also pass through verbatim
+ * so the user's literal text is preserved — the server tokenizer will just
+ * render them as plain `@symbols`.
+ */
+export function serializeMentions(text: string, resolve: HandleResolver): string {
+  const runs = tokenize(text);
+  let out = "";
+  for (const r of runs) {
+    if (r.type === "text") { out += r.text; continue; }
+    if (r.type === "ref")  { out += r.raw;  continue; }
+    const ref = resolve(r.handle);
+    out += ref ? `<${ref.kind}:${ref.id}>` : r.raw;
+  }
+  return out;
 }

@@ -24,13 +24,24 @@
 import { Server } from "partyserver";
 import { requireIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
+import { APP_DO_NAME } from "./app.js";
+import {
+  buildSnippet,
+  extractMentionedUserIds,
+  sendGChatMention,
+} from "./notify.js";
+import { resolveBaseUrl } from "./base-url.js";
+
 
 /**
- * Triggers an agent thread when the message mentions `@agent` as a whole word.
- * Single-agent app: there's only one bot to address, so we don't parse names.
+ * Triggers an agent thread when the message mentions the agent. Accepts
+ * either the legacy `@agent` literal or the canonical `<agent:agent>` token.
+ * Single-agent app: only one bot to address, so we don't parse ids.
  */
 function hasAgentMention(text: string): boolean {
-  return /(^|\s)@agent(\b|$)/i.test(text);
+  if (/(^|\s)@agent(\b|$)/i.test(text)) return true;
+  if (/<agent:[A-Za-z0-9._-]+>/.test(text)) return true;
+  return false;
 }
 import type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";
 
@@ -229,7 +240,8 @@ export class Room extends Server<Env> {
     if (threadId && mintsThread) {
       const meta = this.loadMeta();
       const seedBody = {
-        roomId:    meta?.id ?? "",
+        roomId:    meta?.id   ?? "",
+        roomName:  meta?.name ?? "",
         threadId,
         message,
       };
@@ -247,7 +259,80 @@ export class Room extends Server<Env> {
       } catch { /* swallow */ }
     }
 
+    // Fire @mention notifications via Google Chat webhook. Best-effort:
+    // failures never block the message POST, and we always run inside
+    // `waitUntil` so the network round-trip happens after the response.
+    this.maybeNotifyMentions(message, identity.userId, request, threadId);
+
     return Response.json({ message, threadId, clientId }, { status: 201 });
+  }
+
+  // ---- mention notifications ----
+
+  /**
+   * Inspect a freshly-persisted message for `<user:ID>` tokens and POST a
+   * Google Chat ping for each mentioned user that has a Google Chat ID on
+   * file. No-op when `GCHAT_WEBHOOK_URL` isn't configured. Self-mentions
+   * are skipped. All work runs under `ctx.waitUntil` so it doesn't extend
+   * the request critical path.
+   */
+  private maybeNotifyMentions(
+    message: AppMessage,
+    authorUserId: string,
+    request: Request,
+    threadId: string | undefined,
+  ): void {
+    const webhookUrl = (this.env as { GCHAT_WEBHOOK_URL?: string }).GCHAT_WEBHOOK_URL;
+    if (!webhookUrl) return;
+    const text = message.parts.map(p => p.text).join("\n");
+    const ids = extractMentionedUserIds(text).filter(id => id !== authorUserId);
+    if (ids.length === 0) return;
+
+    const meta = this.loadMeta();
+    const roomName = meta?.name ?? "room";
+    const roomId   = meta?.id ?? "";
+    const snippet  = buildSnippet(text);
+
+    // Build a deep-linking URL back to this specific message. Falls back to
+    // omitting the URL when we don't have a base origin to anchor against —
+    // bare paths are useless in Google Chat.
+    const baseUrl = resolveBaseUrl(this.env, request);
+    const roomUrl = baseUrl && roomId
+      ? (threadId
+        ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#${message.id}`
+        : `${baseUrl}/rooms/${roomId}#${message.id}`)
+      : undefined;
+
+    this.ctx.waitUntil((async () => {
+      try {
+        const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
+        const res = await appStub.fetch(new Request("https://app/notify-lookup", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          // No identity header: this is a DO-to-DO call. App.notify-lookup
+          // is reached via the same `fetch` middleware, but identity is
+          // required upstream; we hop in via a synthetic header set below.
+          body:    JSON.stringify({ userIds: ids }),
+        }));
+        if (!res.ok) return;
+        const body = await res.json() as {
+          users: Array<{ userId: string; name: string; googleChatUserId: string | null }>;
+        };
+        await Promise.all(body.users.map(u => {
+          if (!u.googleChatUserId) return;
+          return sendGChatMention({
+            webhookUrl,
+            googleChatUserId: u.googleChatUserId,
+            recipientName:    u.name,
+            roomName,
+            roomUrl,
+            snippet,
+          });
+        }));
+      } catch (e) {
+        console.warn(`[room] notify-mentions failed: ${(e as Error).message}`);
+      }
+    })());
   }
 
   // ---- queries ----

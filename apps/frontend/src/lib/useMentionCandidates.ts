@@ -25,11 +25,14 @@ export interface MentionCandidate {
   /** Subtitle: short description or user email. */
   sub:    string;
   kind:   "agent" | "user";
+  /** Stable id for this candidate (Hackspace userId for users, agent slug for agents). */
+  id:     string;
 }
 
 /** The one server-meaningful handle. Anything else is decorative. */
 const AGENT_CANDIDATE: MentionCandidate = {
   handle: "agent",
+  id:     "agent",
   label:  "Agent",
   sub:    "the room's assistant",
   kind:   "agent",
@@ -39,12 +42,18 @@ interface State {
   candidates: MentionCandidate[];
   /** Lowercased handles, for renderers to know which `@x` to pill. */
   handles:    ReadonlySet<string>;
+  /** `kind:id` -> candidate, for rendering `<user:ID>` / `<agent:ID>` tokens. */
+  refs:       ReadonlyMap<string, MentionCandidate>;
+  /** Lowercased handle -> candidate, for serialising `@handle` -> token. */
+  byHandle:   ReadonlyMap<string, MentionCandidate>;
   loading:    boolean;
 }
 
 const INITIAL: State = {
   candidates: [AGENT_CANDIDATE],
   handles:    new Set([AGENT_CANDIDATE.handle]),
+  refs:       new Map([[`agent:${AGENT_CANDIDATE.id}`, AGENT_CANDIDATE]]),
+  byHandle:   new Map([[AGENT_CANDIDATE.handle, AGENT_CANDIDATE]]),
   loading:    true,
 };
 
@@ -64,13 +73,18 @@ async function load() {
       const users = await fetchUsers().catch(() => []);
       const seen = new Set<string>([AGENT_CANDIDATE.handle]);
       const candidates: MentionCandidate[] = [AGENT_CANDIDATE];
+      const refs     = new Map<string, MentionCandidate>([[`agent:${AGENT_CANDIDATE.id}`, AGENT_CANDIDATE]]);
+      const byHandle = new Map<string, MentionCandidate>([[AGENT_CANDIDATE.handle, AGENT_CANDIDATE]]);
       for (const u of users) {
         const h = u.username.toLowerCase();
         if (seen.has(h)) continue;
         seen.add(h);
-        candidates.push({ handle: h, label: u.name, sub: u.email, kind: "user" });
+        const c: MentionCandidate = { handle: h, label: u.name, sub: u.email, kind: "user", id: u.id };
+        candidates.push(c);
+        refs.set(`user:${u.id}`, c);
+        byHandle.set(h, c);
       }
-      publish({ candidates, handles: seen, loading: false });
+      publish({ candidates, handles: seen, refs, byHandle, loading: false });
     } finally {
       inflight = null;
     }
@@ -93,6 +107,20 @@ export function useMentionCandidates(): State {
 /** Convenience hook for read-only sites that only need the handle set. */
 export function useMentionHandles(): ReadonlySet<string> {
   return useMentionCandidates().handles;
+}
+
+/** Hook returning the ref map (`"user:ID"` / `"agent:ID"` -> candidate). */
+export function useMentionRefs(): ReadonlyMap<string, MentionCandidate> {
+  return useMentionCandidates().refs;
+}
+
+/** Hook returning a `@handle` -> ref resolver suitable for `serializeMentions`. */
+export function useHandleResolver(): (handle: string) => { kind: "user" | "agent"; id: string } | null {
+  const { byHandle } = useMentionCandidates();
+  return (handle: string) => {
+    const c = byHandle.get(handle.toLowerCase());
+    return c ? { kind: c.kind, id: c.id } : null;
+  };
 }
 
 /**

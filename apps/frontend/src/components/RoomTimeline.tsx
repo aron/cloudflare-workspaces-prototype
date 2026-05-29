@@ -25,6 +25,8 @@ import {
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MentionText } from "@/components/MentionText";
 import { MentionTextarea } from "@/components/MentionTextarea";
+import { serializeMentions } from "@/lib/mentions";
+import { useHandleResolver } from "@/lib/useMentionCandidates";
 
 
 import {
@@ -82,6 +84,7 @@ export function RoomTimeline({
   const [error,    setError]    = useState<string | null>(null);
   const [input,    setInput]    = useState("");
   const [sending,  setSending]  = useState(false);
+  const resolveHandle = useHandleResolver();
 
   // Scroll plumbing for the room timeline. Mirrors ThreadPanel: the
   // room loads pinned to the bottom (latest message visible), follows
@@ -261,8 +264,12 @@ export function RoomTimeline({
   }, [pending, roomId, applyServerMessage]);
 
   const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
+    const raw = input.trim();
+    if (!raw || sending) return;
+    // Serialise `@handle` to `<user:ID>` / `<agent:ID>` tokens before send.
+    // The token form is what gets persisted; the @-handle was just typing UX.
+    const text = serializeMentions(raw, resolveHandle);
+
     setSending(true);
     setInput("");
 
@@ -300,7 +307,7 @@ export function RoomTimeline({
     } finally {
       setSending(false);
     }
-  }, [input, sending, roomId, me, applyServerMessage, scrollToBottom]);
+  }, [input, sending, roomId, me, applyServerMessage, scrollToBottom, resolveHandle]);
 
   return (
     <section className="flex h-full min-w-0 flex-col border-r border-kumo-line">

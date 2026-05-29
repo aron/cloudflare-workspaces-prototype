@@ -12,18 +12,24 @@
 import { Fragment, useMemo } from "react";
 
 import { tokenize } from "@/lib/mentions";
-import { useMentionHandles } from "@/lib/useMentionCandidates";
+import { useMentionCandidates } from "@/lib/useMentionCandidates";
+
 
 export function MentionText({ text, className }: { text: string; className?: string }) {
-  const handles = useMentionHandles();
+  const { handles, refs } = useMentionCandidates();
   const runs = useMemo(() => tokenize(text, handles), [text, handles]);
   if (runs.length === 0) return null;
   return (
     <span className={className}>
-      {runs.map((r, i) => r.type === "text"
-        ? <Fragment key={i}>{r.text}</Fragment>
-        : <MentionPill key={i} handle={r.handle} raw={r.raw} />,
-      )}
+      {runs.map((r, i) => {
+        if (r.type === "text") return <Fragment key={i}>{r.text}</Fragment>;
+        if (r.type === "mention") return <MentionPill key={i} handle={r.handle} raw={r.raw} />;
+        // r.type === "ref"
+        const c = refs.get(`${r.kind}:${r.id}`);
+        const handle = c?.handle ?? (r.kind === "agent" ? "agent" : r.id);
+        const label  = c ? `@${c.handle}` : (r.kind === "agent" ? "@agent" : "@unknown");
+        return <MentionPill key={i} handle={handle} raw={label} />;
+      })}
     </span>
   );
 }

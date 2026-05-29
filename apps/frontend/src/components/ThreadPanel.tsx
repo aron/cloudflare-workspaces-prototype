@@ -24,6 +24,8 @@ import {
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MentionText } from "@/components/MentionText";
 import { MentionTextarea } from "@/components/MentionTextarea";
+import { serializeMentions } from "@/lib/mentions";
+import { useHandleResolver } from "@/lib/useMentionCandidates";
 import { MentionHighlighter } from "@/components/MentionHighlighter";
 import {
   Message,
@@ -80,6 +82,7 @@ export function ThreadPanel({
 }) {
   const [root, setRoot] = useState<AppMessage | null>(null);
   const [input, setInput] = useState("");
+  const resolveHandle = useHandleResolver();
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -222,10 +225,11 @@ export function ThreadPanel({
     }
 
     setInput("");
+    const serialised = serializeMentions(text, resolveHandle);
     if (turnInFlight) {
-      setSteerQueue(q => [...q, text]);
+      setSteerQueue(q => [...q, serialised]);
     } else {
-      sendMessage({ role: "user", parts: [{ type: "text", text }] });
+      sendMessage({ role: "user", parts: [{ type: "text", text: serialised }] });
     }
     // Submitting a new message implies the user wants to follow the
     // conversation again. Re-engage the scroll pin and scroll the
@@ -233,7 +237,7 @@ export function ThreadPanel({
     // reply that's about to stream) stay in view without manual
     // intervention.
     scrollToBottom();
-  }, [input, turnInFlight, sendMessage, threadId, scrollToBottom]);
+  }, [input, turnInFlight, sendMessage, threadId, scrollToBottom, resolveHandle]);
 
   const dismissViewerEntry = useCallback((id: string) => {
     setViewerEntries(prev => prev.filter(e => e.id !== id));
