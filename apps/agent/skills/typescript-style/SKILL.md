@@ -49,3 +49,9 @@ These conventions apply across the agent worker, the shared package, and the fro
 - Run with vitest. Tests live next to their target under `tests/` or as `*.test.ts` siblings.
 - Prefer real implementations and fakes over mocks. Stand up a real DO via vitest-pool-workers when you can.
 - One assertion per concept. Descriptive names that read like a spec.
+
+## Dependencies
+
+- Pass `--no-audit --no-fund` to every `npm install` / `npm ci` you run via `exec`. The audit step makes an extra registry round-trip whose findings the agent can't action, and the funding banner is multi-line noise that costs tokens on the way back. Together they routinely shave seconds off a cold install.
+- For installs whose output you don't need to diagnose, add `--loglevel=error` (or `--silent`) so the resolver's per-package progress lines don't dominate the exec output buffer.
+- Example: `npm install --no-audit --no-fund --loglevel=error <pkg>`.
