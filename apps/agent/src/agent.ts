@@ -58,7 +58,7 @@ import {
   createWebFetchTool,
   createWebSearchTool,
 } from "@cloudflare/web-tools";
-import { resolveContainerId } from "./pool.js";
+import { resolveContainerId, releaseContainer } from "./pool.js";
 import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
 import { buildSessionTar } from "./debug-tar.js";
@@ -790,6 +790,13 @@ export class Agent extends Think<Env> {
 
     if (request.method === "POST" && url.pathname.endsWith("/reset")) {
       await this.clearMessages();
+      // The agent's sessionId (which the pool keys assignments on) is this
+      // DO's name. Releasing here returns the container to the pool
+      // immediately on reset instead of waiting for the idle sweep —
+      // matters most when a user resets a thread to recover from a
+      // wedged exec (e.g. the 503 fallout we just spent three commits
+      // hardening).
+      await releaseContainer(this.env, this.name);
       return Response.json({ cleared: true });
     }
 
@@ -798,6 +805,7 @@ export class Agent extends Think<Env> {
     // /api/rooms/:id/threads/:tid deletion.
     if (request.method === "DELETE" && (url.pathname === "/" || url.pathname === "")) {
       await this.ctx.storage.deleteAll();
+      await releaseContainer(this.env, this.name);
       return Response.json({ ok: true });
     }
 

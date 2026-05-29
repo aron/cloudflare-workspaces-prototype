@@ -23,6 +23,15 @@ export interface WarmPoolConfig {
   warmTarget?: number;
   /** How often to check and replenish warm containers (ms). @default 10000 */
   refreshInterval?: number;
+  /**
+   * How long an assignment can sit untouched before the pool reclaims it,
+   * in ms. `getContainer` bumps the touched-at timestamp on every call, so
+   * an active session keeps its container indefinitely; once the agent
+   * stops issuing exec calls (DO hibernated, room idle, browser tab
+   * closed) the slot eventually frees up rather than burning a quota seat
+   * forever. @default 3_600_000 (1 hour). Set to 0 to disable.
+   */
+  assignmentIdleTtl?: number;
 }
 
 export interface PoolStats {
@@ -58,14 +67,61 @@ interface ContainerWithState {
   getState(): Promise<ContainerState>;
 }
 
+/** Persisted assignment row: the container UUID plus a last-touched stamp. */
+export interface AssignmentRecord {
+  uuid: string;
+  /** Wall-clock ms of the last `getContainer` call — drives idle eviction. */
+  touchedAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
 const DEFAULT_CONFIG: Required<WarmPoolConfig> = {
   warmTarget: 0,
-  refreshInterval: 10_000
+  refreshInterval: 10_000,
+  assignmentIdleTtl: 3_600_000,
 };
+
+// ---------------------------------------------------------------------------
+// Pure helpers (exported for unit tests so we don't have to spin up a DO)
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide which assignments are old enough to evict. Pure function so
+ * the alarm-side logic is unit-testable without the DO runtime.
+ *
+ *   - `ttl <= 0` disables eviction — returns `[]`.
+ *   - An entry is expired iff `now - touchedAt >= ttl`.
+ *   - Returns the *snapshots* (uuid + touchedAt) rather than mutating
+ *     the map; the caller deletes and stops containers in DO context.
+ */
+export function selectExpiredAssignments(
+  assignments: Iterable<[string, AssignmentRecord]>,
+  now: number,
+  ttl: number,
+): Array<{ sandboxId: string; uuid: string; touchedAt: number }> {
+  if (ttl <= 0) return [];
+  const cutoff = now - ttl;
+  const expired: Array<{ sandboxId: string; uuid: string; touchedAt: number }> = [];
+  for (const [sandboxId, record] of assignments) {
+    if (record.touchedAt <= cutoff) {
+      expired.push({ sandboxId, uuid: record.uuid, touchedAt: record.touchedAt });
+    }
+  }
+  return expired;
+}
+
+/**
+ * Mirror of the SDK’s `Container.containerFetch` short-circuit. The pool
+ * uses this to decide whether handing an existing UUID back to a caller
+ * will avoid a re-start path; tests use it to pin the predicate without
+ * touching the DO base class.
+ */
+export function isAssignmentStateUsable(status: string): boolean {
+  return status === "healthy";
+}
 
 // ---------------------------------------------------------------------------
 // WarmPool Durable Object
@@ -87,8 +143,16 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
   /** Container UUIDs that are warm and available for assignment */
   private warmContainers: Set<string> = new Set();
 
-  /** Maps caller-provided sandbox IDs to container UUIDs (1:1, no sharing) */
-  private assignments: Map<string, string> = new Map();
+  /**
+   * Maps caller-provided sandbox IDs to container assignments.
+   *
+   * `touchedAt` is updated on every `getContainer` call. The idle-eviction
+   * pass in `alarm()` drops any assignment whose `touchedAt` is older than
+   * `assignmentIdleTtl`. Previously this was `Map<string, string>` and
+   * assignments lived forever, which leaked quota slots across hibernated
+   * agents — see the `getContainer` and `alarm` paths.
+   */
+  private assignments: Map<string, AssignmentRecord> = new Map();
 
   /** Containers currently starting — excluded from health checks */
   private startingContainers: Set<string> = new Set();
@@ -98,6 +162,22 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
 
   private capacityExhausted = false;
   private initialized = false;
+
+  /**
+   * Clock source. Overridable via `setClockForTesting` so unit tests can
+   * drive idle-eviction without burning wall time. Defaults to `Date.now`
+   * which the workerd runtime advances correctly inside DO context.
+   */
+  private clock: () => number = Date.now;
+
+  /** Test seam: override the clock used for touchedAt and alarm scheduling. */
+  setClockForTesting(clock: () => number): void {
+    this.clock = clock;
+  }
+
+  private now(): number {
+    return this.clock();
+  }
 
   // =======================================================================
   // Public RPC methods
@@ -110,11 +190,18 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
    */
   async getContainer(sandboxId: string): Promise<string> {
     await this.init();
+    const now = this.now();
 
     const existing = this.assignments.get(sandboxId);
     if (existing) {
-      const running = await this.isContainerRunning(existing);
-      if (running) return existing;
+      const usable = await this.isAssignmentUsable(existing.uuid);
+      if (usable) {
+        // Touch the assignment so a long-running session doesn't get its
+        // container reclaimed mid-conversation by the idle-eviction pass.
+        existing.touchedAt = now;
+        await this.persist();
+        return existing.uuid;
+      }
       this.assignments.delete(sandboxId);
       await this.persist();
     }
@@ -123,7 +210,7 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     if (this.warmContainers.size > 0) {
       const containerUUID = this.warmContainers.values().next().value as string;
       this.warmContainers.delete(containerUUID);
-      this.assignments.set(sandboxId, containerUUID);
+      this.assignments.set(sandboxId, { uuid: containerUUID, touchedAt: now });
       await this.persist();
       return containerUUID;
     }
@@ -136,7 +223,7 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     // Start one on-demand
     const containerUUID = await this.startContainer();
     if (containerUUID) {
-      this.assignments.set(sandboxId, containerUUID);
+      this.assignments.set(sandboxId, { uuid: containerUUID, touchedAt: now });
       await this.persist();
       return containerUUID;
     }
@@ -156,10 +243,7 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
   async lookupContainer(sandboxId: string): Promise<string | null> {
     await this.init();
     const existing = this.assignments.get(sandboxId);
-    if (existing) {
-      return existing;
-    }
-    return null;
+    return existing ? existing.uuid : null;
   }
 
   /**
@@ -169,6 +253,24 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     await this.init();
     this.removeContainer(containerUUID);
     await this.persist();
+  }
+
+  /**
+   * Explicitly release a sandbox→container assignment. Stops the container
+   * (best effort) and drops the assignment so the quota slot is freed
+   * immediately rather than waiting for the idle-eviction sweep.
+   *
+   * Idempotent: calling for an unknown sandbox ID is a no-op. Used by the
+   * Agent when a thread is reset or explicitly torn down.
+   */
+  async releaseAssignment(sandboxId: string): Promise<boolean> {
+    await this.init();
+    const existing = this.assignments.get(sandboxId);
+    if (!existing) return false;
+    this.assignments.delete(sandboxId);
+    await this.persist();
+    await this.stopContainerSafely(existing.uuid);
+    return true;
   }
 
   /**
@@ -230,6 +332,11 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     this.capacityExhausted = false;
 
     try {
+      // Order matters: evict idle assignments first so checkContainerHealth
+      // doesn’t do a pointless getState() on a container we’re about to
+      // stop, and so adjustPool sees the freed capacity when deciding how
+      // many to start.
+      await this.evictIdleAssignments();
       await this.checkContainerHealth();
       await this.adjustPool();
       await this.keepWarmContainersAlive();
@@ -241,7 +348,7 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
       });
     }
 
-    await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
+    await this.ctx.storage.setAlarm(this.now() + this.config.refreshInterval);
   }
 
   // =======================================================================
@@ -255,9 +362,25 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
       await this.ctx.storage.get<Set<string>>('warmContainers');
     if (storedWarm) this.warmContainers = new Set(storedWarm);
 
-    const storedAssignments =
-      await this.ctx.storage.get<Map<string, string>>('assignments');
-    if (storedAssignments) this.assignments = new Map(storedAssignments);
+    // Assignments shape changed from `Map<string,string>` to
+    // `Map<string, { uuid, touchedAt }>`. Migrate the old shape on read
+    // so a rolling deploy doesn’t lose existing assignments — they just
+    // start with a fresh touchedAt of “now”, giving each one a full idle
+    // window from the moment the new code first reads it.
+    const storedAssignments = await this.ctx.storage.get<
+      Map<string, string | AssignmentRecord>
+    >('assignments');
+    if (storedAssignments) {
+      const now = this.now();
+      this.assignments = new Map();
+      for (const [sandboxId, value] of storedAssignments) {
+        if (typeof value === 'string') {
+          this.assignments.set(sandboxId, { uuid: value, touchedAt: now });
+        } else {
+          this.assignments.set(sandboxId, value);
+        }
+      }
+    }
 
     const storedConfig = await this.ctx.storage.get<WarmPoolConfig>('config');
     if (storedConfig) this.config = { ...DEFAULT_CONFIG, ...storedConfig };
@@ -282,7 +405,7 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
   private async scheduleRefresh(): Promise<void> {
     const alarm = await this.ctx.storage.getAlarm();
     if (!alarm) {
-      await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
+      await this.ctx.storage.setAlarm(this.now() + this.config.refreshInterval);
     }
   }
 
@@ -320,9 +443,45 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     }
   }
 
-  private async isContainerRunning(containerUUID: string): Promise<boolean> {
+  /**
+   * Strict liveness check used by `getContainer` before handing an
+   * existing assignment back to a caller.
+   *
+   * Requires `healthy` because that's what `Container.containerFetch`
+   * also checks before it skips `startAndWaitForPorts(port)`. A container
+   * in plain `running` state (workerd booting, defaultPort bound but
+   * other ports not yet) will trigger a re-start path on the very next
+   * fetch, which is what surfaces as a 503 when capacity is tight —
+   * exactly the failure mode in 2pv6qaa4tn7ez5c26ab6cdkbkr. If the
+   * assignment isn't `healthy` yet we drop it and grab a fresh
+   * container, leaving the not-yet-healthy one to either complete its
+   * boot (in which case the next sweep will reclaim it) or die.
+   */
+  private async isAssignmentUsable(containerUUID: string): Promise<boolean> {
     if (this.startingContainers.has(containerUUID)) return true;
+    try {
+      const stub = this.getSandboxStub(containerUUID);
+      const state = await (stub as unknown as ContainerWithState).getState();
+      return isAssignmentStateUsable(state.status);
+    } catch (error) {
+      console.warn({
+        message: 'Failed to check container status, assuming stopped',
+        component: 'warm-pool',
+        containerUUID,
+        error
+      });
+      return false;
+    }
+  }
 
+  /**
+   * Looser liveness check used by the periodic health sweep. Keeps
+   * containers that are merely `running` (mid-boot, transient port
+   * flake) so we don’t evict them faster than they can become healthy.
+   * Only removes containers the platform has clearly given up on.
+   */
+  private async isContainerAlive(containerUUID: string): Promise<boolean> {
+    if (this.startingContainers.has(containerUUID)) return true;
     try {
       const stub = this.getSandboxStub(containerUUID);
       const state = await (stub as unknown as ContainerWithState).getState();
@@ -339,12 +498,15 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
   }
 
   private async checkContainerHealth(): Promise<void> {
-    const allUUIDs = [...this.warmContainers, ...this.assignments.values()];
+    const allUUIDs = [
+      ...this.warmContainers,
+      ...[...this.assignments.values()].map((a) => a.uuid),
+    ];
 
     let anyRemoved = false;
     for (const uuid of allUUIDs) {
-      const running = await this.isContainerRunning(uuid);
-      if (!running) {
+      const alive = await this.isContainerAlive(uuid);
+      if (!alive) {
         console.info({
           message: 'Container not running, removing from pool',
           component: 'warm-pool',
@@ -355,6 +517,55 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
     }
 
     if (anyRemoved) await this.persist();
+  }
+
+  /**
+   * Drop assignments whose `touchedAt` is older than `assignmentIdleTtl`
+   * and stop the underlying containers. The DO behind the assignment
+   * keeps its own state in storage, so a session that comes back later
+   * just gets a fresh container — the workspace VFS, message log, and
+   * agent state survive on their own DOs.
+   *
+   * No-op when `assignmentIdleTtl` is 0 (eviction disabled).
+   */
+  private async evictIdleAssignments(): Promise<void> {
+    const expired = selectExpiredAssignments(
+      this.assignments,
+      this.now(),
+      this.config.assignmentIdleTtl,
+    );
+    if (expired.length === 0) return;
+    for (const { sandboxId, uuid, touchedAt } of expired) {
+      this.assignments.delete(sandboxId);
+      console.info({
+        message: 'Evicting idle assignment',
+        component: 'warm-pool',
+        sandboxId,
+        containerUUID: uuid,
+        idleMs: this.now() - touchedAt,
+      });
+      await this.stopContainerSafely(uuid);
+    }
+    await this.persist();
+  }
+
+  /**
+   * Best-effort `stop()` on a container. Failures (already stopped, lost
+   * stub, etc.) are logged but never thrown — the assignment is gone
+   * either way and the caller can’t recover.
+   */
+  private async stopContainerSafely(containerUUID: string): Promise<void> {
+    try {
+      const stub = this.getSandboxStub(containerUUID);
+      await (stub as unknown as ContainerRpc).stop();
+    } catch (error) {
+      console.warn({
+        message: 'Failed to stop released container',
+        component: 'warm-pool',
+        containerUUID,
+        error,
+      });
+    }
   }
 
   /**
@@ -483,8 +694,8 @@ export class WarmPool extends DurableObject<WarmPoolEnv> {
 
     if (this.warmContainers.delete(containerUUID)) removed = true;
 
-    for (const [sandboxId, uuid] of this.assignments) {
-      if (uuid === containerUUID) {
+    for (const [sandboxId, record] of this.assignments) {
+      if (record.uuid === containerUUID) {
         this.assignments.delete(sandboxId);
         removed = true;
         break;

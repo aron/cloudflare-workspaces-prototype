@@ -12,14 +12,18 @@ import type { WarmPool, WarmPoolConfig } from "./warm-pool.js";
 
 interface PoolEnv {
   WarmPool: DurableObjectNamespace<WarmPool>;
-  WARM_POOL_TARGET?:           string;
-  WARM_POOL_REFRESH_INTERVAL?: string;
+  WARM_POOL_TARGET?:                string;
+  WARM_POOL_REFRESH_INTERVAL?:      string;
+  WARM_POOL_ASSIGNMENT_IDLE_TTL_MS?: string;
 }
 
 function readConfig(env: PoolEnv): Required<WarmPoolConfig> {
   return {
-    warmTarget:      Number.parseInt(env.WARM_POOL_TARGET ?? "0", 10) || 0,
-    refreshInterval: Number.parseInt(env.WARM_POOL_REFRESH_INTERVAL ?? "10000", 10) || 10_000,
+    warmTarget:        Number.parseInt(env.WARM_POOL_TARGET ?? "0", 10) || 0,
+    refreshInterval:   Number.parseInt(env.WARM_POOL_REFRESH_INTERVAL ?? "10000", 10) || 10_000,
+    // Default 1 hour; set the wrangler var to 0 to disable idle eviction
+    // (e.g. during a debugging session where you want sticky assignments).
+    assignmentIdleTtl: Number.parseInt(env.WARM_POOL_ASSIGNMENT_IDLE_TTL_MS ?? "3600000", 10) || 0,
   };
 }
 
@@ -36,6 +40,21 @@ export async function resolveContainerId(env: PoolEnv, sessionId: string): Promi
   const stub = poolStub(env);
   await stub.configure(readConfig(env));
   return stub.getContainer(sessionId);
+}
+
+/**
+ * Explicitly release a session's container assignment. Called when an
+ * agent thread is reset or deleted so the quota slot is freed
+ * immediately rather than waiting for the idle-eviction sweep. Best-
+ * effort: errors are swallowed so a teardown can't fail because of a
+ * pool RPC blip.
+ */
+export async function releaseContainer(env: PoolEnv, sessionId: string): Promise<void> {
+  try {
+    await poolStub(env).releaseAssignment(sessionId);
+  } catch (err) {
+    console.warn("[pool] releaseAssignment failed", { sessionId, err });
+  }
 }
 
 /** Prime the pool — kicks off its alarm loop. Called from `scheduled()`. */
