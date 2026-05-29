@@ -28,11 +28,23 @@ export interface MentionNotice {
 const SNIPPET_MAX = 240;
 
 /**
- * Trim, collapse whitespace, and clip to {@link SNIPPET_MAX}. Returns an empty
- * string when the input has no visible content.
+ * Trim, collapse whitespace, strip Hackspace `<mention …>` tags down to
+ * their inner `@handle` text, and clip to {@link SNIPPET_MAX}. Returns an
+ * empty string when the input has no visible content.
+ *
+ * Stripping the tags matters for two reasons:
+ *   1. Google Chat treats `<...>` in the `text` field as a special
+ *      reference (e.g. `<users/123>`). Unrecognised shapes — including
+ *      our literal `<mention …>` — cause the webhook to 500.
+ *   2. The notification recipient sees a clean “@bob” in the snippet,
+ *      not a wall of HTML.
  */
 export function buildSnippet(text: string): string {
-  const cleaned = text.replace(/\s+/g, " ").trim();
+  const stripped = text.replace(
+    /<mention\s+type="(?:user|agent)"\s+id="[A-Za-z0-9._-]{1,128}"\s*>([^<]*)<\/mention>/g,
+    (_match, label: string) => label.trim() || "@user",
+  );
+  const cleaned = stripped.replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
   return cleaned.length <= SNIPPET_MAX ? cleaned : cleaned.slice(0, SNIPPET_MAX - 1) + "…";
 }

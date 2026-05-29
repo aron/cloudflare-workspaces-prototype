@@ -22,6 +22,22 @@ describe("buildSnippet", () => {
     expect(out.length).toBeLessThanOrEqual(240);
     expect(out.endsWith("…")).toBe(true);
   });
+  it("strips <mention> tags down to their @handle label", () => {
+    expect(buildSnippet(
+      'hey <mention type="user" id="abc-123">@bob</mention> ship it',
+    )).toBe("hey @bob ship it");
+  });
+  it("falls back to a generic label when the inner text is empty", () => {
+    expect(buildSnippet(
+      '<mention type="user" id="abc"></mention> pinged',
+    )).toBe("@user pinged");
+  });
+  it("never leaves a bare angle bracket in the snippet", () => {
+    // Google Chat 500s on unknown `<...>` references.
+    const out = buildSnippet('a <mention type="agent" id="agent">@agent</mention> b');
+    expect(out).not.toMatch(/<mention/);
+    expect(out).toBe("a @agent b");
+  });
 });
 
 describe("extractMentionedUserIds", () => {
