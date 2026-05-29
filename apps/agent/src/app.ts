@@ -11,12 +11,12 @@ import { DurableObject } from "cloudflare:workers";
 import { requireIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { currentModelLabel } from "./model.js";
-import type { RoomSummary, UserSummary } from "@app/shared";
+import type { RoomSummary, UserSummary, UserSettings } from "@app/shared";
 
 /** Stable singleton id used by the worker to address this DO. */
 export const APP_DO_NAME = "app";
 
-export type { RoomSummary, UserSummary } from "@app/shared";
+export type { RoomSummary, UserSummary, UserSettings } from "@app/shared";
 
 
 export class App extends DurableObject<Env> {
@@ -27,12 +27,18 @@ export class App extends DurableObject<Env> {
     this.sql = ctx.storage.sql;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS users (
-        id         TEXT PRIMARY KEY,
-        email      TEXT NOT NULL,
-        name       TEXT NOT NULL,
-        last_seen  INTEGER NOT NULL
+        id                   TEXT PRIMARY KEY,
+        email                TEXT NOT NULL,
+        name                 TEXT NOT NULL,
+        last_seen            INTEGER NOT NULL,
+        google_chat_user_id  TEXT
       )
     `);
+    // Idempotent migration for users created before google_chat_user_id existed.
+    const userCols = [...this.sql.exec<{ name: string }>(`PRAGMA table_info(users)`)];
+    if (!userCols.some(c => c.name === "google_chat_user_id")) {
+      this.sql.exec(`ALTER TABLE users ADD COLUMN google_chat_user_id TEXT`);
+    }
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS rooms (
         id          TEXT PRIMARY KEY,
@@ -46,9 +52,58 @@ export class App extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const url      = new URL(request.url);
+    // POST /notify-lookup { userIds: string[] } — internal DO-to-DO endpoint
+    // used by Room DO to look up Google Chat IDs for mention notifications.
+    // No identity required (DO stubs hop the worker middleware). We never
+    // expose this through any public worker route, and per-user Google IDs
+    // never leak through /users.
+    if (request.method === "POST" && url.pathname.endsWith("/notify-lookup")) {
+      const body = await request.json().catch(() => ({})) as { userIds?: unknown };
+      const ids = Array.isArray(body.userIds)
+        ? body.userIds.filter((x): x is string => typeof x === "string").slice(0, 100)
+        : [];
+      if (ids.length === 0) return Response.json({ users: [] });
+      const placeholders = ids.map(() => "?").join(",");
+      const rows = [...this.sql.exec<{
+        id: string; name: string; email: string; google_chat_user_id: string | null;
+      }>(
+        `SELECT id, name, email, google_chat_user_id FROM users WHERE id IN (${placeholders})`,
+        ...ids,
+      )];
+      return Response.json({
+        users: rows.map(r => ({
+          userId:           r.id,
+          name:             r.name,
+          email:            r.email,
+          googleChatUserId: r.google_chat_user_id,
+        })),
+      });
+    }
+
     const identity = requireIdentity(request);
     if (identity instanceof Response) return identity;
     this.touchUser(identity);
+
+    // GET /me/settings — owner-only read of per-user settings.
+    if (request.method === "GET" && url.pathname.endsWith("/me/settings")) {
+      return Response.json(this.loadSettings(identity.userId));
+    }
+
+    // PUT /me/settings { googleChatUserId } — owner-only write.
+    if (request.method === "PUT" && url.pathname.endsWith("/me/settings")) {
+      const body = await request.json().catch(() => ({})) as { googleChatUserId?: unknown };
+      const raw = body.googleChatUserId;
+      let gid: string | null;
+      if (raw === null || raw === undefined || raw === "") {
+        gid = null;
+      } else if (typeof raw === "string" && /^[0-9]{5,30}$/.test(raw.trim())) {
+        gid = raw.trim();
+      } else {
+        return Response.json({ error: "googleChatUserId must be 5–30 digits or null" }, { status: 400 });
+      }
+      this.sql.exec(`UPDATE users SET google_chat_user_id = ? WHERE id = ?`, gid, identity.userId);
+      return Response.json(this.loadSettings(identity.userId));
+    }
 
     // GET /me — identity echo + user upsert side-effect (already done above).
     if (request.method === "GET" && url.pathname.endsWith("/me")) {
@@ -104,6 +159,7 @@ export class App extends DurableObject<Env> {
       }
     }
 
+
     return new Response("not found", { status: 404 });
   }
 
@@ -118,6 +174,13 @@ export class App extends DurableObject<Env> {
                                      last_seen = excluded.last_seen`,
       identity.userId, identity.email, identity.name, Date.now(),
     );
+  }
+
+  private loadSettings(userId: string): UserSettings {
+    const rows = [...this.sql.exec<{ google_chat_user_id: string | null }>(
+      `SELECT google_chat_user_id FROM users WHERE id = ?`, userId,
+    )];
+    return { googleChatUserId: rows[0]?.google_chat_user_id ?? null };
   }
 
   private listRooms(): RoomSummary[] {

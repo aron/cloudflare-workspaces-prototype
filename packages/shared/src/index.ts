@@ -46,6 +46,12 @@ export interface UserSummary {
   lastSeen:  number;
 }
 
+/** Per-user settings owned by the signed-in user. */
+export interface UserSettings {
+  /** Numeric Google Workspace user ID (digits only), or null when unset. */
+  googleChatUserId: string | null;
+}
+
 // ---- messages / rooms / threads ----
 
 /**

@@ -31,6 +31,7 @@
     "BRAVE_API_KEY":       "",
     "ACCESS_TEAM_DOMAIN":  "",
     "ACCESS_AUD":          "",
-    "ACCESS_DEV_USER":     ""
+    "ACCESS_DEV_USER":     "",
+    "GCHAT_WEBHOOK_URL":   ""
   }
 }

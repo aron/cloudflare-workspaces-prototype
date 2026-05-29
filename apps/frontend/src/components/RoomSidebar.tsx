@@ -11,6 +11,8 @@ import { useEffect, useState } from "react";
 import { Plus, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { fetchMySettings } from "@/lib/api";
 import { listRooms } from "@/lib/api";
 import type { Me, RoomSummary } from "@/lib/api";
 import { navigate } from "@/lib/nav";
@@ -39,12 +41,24 @@ export function RoomSidebar({
 }) {
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [filter, setFilter] = useState("");
+  const [settingsOpen, setSettingsOpen]     = useState(false);
+  const [hasGChatId, setHasGChatId]         = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void listRooms().then(rs => { if (!cancelled) setRooms(rs); }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  // Load once so we can show a dot indicating whether notifications are wired.
+  // Re-fetched on every dialog close to reflect changes.
+  useEffect(() => {
+    let cancelled = false;
+    fetchMySettings()
+      .then(s => { if (!cancelled) setHasGChatId(!!s.googleChatUserId); })
+      .catch(() => { if (!cancelled) setHasGChatId(null); });
+    return () => { cancelled = true; };
+  }, [settingsOpen]);
 
   const visible = filter.trim()
     ? rooms.filter(r => r.name.toLowerCase().includes(filter.trim().toLowerCase()))
@@ -96,15 +110,26 @@ export function RoomSidebar({
         )}
       </div>
 
-      <div className="flex h-12 flex-shrink-0 items-center gap-2.5 border-t border-kumo-line px-4">
+      <button
+        type="button"
+        onClick={() => setSettingsOpen(true)}
+        title="Settings"
+        className="flex h-12 flex-shrink-0 items-center gap-2.5 border-t border-kumo-line px-4 text-left hover:bg-kumo-elevated"
+      >
         <div className={`flex size-8 flex-shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white ${AVATAR_PALETTE[avatarIdx(me.userId)]}`}>
           {initials(me.name)}
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{me.email}</div>
         </div>
-
-      </div>
+        {hasGChatId !== null && (
+          <span
+            title={hasGChatId ? "Google Chat notifications on" : "Google Chat notifications off"}
+            className={`size-2 flex-shrink-0 rounded-full ${hasGChatId ? "bg-emerald-500" : "bg-kumo-line"}`}
+          />
+        )}
+      </button>
+      <SettingsDialog open={settingsOpen} me={me} onClose={() => setSettingsOpen(false)} />
     </aside>
   );
 }

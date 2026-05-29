@@ -6,8 +6,8 @@
  * cookie is sent on cross-handler navigations.
  */
 
-import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSummary } from "@app/shared";
-export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSummary };
+import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary } from "@app/shared";
+export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary };
 
 
 const OPTS: RequestInit = { credentials: "same-origin" };
@@ -34,6 +34,22 @@ export async function fetchUsers(): Promise<UserSummary[]> {
     "GET /api/app/users",
   );
   return body.users;
+}
+
+export async function fetchMySettings(): Promise<UserSettings> {
+  return jsonOrThrow(await fetch("/api/app/me/settings", OPTS), "GET /api/app/me/settings");
+}
+
+export async function updateMySettings(googleChatUserId: string | null): Promise<UserSettings> {
+  return jsonOrThrow(
+    await fetch("/api/app/me/settings", {
+      ...OPTS,
+      method:  "PUT",
+      headers: { "content-type": "application/json" },
+      body:    JSON.stringify({ googleChatUserId }),
+    }),
+    "PUT /api/app/me/settings",
+  );
 }
 
 
