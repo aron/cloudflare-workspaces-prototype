@@ -227,7 +227,13 @@ export function ThreadPanel({
     } else {
       sendMessage({ role: "user", parts: [{ type: "text", text }] });
     }
-  }, [input, turnInFlight, sendMessage, threadId]);
+    // Submitting a new message implies the user wants to follow the
+    // conversation again. Re-engage the scroll pin and scroll the
+    // viewport down so the message they just sent (and the assistant
+    // reply that's about to stream) stay in view without manual
+    // intervention.
+    scrollToBottom();
+  }, [input, turnInFlight, sendMessage, threadId, scrollToBottom]);
 
   const dismissViewerEntry = useCallback((id: string) => {
     setViewerEntries(prev => prev.filter(e => e.id !== id));
@@ -246,7 +252,10 @@ export function ThreadPanel({
     const [next, ...rest] = steerQueue;
     setSteerQueue(rest);
     sendMessage({ role: "user", parts: [{ type: "text", text: next }] });
-  }, [turnInFlight, steerQueue, sendMessage]);
+    // Same rationale as the direct-submit path: a steered message
+    // landing is the user re-engaging with the conversation, re-pin.
+    scrollToBottom();
+  }, [turnInFlight, steerQueue, sendMessage, scrollToBottom]);
 
   // Download a tar archive of the agent's session state (messages + VFS +
   // metadata). Useful for filing bug reports — drop it next to a repro.

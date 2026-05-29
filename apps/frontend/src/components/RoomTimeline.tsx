@@ -280,6 +280,11 @@ export function RoomTimeline({
     outbox.enqueue(roomId, { clientId, parts, createdAt: optimistic.metadata.createdAt });
     setMessages(prev => [...prev, optimistic]);
     setPending(outbox.list(roomId).length);
+    // Submitting a new message implies the user wants to follow the
+    // timeline again. Re-engage the scroll pin and scroll down so the
+    // optimistic message they just appended is in view without manual
+    // intervention.
+    scrollToBottom();
 
     try {
       const resp = await postRoomMessage(roomId, parts, clientId);
@@ -295,7 +300,7 @@ export function RoomTimeline({
     } finally {
       setSending(false);
     }
-  }, [input, sending, roomId, me, applyServerMessage]);
+  }, [input, sending, roomId, me, applyServerMessage, scrollToBottom]);
 
   return (
     <section className="flex h-full min-w-0 flex-col border-r border-kumo-line">
