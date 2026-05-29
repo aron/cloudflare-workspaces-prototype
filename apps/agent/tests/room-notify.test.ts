@@ -87,7 +87,8 @@ describe("Room — mention notifications", () => {
     expect(spy.calls.length).toBe(1);
     const body = JSON.parse(spy.calls[0]!.init!.body as string) as { text: string };
     expect(body.text).toContain("<users/999000111>");
-    expect(body.text).toContain("Stantz");
+    // The recipient name is no longer in the payload — the <users/ID>
+    // mention renders as a pill that already shows their display name.
     expect(body.text).toContain("Hackspace");
     // No APP_BASE_URL set and no x-app-base-url header on the inbound stub
     // call — so the payload must not contain a bare path. The first line

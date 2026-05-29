@@ -60,29 +60,40 @@ describe("extractMentionedUserIds", () => {
 });
 
 describe("buildPayload", () => {
-  it("includes a <users/ID> mention, the recipient name, and the snippet", () => {
+  it("renders the <users/ID> mention, room name, italicised snippet, and link", () => {
     const payload = buildPayload({
       webhookUrl:       "https://chat.googleapis.com/...",
       googleChatUserId: "115736912860088353887",
-      recipientName:    "Acarroll",
       roomName:         "Hackspace",
       snippet:          "ship it",
       roomUrl:          "https://hackspace/r/abc",
     });
     expect(payload.text).toContain("<users/115736912860088353887>");
-    expect(payload.text).toContain("Acarroll");
-    expect(payload.text).toContain("Hackspace");
-    expect(payload.text).toContain("> ship it");
+    expect(payload.text).toContain("(Hackspace)");
+    // Snippet is italic, not a `>` blockquote (Chat doesn't support `>`).
+    expect(payload.text).toContain("_ship it_");
+    expect(payload.text).not.toMatch(/\n> /);
     expect(payload.text).toContain("https://hackspace/r/abc");
+  });
+  it("escapes underscores inside the snippet so italics stay one span", () => {
+    const payload = buildPayload({
+      webhookUrl:       "x",
+      googleChatUserId: "1",
+      roomName:         "r",
+      snippet:          "hello _world_ ok",
+    });
+    expect(payload.text).toContain("_hello \\_world\\_ ok_");
   });
   it("omits the snippet line when empty", () => {
     const payload = buildPayload({
       webhookUrl:       "x",
       googleChatUserId: "1",
-      recipientName:    "n",
       roomName:         "r",
       snippet:          "",
     });
-    expect(payload.text).not.toContain("\n> ");
+    // No italic snippet span and no blockquote. The italic wrapper is
+    // `\n_..._` — we just check there's no newline-prefixed underscore.
+    expect(payload.text).not.toMatch(/\n_/);
+    expect(payload.text).not.toMatch(/\n> /);
   });
 });

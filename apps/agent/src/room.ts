@@ -325,7 +325,7 @@ export class Room extends Server<Env> {
           return sendGChatMention({
             webhookUrl,
             googleChatUserId: u.googleChatUserId,
-            recipientName:    u.name,
+
             roomName,
             roomUrl,
             snippet,

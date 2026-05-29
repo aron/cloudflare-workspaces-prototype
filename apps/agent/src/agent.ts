@@ -632,7 +632,7 @@ export class Agent extends Think<Env> {
       return sendGChatMention({
         webhookUrl,
         googleChatUserId: u.googleChatUserId,
-        recipientName:    u.name,
+
         roomName,
         snippet,
         roomUrl,

@@ -14,8 +14,7 @@ export interface MentionNotice {
   webhookUrl:        string;
   /** Numeric Google Workspace user ID of the recipient. */
   googleChatUserId:  string;
-  /** Display name of the recipient. Used in the message body. */
-  recipientName:     string;
+
   /** Display name of the room ("#general"-style label). */
   roomName:          string;
   /** Short excerpt of the mentioning message (already trimmed). */
@@ -55,8 +54,15 @@ export function buildSnippet(text: string): string {
  */
 export function buildPayload(n: MentionNotice): { text: string } {
   const mention = `<users/${n.googleChatUserId}>`;
-  const lines = [`${mention} ${n.recipientName} was mentioned in the Hackspace (${n.roomName})`];
-  if (n.snippet) lines.push(`> ${n.snippet}`);
+  // The `<users/ID>` reference already renders as a pill with the
+  // recipient's name, so we don't restate it. The first line is just the
+  // mention plus where the ping came from.
+  const lines = [`${mention} mentioned in the Hackspace (${n.roomName})`];
+  // Italicise the snippet — Google Chat's text formatting doesn't support
+  // `>` blockquotes, but `_text_` renders italic and reads naturally as a
+  // quoted excerpt. Underscores inside the snippet are escaped so the
+  // formatting span stays a single run.
+  if (n.snippet) lines.push(`_${n.snippet.replace(/_/g, "\\_")}_`);
   if (n.roomUrl) lines.push(n.roomUrl);
   return { text: lines.join("\n") };
 }
