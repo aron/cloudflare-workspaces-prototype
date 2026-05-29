@@ -17,6 +17,8 @@ declare namespace Cloudflare {
     ACCESS_AUD?:                 string;  // Application AUD tag from Access settings
     WARM_POOL_REFRESH_INTERVAL?: string;
     ACCESS_DEV_USER?:            string;  // JSON identity for local dev
+    GCHAT_WEBHOOK_URL?:          string;  // Google Chat incoming webhook for mention notifications
+    APP_BASE_URL?:               string;  // Public origin used to build absolute URLs
   }
 }
 interface Env extends Cloudflare.Env {}

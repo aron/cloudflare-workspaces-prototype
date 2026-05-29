@@ -43,6 +43,20 @@ export interface BuildSystemPromptOptions {
    * unset and get the current date in YYYY-MM-DD form.
    */
   now?: Date;
+  /**
+   * Person who started this thread. When set, the agent is instructed to
+   * close each turn by @-mentioning them with the `<user:ID>` token so the
+   * notification webhook can ping them in Google Chat.
+   */
+  originator?: { userId: string; name: string };
+  /**
+   * Public origin (no trailing slash) used to build absolute URLs in
+   * agent messages. When empty the agent is instructed to skip URL
+   * suggestions — a bare path is worse than no link.
+   */
+  baseUrl?: string;
+  /** Active room id, used to anchor message links back to a specific message. */
+  roomId?: string;
 }
 
 const IDENTITY = `\
@@ -77,16 +91,21 @@ const WORKSPACE_NOTE = `\
 Workspace:
 - All files live under /workspace. Use absolute paths.`;
 
-function fileServing(threadId: string): string {
-  const tid = threadId || "<threadId>";
+function fileServing(threadId: string, baseUrl: string): string {
+  const tid    = threadId || "<threadId>";
+  const origin = baseUrl || "<APP_BASE_URL unset>";
+  // Pre-built absolute prefix so the examples are copy-pasteable.
+  const prefix = `${origin}/api/threads/${tid}/files`;
   return [
     "Serving workspace files:",
-    `- Any file in the workspace can be linked at \`/api/threads/${tid}/files/<absolute-path>\`. The path after \`/files/\` is the absolute VFS path; \`/workspace/foo.png\` becomes \`/api/threads/${tid}/files/workspace/foo.png\`.`,
-    `- Embed images inline with Markdown: \`![alt text](/api/threads/${tid}/files/workspace/diagram.png)\`.`,
-    `- Offer downloadable artifacts with an anchor and the \`download\` attribute, e.g.`,
-    `  \`<a href="/api/threads/${tid}/files/workspace/build.zip?download" download>Download build.zip</a>\`.`,
+    `- Any file in the workspace can be linked at \`${prefix}/<absolute-path>\`. The path after \`/files/\` is the absolute VFS path; \`/workspace/foo.png\` becomes \`${prefix}/workspace/foo.png\`.`,
+    `- **Always emit absolute URLs** that start with \`${origin}\`. Relative paths like \`/api/threads/...\` break in Google Chat notifications, copy-pasted snippets, and anywhere the message is rendered outside the app. Never strip the origin.`,
+    `- Embed images inline with Markdown: \`![alt text](${prefix}/workspace/diagram.png)\`.`,
+    "- Offer downloadable artifacts with an anchor and the `download` attribute, e.g.",
+    `  \`<a href="${prefix}/workspace/build.zip?download" download>Download build.zip</a>\`.`,
     "- Add `?download` to the URL to force a Content-Disposition: attachment header so the browser saves the file instead of rendering it.",
-    "- Don't fabricate file paths \u2014 only link files you actually created or that the user provided.",
+    "- Don't fabricate file paths — only link files you actually created or that the user provided.",
+    ...(baseUrl ? [] : ["- `APP_BASE_URL` is not configured for this deployment. Skip URL suggestions until it is set; bare paths are worse than no link."]),
   ].join("\n");
 }
 
@@ -145,12 +164,46 @@ The following skills provide specialized instructions for specific tasks.
 Use the read tool to load a skill's file when the task matches its description.
 When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.`;
 
+/**
+ * Section telling the agent to ping the thread's originator at the end of a
+ * turn. Rendered only when {@link BuildSystemPromptOptions.originator} is set.
+ * The exact `<user:ID>` token is critical — the notifications backend matches
+ * on it to send a Google Chat webhook, so we spell it out verbatim and warn
+ * against paraphrasing it as `@name`.
+ */
+function originatorNote(
+  o: { userId: string; name: string },
+  baseUrl: string,
+  threadId: string,
+  roomId: string,
+): string {
+  // Compose the example deep-link only when we know the origin AND a
+  // roomId. Without both we can't anchor to a specific message, and a
+  // bare path is worse than no link.
+  const deepLink = baseUrl && roomId && threadId
+    ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#<message-id>`
+    : "";
+  return [
+    "Thread originator:",
+    `- This thread was started by ${o.name}.`,
+    `- It is very important that you @-mention them at the end of every turn by writing the exact token \`<user:${o.userId}>\`. This is what triggers their Google Chat notification.`,
+    "- Do not paraphrase the token (e.g. `@name`) and do not wrap it in backticks or code blocks — it must appear verbatim in the message body so the notifier can detect it.",
+    "- Mention them exactly once per turn, at the end. Skip the mention only if the turn produced no user-facing output (e.g. you were interrupted before responding).",
+    ...(deepLink ? [
+      `- The Google Chat ping will include a deep link back to your message of the form \`${deepLink}\`, where \`<message-id>\` is the id of your final assistant message. You don't construct this link — the notifier does — but it's useful to know it exists when deciding how much context to include in your closing line.`,
+    ] : []),
+  ].join("\n");
+}
+
 export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const cwd    = opts.cwd ?? "/workspace";
   const skills = opts.skills ?? [];
   const now      = opts.now ?? new Date();
   const threadId = opts.threadId ?? "";
   const pullIgnore = opts.pullIgnore ?? [];
+  const baseUrl    = (opts.baseUrl ?? "").replace(/\/+$/, "");
+  const roomId     = opts.roomId ?? "";
+  const originator = opts.originator;
 
   const tools = TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
   const guidelines = GUIDELINES.map(g => `- ${g}`).join("\n");
@@ -162,7 +215,8 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
     "",
     WORKSPACE_NOTE,
     "",
-    fileServing(threadId),
+    fileServing(threadId, baseUrl),
+    ...(originator ? ["", originatorNote(originator, baseUrl, threadId, roomId)] : []),
     ...(pullIgnore.length > 0 ? ["", workspaceIgnore(pullIgnore)] : []),
     "",
     "Available tools:",

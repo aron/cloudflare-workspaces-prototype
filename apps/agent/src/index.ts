@@ -11,10 +11,11 @@ import {
   withIdentity,
   type AccessIdentity,
 } from "./identity.js";
+import { resolveBaseUrl, withBaseUrl } from "./base-url.js";
 
 export { Agent, SubAgent, App, Room, Sandbox, WarmPool };
 
-type Variables = { identity: AccessIdentity };
+type Variables = { identity: AccessIdentity; baseUrl: string };
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -28,6 +29,9 @@ app.use("*", async (c, next) => {
     return c.text("Access denied", 401);
   }
   c.set("identity", identity);
+  // Resolve once per request: env var wins, otherwise the origin of the
+  // inbound request. Stored on context so DO forwarders don't recompute.
+  c.set("baseUrl", resolveBaseUrl(c.env, c.req.raw));
   await next();
 });
 
@@ -37,14 +41,19 @@ app.use("*", async (c, next) => {
 // corresponding Room DO so the client can talk to it immediately.
 app.all("/api/app/*", async (c) => {
   const identity = c.get("identity");
+  const baseUrl  = c.get("baseUrl");
   const request = c.req.raw;
   const url = new URL(request.url);
 
+  // Block external access to the DO-internal notify-lookup endpoint.
+  if (url.pathname === "/api/app/notify-lookup") {
+    return c.text("not found", 404);
+  }
   const innerUrl = new URL(request.url);
   innerUrl.pathname = url.pathname.slice("/api/app".length) || "/";
   const inner = new Request(innerUrl, request);
   const stub = c.env.App.get(c.env.App.idFromName(APP_DO_NAME));
-  const res = await stub.fetch(withIdentity(inner, identity));
+  const res = await stub.fetch(withIdentity(inner, identity, baseUrl));
 
   // Side-effect: when App creates a room, init the Room so /api/rooms/:id
   // is immediately usable. We don't fail the response if init fails — the
@@ -69,6 +78,7 @@ app.all("/api/app/*", async (c) => {
               body: JSON.stringify(body.room),
             }),
             identity,
+            baseUrl,
           ),
         )
         .catch(() => undefined);
@@ -89,9 +99,10 @@ app.all("/api/app/*", async (c) => {
 app.delete("/api/rooms/:id", async (c) => {
   const id = c.req.param("id");
   const identity = c.get("identity");
+  const baseUrl  = c.get("baseUrl");
   const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
   const roomRes = await roomStub.fetch(
-    withIdentity(new Request("https://room/", { method: "DELETE" }), identity),
+    withIdentity(new Request("https://room/", { method: "DELETE" }), identity, baseUrl),
   );
   // Best-effort cascade: even if Room reported failure, try to clean up the
   // pieces we know about so a half-deleted room doesn't linger in the UI.
@@ -109,6 +120,7 @@ app.delete("/api/rooms/:id", async (c) => {
         withIdentity(
           new Request("https://agent/", { method: "DELETE" }),
           identity,
+          baseUrl,
         ),
       );
     }),
@@ -119,6 +131,7 @@ app.delete("/api/rooms/:id", async (c) => {
       withIdentity(
         new Request(`https://app/rooms/${id}`, { method: "DELETE" }),
         identity,
+        baseUrl,
       ),
     )
     .catch(() => undefined);
@@ -131,11 +144,13 @@ app.delete("/api/rooms/:id/threads/:tid", async (c) => {
   const id = c.req.param("id");
   const tid = c.req.param("tid");
   const identity = c.get("identity");
+  const baseUrl  = c.get("baseUrl");
   const roomStub = c.env.Room.get(c.env.Room.idFromName(id));
   const roomRes = await roomStub.fetch(
     withIdentity(
       new Request(`https://room/threads/${tid}`, { method: "DELETE" }),
       identity,
+      baseUrl,
     ),
   );
   const agentStub = c.env.Agent.get(c.env.Agent.idFromName(tid));
@@ -144,6 +159,7 @@ app.delete("/api/rooms/:id/threads/:tid", async (c) => {
       withIdentity(
         new Request("https://agent/", { method: "DELETE" }),
         identity,
+        baseUrl,
       ),
     )
     .catch(() => undefined);
@@ -153,11 +169,11 @@ app.delete("/api/rooms/:id/threads/:tid", async (c) => {
 app.all("/api/rooms/:id/*", (c) => {
   const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/rooms/${id}`);
-  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), inner);
+  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), c.get("baseUrl"), inner);
 });
 app.all("/api/rooms/:id", (c) => {
   const id = c.req.param("id");
-  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), "/");
+  return forwardToDO(c.env.Room, id, c.req.raw, c.get("identity"), c.get("baseUrl"), "/");
 });
 
 // ---- /api/threads/:threadId/* -------------------------------------------
@@ -169,17 +185,17 @@ app.all("/api/rooms/:id", (c) => {
 app.on("HEAD", "/api/threads/:id/*", (c) => {
   const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
-  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), c.get("baseUrl"), inner);
 });
 
 app.all("/api/threads/:id/*", (c) => {
   const id = c.req.param("id");
   const inner = stripPrefix(c.req.raw.url, `/api/threads/${id}`);
-  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), inner);
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), c.get("baseUrl"), inner);
 });
 app.all("/api/threads/:id", (c) => {
   const id = c.req.param("id");
-  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), "/");
+  return forwardToDO(c.env.Agent, id, c.req.raw, c.get("identity"), c.get("baseUrl"), "/");
 });
 
 // ---- /debug/:sessionId/:cmd ---------------------------------------------
@@ -249,7 +265,7 @@ app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.Agent.idFromName(sessionId);
   const stub = c.env.Agent.get(id);
-  return stub.fetch(withIdentity(c.req.raw, c.get("identity")));
+  return stub.fetch(withIdentity(c.req.raw, c.get("identity"), c.get("baseUrl")));
 });
 
 // ---- Agent WebSocket / RPC fallthrough -----------------------------------
@@ -259,7 +275,7 @@ app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
 // the Agent DO can stamp user messages even when the connection is shared.
 app.all("*", async (c) => {
   const res = await routeAgentRequest(
-    withIdentity(c.req.raw, c.get("identity")),
+    withIdentity(c.req.raw, c.get("identity"), c.get("baseUrl")),
     c.env,
   );
   return res ?? c.text("not found", 404);
@@ -276,6 +292,7 @@ function forwardToDO<T extends Rpc.DurableObjectBranded | undefined>(
   id: string | undefined,
   request: Request,
   identity: AccessIdentity,
+  baseUrl: string,
   innerPath: string,
 ): Promise<Response> {
   if (!id) {
@@ -284,7 +301,7 @@ function forwardToDO<T extends Rpc.DurableObjectBranded | undefined>(
   const inner = new URL(request.url);
   inner.pathname = innerPath;
   const stub = ns.get(ns.idFromName(id));
-  return stub.fetch(withIdentity(new Request(inner, request), identity));
+  return stub.fetch(withIdentity(new Request(inner, request), identity, baseUrl));
 }
 
 /** Return the URL pathname with `prefix` removed, guaranteed to start with `/`. */

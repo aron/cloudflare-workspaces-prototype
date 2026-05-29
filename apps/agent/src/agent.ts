@@ -20,6 +20,12 @@
 import type { ChatResponseResult, StepContext, ToolCallResultContext, TurnContext } from "@cloudflare/think";
 import { LoopTracker } from "./loop-tracker.js";
 import { stampPartDurations } from "./stamp-tool-durations.js";
+import { APP_DO_NAME } from "./app.js";
+import {
+  buildSnippet,
+  extractMentionedUserIds,
+  sendGChatMention,
+} from "./notify.js";
 
 import { Think } from "@cloudflare/think";
 import { callable } from "agents";
@@ -112,6 +118,16 @@ export class Agent extends Think<Env> {
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
+
+  /** Room the thread lives in. Hydrated lazily from storage; set on seed. */
+  private _roomId: string | null = null;
+
+  /** Cached room name for use in mention notifications. Hydrated on seed. */
+  private _roomName: string | null = null;
+
+  /** Storage keys for the cached room fields. */
+  private static readonly ROOM_ID_STORAGE_KEY   = "thread-room-id";
+  private static readonly ROOM_NAME_STORAGE_KEY = "thread-room-name";
 
   /**
    * Per-tool-call abort controllers. Keyed by `toolCallId`, populated when a
@@ -220,6 +236,10 @@ export class Agent extends Think<Env> {
       } catch {
         this._skills = [];
       }
+      // Hydrate the cached roomId set on /seed so getSystemPrompt() can
+      // build deep-link examples without an async hop.
+      this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
+      this._roomName = (await this.ctx.storage.get<string>(Agent.ROOM_NAME_STORAGE_KEY)) ?? null;
     });
   }
 
@@ -367,7 +387,32 @@ export class Agent extends Think<Env> {
    * loaded on demand via the read tool.
    */
   override getSystemPrompt(): string {
-    return buildSystemPrompt({ cwd: WORKSPACE, skills: this._skills, threadId: this.name, pullIgnore: WORKSPACE_IGNORE });
+    return buildSystemPrompt({
+      cwd:        WORKSPACE,
+      skills:     this._skills,
+      threadId:   this.name,
+      roomId:     this._roomId ?? "",
+      pullIgnore: WORKSPACE_IGNORE,
+      baseUrl:    (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "",
+      originator: this.originatorFromMessages(),
+    });
+  }
+
+  /**
+   * Walk message history for the first user message and surface its author
+   * as the thread originator. Returns undefined when there is no user
+   * message yet (e.g. a freshly-created Agent DO that hasn't been seeded).
+   */
+  private originatorFromMessages(): { userId: string; name: string } | undefined {
+    for (const m of this.messages) {
+      if (m.role !== "user") continue;
+      const meta = (m as { metadata?: { author?: { kind?: string; id?: string; name?: string } } }).metadata;
+      const a = meta?.author;
+      if (a && a.kind === "user" && typeof a.id === "string" && typeof a.name === "string") {
+        return { userId: a.id, name: a.name };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -538,6 +583,61 @@ export class Agent extends Think<Env> {
     this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
       console.warn("[Agent] reflection injection failed:", err);
     }));
+    this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
+      console.warn("[Agent] mention notifications failed:", err);
+    }));
+  }
+
+  /**
+   * Scan the just-finished assistant message for `<user:ID>` tokens and POST
+   * a Google Chat ping for each mentioned user that has a Google Chat ID on
+   * file. No-op when `GCHAT_WEBHOOK_URL` isn't configured. Skips notifying
+   * the thread originator-as-author would be a no-op anyway (the assistant
+   * isn't a user), so we don't filter on that.
+   */
+  private async maybeNotifyMentions(result: ChatResponseResult): Promise<void> {
+    const webhookUrl = (this.env as { GCHAT_WEBHOOK_URL?: string }).GCHAT_WEBHOOK_URL;
+    if (!webhookUrl) return;
+    // Concatenate every text part of the assistant message — the model may
+    // split its closing line across parts depending on tool-use shape.
+    const text = (result.message.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map(p => p.text)
+      .join("\n");
+    const ids = extractMentionedUserIds(text);
+    if (ids.length === 0) return;
+
+    const baseUrl  = (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "";
+    const roomId   = this._roomId ?? "";
+    const threadId = this.name;
+    const messageId = (result.message as { id?: string }).id ?? "";
+    const roomUrl = baseUrl && roomId && messageId
+      ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#${messageId}`
+      : undefined;
+    const snippet = buildSnippet(text);
+    const roomName = this._roomName ?? "thread";
+
+    const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
+    const res = await appStub.fetch(new Request("https://app/notify-lookup", {
+      method:  "POST",
+      headers: { "content-type": "application/json" },
+      body:    JSON.stringify({ userIds: ids }),
+    }));
+    if (!res.ok) return;
+    const body = await res.json() as {
+      users: Array<{ userId: string; name: string; googleChatUserId: string | null }>;
+    };
+    await Promise.all(body.users.map(u => {
+      if (!u.googleChatUserId) return;
+      return sendGChatMention({
+        webhookUrl,
+        googleChatUserId: u.googleChatUserId,
+        recipientName:    u.name,
+        roomName,
+        snippet,
+        roomUrl,
+      });
+    }));
   }
 
   /**
@@ -707,7 +807,7 @@ export class Agent extends Think<Env> {
     // message id is a no-op so the client can safely retry.
     if (request.method === "POST" && url.pathname.endsWith("/seed")) {
       const body = await request.json().catch(() => ({})) as {
-        roomId?: unknown; threadId?: unknown; message?: unknown;
+        roomId?: unknown; roomName?: unknown; threadId?: unknown; message?: unknown;
       };
       const message = body.message;
       if (!message || typeof message !== "object") {
@@ -724,6 +824,17 @@ export class Agent extends Think<Env> {
         // Seeding counts as a new message — arm the summary tick. The
         // assistant's reply will arm another one when its turn completes.
         this.ctx.waitUntil(this.kickSummary());
+      }
+      // Persist the roomId so getSystemPrompt() can build deep-link examples
+      // pointing back to the originating room. Idempotent: overwriting with
+      // the same value is fine, and Room always re-sends it on re-seed.
+      if (typeof body.roomId === "string" && body.roomId) {
+        this._roomId = body.roomId;
+        await this.ctx.storage.put(Agent.ROOM_ID_STORAGE_KEY, body.roomId);
+      }
+      if (typeof body.roomName === "string" && body.roomName) {
+        this._roomName = body.roomName;
+        await this.ctx.storage.put(Agent.ROOM_NAME_STORAGE_KEY, body.roomName);
       }
       return Response.json({ ok: true, seeded: !alreadySeeded });
     }

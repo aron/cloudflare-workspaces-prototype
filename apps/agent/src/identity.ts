@@ -75,12 +75,16 @@ export const IDENTITY_HEADERS = {
  * can't forge identity, then attach the worker-resolved identity. Returns a
  * new Request safe to forward to a DO.
  */
-export function withIdentity(request: Request, identity: AccessIdentity): Request {
+export function withIdentity(request: Request, identity: AccessIdentity, baseUrl?: string): Request {
   const headers = new Headers(request.headers);
   for (const h of Object.values(IDENTITY_HEADERS)) headers.delete(h);
   headers.set(IDENTITY_HEADERS.userId, identity.userId);
   headers.set(IDENTITY_HEADERS.email,  identity.email);
   headers.set(IDENTITY_HEADERS.name,   identity.name);
+  // Always strip incoming `x-app-base-url` so a malicious client can't
+  // spoof it. When `baseUrl` is provided, stamp it on for downstream DOs.
+  headers.delete("x-app-base-url");
+  if (baseUrl) headers.set("x-app-base-url", baseUrl);
   return new Request(request, { headers });
 }
 

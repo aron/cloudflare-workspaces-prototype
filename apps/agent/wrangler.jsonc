@@ -53,7 +53,12 @@
     "WARM_POOL_TARGET": "3",
     "WARM_POOL_REFRESH_INTERVAL": "10000",
 
-    "OPENAI_MODEL": "gpt-5.5"
+    "OPENAI_MODEL": "gpt-5.5",
+
+    // Public origin used to build absolute URLs in agent messages and
+    // Google Chat notifications. Leave unset to fall back to the origin of
+    // the inbound request (forwarded as `x-app-base-url` from the worker).
+    // "APP_BASE_URL": "https://hackspace-prototype.example.workers.dev"
 
     // Cloudflare Access JWT gate. Uncomment + fill in to enable; leave
     // unset for an unauthenticated deploy or local dev.
