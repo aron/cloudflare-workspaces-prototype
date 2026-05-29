@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# review <url>#<branch> <filename>
+#
+# Fetch a single file from a Cloudflare artifacts git remote at a given
+# branch, drop it in /tmp, and pipe it through `npx md-annotator`. Stdout
+# is whatever md-annotator emits; everything else (clone dir, temp file)
+# is cleaned up on exit via trap, even on failure or Ctrl-C.
+#
+# Example:
+#   ./script/review 'https://x:art_v1_...@.../foo.git#wip/branch' PLAN.md
+
+set -euo pipefail
+
+if [ $# -ne 2 ]; then
+  echo "usage: $0 <url>#<branch> <filename>" >&2
+  exit 2
+fi
+
+spec="$1"
+filename="$2"
+
+# Split <url>#<branch>. Use parameter expansion rather than cut so URLs
+# containing '#' in the query string would survive (artifacts URLs don't,
+# but the split stays anchored to the last '#').
+url="${spec%#*}"
+branch="${spec##*#}"
+if [ "$url" = "$spec" ] || [ -z "$branch" ]; then
+  echo "error: expected <url>#<branch>, got: $spec" >&2
+  exit 2
+fi
+
+# All side effects live under one temp dir so cleanup is a single rm -rf.
+# Putting the file inside a private dir (rather than using `mktemp` to mint
+# a sibling) lets us keep the original basename — md-annotator dispatches
+# by extension, so `PLAN.md` must stay `PLAN.md`, not `PLAN.md.XXXXXX`.
+# `mktemp -d` with no template is the only form that works identically on
+# macOS (BSD mktemp) and Linux (GNU mktemp); `-t PREFIX` means different
+# things on each.
+work_dir="$(mktemp -d 2>/dev/null || mktemp -d -t review)"
+clone_dir="$work_dir/repo"
+tmp_file="$work_dir/$(basename "$filename")"
+cleanup() { rm -rf "$work_dir"; }
+trap cleanup EXIT INT TERM
+
+# Shallow single-branch clone — minimum bytes to read one file at a tip.
+# Quiet so md-annotator's stdout isn't preceded by clone chatter.
+git clone \
+  --depth 1 \
+  --single-branch \
+  --branch "$branch" \
+  --quiet \
+  -- \
+  "$url" \
+  "$clone_dir" >/dev/null
+
+src="$clone_dir/$filename"
+if [ ! -f "$src" ]; then
+  echo "error: $filename not found on branch $branch" >&2
+  exit 1
+fi
+
+cp "$src" "$tmp_file"
+exec npx --yes md-annotator "$tmp_file"
