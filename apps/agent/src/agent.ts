@@ -25,8 +25,6 @@ import {
   buildSnippet,
   extractMentionedUserIds,
   log,
-  pickRoomUrl,
-  sendGChatMention,
 } from "./notify.js";
 
 import { Think } from "@cloudflare/think";
@@ -554,6 +552,9 @@ export class Agent extends Think<Env> {
       // A user reply arrived — arm the background summary tick. Idempotent,
       // so multiple frames in quick succession collapse onto one schedule.
       this.ctx.waitUntil(this.kickSummary());
+      // Mirror the room's behaviour: a user message bumps the activity tip
+      // so other tabs/users see an unread badge on this thread.
+      this.postActivity();
     }
     return super.onMessage(connection, message);
   }
@@ -588,6 +589,9 @@ export class Agent extends Think<Env> {
     this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
       log("warn", "agent mention notifications failed", { error: (err as Error).message });
     }));
+    // Bump the activity tip so room sidebars light up an unread badge on
+    // any tab that isn't currently focused on this thread.
+    this.postActivity();
   }
 
   /**
@@ -597,9 +601,39 @@ export class Agent extends Think<Env> {
    * the thread originator-as-author would be a no-op anyway (the assistant
    * isn't a user), so we don't filter on that.
    */
+  /**
+   * Notify the App DO that this thread just received a message (user or
+   * assistant). The App keeps the canonical tip used by sidebar unread
+   * badges. Best-effort under waitUntil — a failure here must not affect
+   * the chat turn that just landed.
+   *
+   * No-op when we don't yet know the parent roomId (pre-seed). The seed
+   * itself doesn't need to bump activity because Room.handlePostMessage
+   * already posted activity for that originating message.
+   */
+  private postActivity(): void {
+    const roomId = this._roomId;
+    if (!roomId) return;
+    const threadId = this.name;
+    const lastActivity = Date.now();
+    this.ctx.waitUntil((async () => {
+      try {
+        const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
+        await appStub.fetch(new Request("https://app/activity", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          body:    JSON.stringify({ scope: "thread", scopeId: threadId, roomId, lastActivity }),
+        }));
+      } catch { /* swallow — best-effort */ }
+    })());
+  }
+
+  /**
+   * Enqueue @mention notifications to the App DO for the just-finished
+   * assistant turn. Same shape as the Room path — the App owns dedup,
+   * debounce, and webhook delivery.
+   */
   private async maybeNotifyMentions(result: ChatResponseResult): Promise<void> {
-    const webhookUrl = (this.env as { GCHAT_WEBHOOK_URL?: string }).GCHAT_WEBHOOK_URL;
-    if (!webhookUrl) return;
     // Concatenate every text part of the assistant message — the model may
     // split its closing line across parts depending on tool-use shape.
     const text = (result.message.parts ?? [])
@@ -609,34 +643,23 @@ export class Agent extends Think<Env> {
     const ids = extractMentionedUserIds(text);
     if (ids.length === 0) return;
 
-    const baseUrl  = (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "";
-    const roomId   = this._roomId ?? "";
-    const threadId = this.name;
+    const roomId    = this._roomId ?? "";
+    const threadId  = this.name;
     const messageId = (result.message as { id?: string }).id ?? "";
-    const roomUrl = pickRoomUrl({ baseUrl, roomId, threadId, messageId });
-    const snippet = buildSnippet(text);
-    const roomName = this._roomName ?? "thread";
+    const snippet   = buildSnippet(text);
+    const roomName  = this._roomName ?? "thread";
+    const createdAt = Date.now();
+
+    const mentions = ids.map(userId => ({
+      userId, roomId, threadId, messageId,
+      snippet, authorName: "agent", roomName, createdAt,
+    }));
 
     const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
-    const res = await appStub.fetch(new Request("https://app/notify-lookup", {
+    await appStub.fetch(new Request("https://app/notifications/enqueue", {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ userIds: ids }),
-    }));
-    if (!res.ok) return;
-    const body = await res.json() as {
-      users: Array<{ userId: string; name: string; googleChatUserId: string | null }>;
-    };
-    await Promise.all(body.users.map(u => {
-      if (!u.googleChatUserId) return;
-      return sendGChatMention({
-        webhookUrl,
-        googleChatUserId: u.googleChatUserId,
-
-        roomName,
-        snippet,
-        roomUrl,
-      });
+      body:    JSON.stringify({ mentions }),
     }));
   }
 

@@ -29,10 +29,7 @@ import {
   buildSnippet,
   extractMentionedUserIds,
   log,
-  pickRoomUrl,
-  sendGChatMention,
 } from "./notify.js";
-import { resolveBaseUrl } from "./base-url.js";
 
 
 /**
@@ -239,6 +236,11 @@ export class Room extends Server<Env> {
     // swap in the server-assigned id without rendering a duplicate.
     this.broadcast(JSON.stringify({ type: "message", message, clientId }));
 
+    // Notify the App DO so it can bump the activity tip used by sidebars to
+    // render unread badges. Fire-and-forget under waitUntil — a hiccup here
+    // must never block message persistence.
+    this.postActivity(threadId, createdAt);
+
     // Seed the Agent DO when a thread was minted. The thread id is also the
     // Agent DO id, so the client can connect to the same DO later.
     if (threadId && mintsThread) {
@@ -266,7 +268,7 @@ export class Room extends Server<Env> {
     // Fire @mention notifications via Google Chat webhook. Best-effort:
     // failures never block the message POST, and we always run inside
     // `waitUntil` so the network round-trip happens after the response.
-    this.maybeNotifyMentions(message, identity.userId, request, threadId);
+    this.maybeNotifyMentions(message, identity.userId, identity.name, threadId);
 
     return Response.json({ message, threadId, clientId }, { status: 201 });
   }
@@ -274,20 +276,21 @@ export class Room extends Server<Env> {
   // ---- mention notifications ----
 
   /**
-   * Inspect a freshly-persisted message for `<user:ID>` tokens and POST a
-   * Google Chat ping for each mentioned user that has a Google Chat ID on
-   * file. No-op when `GCHAT_WEBHOOK_URL` isn't configured. Self-mentions
-   * are skipped. All work runs under `ctx.waitUntil` so it doesn't extend
-   * the request critical path.
+   * Enqueue @mention notifications to the App DO so the cron-driven drain
+   * pass debounces, coalesces, and (if the recipient hasn't read past the
+   * mention by then) fires a single summary webhook per group. Synchronous
+   * webhook delivery used to live here; that path moved to App.
+   *
+   * Self-mentions are filtered. We don't gate on `GCHAT_WEBHOOK_URL` here
+   * — the drain pass owns that policy and will mark rows dropped if no
+   * webhook is configured, which keeps the decision in one place.
    */
   private maybeNotifyMentions(
     message: AppMessage,
     authorUserId: string,
-    request: Request,
+    authorName: string,
     threadId: string | undefined,
   ): void {
-    const webhookUrl = (this.env as { GCHAT_WEBHOOK_URL?: string }).GCHAT_WEBHOOK_URL;
-    if (!webhookUrl) return;
     const text = message.parts.map(p => p.text).join("\n");
     const ids = extractMentionedUserIds(text).filter(id => id !== authorUserId);
     if (ids.length === 0) return;
@@ -296,46 +299,51 @@ export class Room extends Server<Env> {
     const roomName = meta?.name ?? "room";
     const roomId   = meta?.id ?? "";
     const snippet  = buildSnippet(text);
+    const createdAt = message.metadata.createdAt;
+    const messageId = message.id;
 
-    // Build a link back to the app, falling through to less-specific paths
-    // when we can't anchor (e.g. no thread). See pickRoomUrl().
-    const baseUrl = resolveBaseUrl(this.env, request);
-    const roomUrl = pickRoomUrl({
-      baseUrl,
-      roomId,
-      threadId,
-      messageId: message.id,
-    });
+    const mentions = ids.map(userId => ({
+      userId, roomId, threadId, messageId,
+      snippet, authorName, roomName, createdAt,
+    }));
 
     this.ctx.waitUntil((async () => {
       try {
         const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
-        const res = await appStub.fetch(new Request("https://app/notify-lookup", {
+        await appStub.fetch(new Request("https://app/notifications/enqueue", {
           method:  "POST",
           headers: { "content-type": "application/json" },
-          // No identity header: this is a DO-to-DO call. App.notify-lookup
-          // is reached via the same `fetch` middleware, but identity is
-          // required upstream; we hop in via a synthetic header set below.
-          body:    JSON.stringify({ userIds: ids }),
-        }));
-        if (!res.ok) return;
-        const body = await res.json() as {
-          users: Array<{ userId: string; name: string; googleChatUserId: string | null }>;
-        };
-        await Promise.all(body.users.map(u => {
-          if (!u.googleChatUserId) return;
-          return sendGChatMention({
-            webhookUrl,
-            googleChatUserId: u.googleChatUserId,
-
-            roomName,
-            roomUrl,
-            snippet,
-          });
+          body:    JSON.stringify({ mentions }),
         }));
       } catch (e) {
-        log("warn", "room notify-mentions failed", { error: (e as Error).message });
+        log("warn", "room enqueue-mentions failed", { error: (e as Error).message });
       }
+    })());
+  }
+
+  // ---- activity tip ----
+
+  /**
+   * Notify the App DO that this room (or thread) just received a message.
+   * The App DO maintains the canonical tip used by sidebar unread badges.
+   * Best-effort: failures are swallowed so transient App DO blips can't
+   * lose a message that's already persisted on this DO.
+   */
+  private postActivity(threadId: string | undefined, lastActivity: number): void {
+    const meta = this.loadMeta();
+    if (!meta) return;
+    const body = threadId
+      ? { scope: "thread" as const, scopeId: threadId, roomId: meta.id, lastActivity }
+      : { scope: "room"   as const, scopeId: meta.id,  lastActivity };
+    this.ctx.waitUntil((async () => {
+      try {
+        const appStub = this.env.App.get(this.env.App.idFromName(APP_DO_NAME));
+        await appStub.fetch(new Request("https://app/activity", {
+          method:  "POST",
+          headers: { "content-type": "application/json" },
+          body:    JSON.stringify(body),
+        }));
+      } catch { /* swallow — best-effort */ }
     })());
   }
 

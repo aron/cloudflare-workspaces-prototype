@@ -92,3 +92,32 @@ export interface ThreadRow {
   agentId:       string;
   createdAt:     number;
 }
+
+// ---- read receipts / activity tips ----
+
+/** Which timeline a receipt or activity tip refers to. */
+export type ReceiptScope = "room" | "thread";
+
+/**
+ * Per-user, per-scope read marker. `lastRead` is the `createdAt` of the
+ * latest message the user has seen in this scope; advances monotonically.
+ */
+export interface ReadReceipt {
+  scope:    ReceiptScope;
+  scopeId:  string;
+  lastRead: number;
+}
+
+/**
+ * Server-tracked tip of activity for a scope. `lastActivity` is the
+ * `createdAt` of the latest message ever appended to that scope. The
+ * frontend compares `tip.lastActivity > receipt.lastRead` to decide whether
+ * to show an unread badge.
+ */
+export interface ActivityTip {
+  scope:        ReceiptScope;
+  scopeId:      string;
+  /** For thread tips, the room the thread lives in (denormalised for sidebars). */
+  roomId?:      string;
+  lastActivity: number;
+}

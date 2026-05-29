@@ -40,6 +40,7 @@ import {
 import * as outbox from "@/lib/roomOutbox";
 import type { AppMessage, Me, RoomMeta } from "@/lib/api";
 import { navigate } from "@/lib/nav";
+import { useReceipts } from "@/lib/receipts";
 import { initials, relTime } from "@/lib/utils";
 import { isAtBottom, isMoreThanOneViewportFromBottom } from "@/lib/scroll-pinning";
 
@@ -85,6 +86,7 @@ export function RoomTimeline({
   const [input,    setInput]    = useState("");
   const [sending,  setSending]  = useState(false);
   const resolveHandle = useHandleResolver();
+  const { markRead } = useReceipts();
 
   // Scroll plumbing for the room timeline. Mirrors ThreadPanel: the
   // room loads pinned to the bottom (latest message visible), follows
@@ -131,6 +133,20 @@ export function RoomTimeline({
     })();
     return () => { cancelled = true; };
   }, [roomId]);
+
+  // Mark the room read whenever we see new top-level (non-threaded) messages.
+  // Covers all three trigger points in one place: initial load, live WS
+  // fanout, and the user's own sends — they all funnel through `messages`.
+  // Thread-starting messages bump the thread's tip, not the room's, so we
+  // exclude them here.
+  useEffect(() => {
+    let max = 0;
+    for (const m of messages) {
+      if (m.metadata.threadId) continue;
+      if (m.metadata.createdAt > max) max = m.metadata.createdAt;
+    }
+    if (max > 0) markRead("room", roomId, max);
+  }, [messages, roomId, markRead]);
 
   // Pending outbox entries the flusher hasn't drained yet. We don't render
   // these directly (the optimistic message lives in `messages` keyed by
@@ -469,6 +485,8 @@ function TopLevelMessage({
   const threadId = message.metadata.threadId;
   const hasThread = Boolean(threadId);
   const [summary, setSummary] = useState<string>("");
+  const { isUnread } = useReceipts();
+  const threadUnread = hasThread && threadId ? isUnread("thread", threadId) : false;
 
   // The summary is produced by a background task on the Agent DO, so the
   // UI is purely a reader of the cached value. We fetch on mount, refetch
@@ -520,7 +538,16 @@ function TopLevelMessage({
                   : "border-transparent hover:border-kumo-line hover:bg-kumo-base"
               }`}
             >
-              <span className="text-sm font-semibold text-kumo-brand">Open thread</span>
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-kumo-brand">
+                Open thread
+                {threadUnread && (
+                  <span
+                    aria-label="Unread"
+                    title="Unread messages"
+                    className="size-2 rounded-full bg-kumo-brand"
+                  />
+                )}
+              </span>
               <span className="ml-auto flex items-center gap-1 text-xs text-kumo-inactive opacity-0 transition-opacity group-hover:opacity-100">
                 View
                 <ChevronRight size={11} strokeWidth={2.5} />

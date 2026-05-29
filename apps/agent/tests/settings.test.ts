@@ -1,5 +1,5 @@
 /**
- * Per-user settings API (Google Chat user ID storage) and the notify-lookup
+ * Per-user settings API (Google Chat user ID storage).
  * internal endpoint that Room DO calls to resolve mention recipients.
  */
 import { env } from "cloudflare:workers";
@@ -72,41 +72,5 @@ describe("App /me/settings", () => {
     }));
     const res = await appStub().fetch(asUser("https://app/me/settings", STANTZ));
     expect(await res.json()).toEqual({ googleChatUserId: null });
-  });
-});
-
-describe("App /notify-lookup (DO-internal)", () => {
-  it("returns name/email/googleChatUserId for the requested user ids", async () => {
-    await touch(VENKMAN);
-    await touch(STANTZ);
-    await appStub().fetch(asUser("https://app/me/settings", VENKMAN, {
-      method:  "PUT",
-      headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ googleChatUserId: "111222333" }),
-    }));
-
-    // No identity header — this is a DO-to-DO call.
-    const res = await appStub().fetch(new Request("https://app/notify-lookup", {
-      method:  "POST",
-      headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ userIds: [VENKMAN.userId, STANTZ.userId, "missing"] }),
-    }));
-    expect(res.status).toBe(200);
-    const body = await res.json() as {
-      users: Array<{ userId: string; name: string; googleChatUserId: string | null }>;
-    };
-    const byId = Object.fromEntries(body.users.map(u => [u.userId, u]));
-    expect(byId[VENKMAN.userId]?.googleChatUserId).toBe("111222333");
-    expect(byId[STANTZ.userId]?.googleChatUserId).toBeNull();
-    expect(byId["missing"]).toBeUndefined();
-  });
-
-  it("returns an empty list when userIds is empty or missing", async () => {
-    const res = await appStub().fetch(new Request("https://app/notify-lookup", {
-      method:  "POST",
-      headers: { "content-type": "application/json" },
-      body:    JSON.stringify({}),
-    }));
-    expect(await res.json()).toEqual({ users: [] });
   });
 });

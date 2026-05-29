@@ -14,6 +14,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { RoomPicker } from "./components/RoomPicker";
 import { fetchMe, type Me } from "./lib/api";
 import { useRoute } from "./lib/nav";
+import { ReceiptsProvider } from "./lib/receipts";
 
 // Chat rendering pulls in streamdown, shiki, mermaid, motion, and the
 // Radix UI suite. None of that is needed for the picker landing page, so
@@ -66,33 +67,37 @@ export function App() {
     );
   }
 
-  switch (route.kind) {
-    case "picker":
-      return <RoomPicker me={me} />;
-
-    case "room":
-      return (
-        <Suspense fallback={RoomFallback}>
-          <RoomShell me={me} roomId={route.roomId}
-                     centre={<RoomTimeline me={me} roomId={route.roomId} model={me.model} />} />
-        </Suspense>
-      );
-
-    case "thread":
-      return (
-        <Suspense fallback={RoomFallback}>
-          <RoomShell
-            me={me}
-            roomId={route.roomId}
-            threadId={route.threadId}
-            centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
-            thread={
-              <Suspense fallback={ThreadFallback}>
-                <ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />
-              </Suspense>
-            }
-          />
-        </Suspense>
-      );
-  }
+  // Map current route to UI. Wrapped in ReceiptsProvider so every room/
+  // thread view sees the same live receipts state — the picker also
+  // benefits because it shows unread dots on each room card.
+  const view = (() => {
+    switch (route.kind) {
+      case "picker":
+        return <RoomPicker me={me} />;
+      case "room":
+        return (
+          <Suspense fallback={RoomFallback}>
+            <RoomShell me={me} roomId={route.roomId}
+                       centre={<RoomTimeline me={me} roomId={route.roomId} model={me.model} />} />
+          </Suspense>
+        );
+      case "thread":
+        return (
+          <Suspense fallback={RoomFallback}>
+            <RoomShell
+              me={me}
+              roomId={route.roomId}
+              threadId={route.threadId}
+              centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
+              thread={
+                <Suspense fallback={ThreadFallback}>
+                  <ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />
+                </Suspense>
+              }
+            />
+          </Suspense>
+        );
+    }
+  })();
+  return <ReceiptsProvider userId={me.userId}>{view}</ReceiptsProvider>;
 }

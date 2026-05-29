@@ -6,8 +6,9 @@
  * cookie is sent on cross-handler navigations.
  */
 
-import type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary } from "@app/shared";
-export type { AppMessage, Me, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary };
+import type { ActivityTip, AppMessage, Me, ReadReceipt, ReceiptScope, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary } from "@app/shared";
+export type { ActivityTip, AppMessage, Me, ReadReceipt, ReceiptScope, RoomMeta, RoomSummary, ThreadRow, UserSettings, UserSummary };
+
 
 
 const OPTS: RequestInit = { credentials: "same-origin" };
@@ -164,4 +165,47 @@ export async function fetchThreadSummary(threadId: string): Promise<string> {
     `GET /api/threads/${threadId}/summary`,
   );
   return body.summary;
+}
+
+// ---- read receipts / activity tips ----
+
+/**
+ * Snapshot of every receipt + tip the App DO knows about. The server
+ * returns receipts scoped to the calling user; tips are global so the
+ * sidebar can render unread badges for any room/thread.
+ */
+export interface ReceiptsSnapshot {
+  receipts: ReadReceipt[];
+  tips:     ActivityTip[];
+}
+
+export async function fetchReceipts(): Promise<ReceiptsSnapshot> {
+  return jsonOrThrow(
+    await fetch("/api/app/me/receipts", OPTS),
+    "GET /api/app/me/receipts",
+  );
+}
+
+/**
+ * Server is monotonic: a stale `lastRead` never moves the stored value
+ * backwards. We still send the latest known timestamp on every call so a
+ * recovering tab catches up without special-casing.
+ */
+export async function putReceipt(scope: ReceiptScope, scopeId: string, lastRead: number): Promise<ReadReceipt> {
+  const body = await jsonOrThrow<{ receipt: ReadReceipt }>(
+    await fetch("/api/app/me/receipts", {
+      ...OPTS,
+      method:  "PUT",
+      headers: { "content-type": "application/json" },
+      body:    JSON.stringify({ scope, scopeId, lastRead }),
+    }),
+    "PUT /api/app/me/receipts",
+  );
+  return body.receipt;
+}
+
+/** Open the App-singleton WebSocket for presence + receipt/tip fanout. */
+export function openAppSocket(): WebSocket {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(`${proto}//${window.location.host}/api/app/ws`);
 }

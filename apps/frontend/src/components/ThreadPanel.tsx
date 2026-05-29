@@ -53,6 +53,7 @@ import { ExecToolView } from "@/components/ExecToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
+import { useReceipts } from "@/lib/receipts";
 import { initials, relTime } from "@/lib/utils";
 import { isAtBottom, isMoreThanOneViewportFromBottom } from "@/lib/scroll-pinning";
 
@@ -126,6 +127,23 @@ export function ThreadPanel({
   });
 
   const { messages, sendMessage, isStreaming, isServerStreaming, stop } = useAgentChat({ agent });
+
+  // Mark this thread read whenever messages change. Covers initial load,
+  // the user's own sends, and live assistant frames in one place. We use
+  // each message's `metadata.createdAt` when available, falling back to
+  // `Date.now()` for assistant frames the SDK doesn't stamp — the server
+  // is monotonic, so a slightly-future timestamp is harmless.
+  const { markRead } = useReceipts();
+  useEffect(() => {
+    if (messages.length === 0) return;
+    let max = 0;
+    for (const m of messages) {
+      const meta = (m as { metadata?: { createdAt?: unknown } }).metadata;
+      const ts = typeof meta?.createdAt === "number" ? meta.createdAt : 0;
+      if (ts > max) max = ts;
+    }
+    markRead("thread", threadId, max > 0 ? max : Date.now());
+  }, [messages, threadId, markRead]);
 
   // Scroll plumbing for the chat panel. The thread loads pinned to
   // the bottom (latest message visible), follows new messages while

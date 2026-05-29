@@ -45,8 +45,13 @@ app.all("/api/app/*", async (c) => {
   const request = c.req.raw;
   const url = new URL(request.url);
 
-  // Block external access to the DO-internal notify-lookup endpoint.
-  if (url.pathname === "/api/app/notify-lookup") {
+  // Block external access to the DO-internal endpoints. These are reached
+  // only via DO-to-DO stub calls; the public API never exposes them.
+  if (
+    url.pathname === "/api/app/activity" ||
+    url.pathname.startsWith("/api/app/notifications/") ||
+    url.pathname.startsWith("/api/app/__test/")
+  ) {
     return c.text("not found", 404);
   }
   const innerUrl = new URL(request.url);
@@ -311,16 +316,39 @@ function stripPrefix(url: string, prefix: string): string {
   return rest.startsWith("/") ? rest : `/${rest}`;
 }
 
+/**
+ * POST the App DO's `/notifications/drain` from the cron handler. Returns
+ * the drain counters for logging; throws on non-2xx so `scheduled()` can
+ * surface the failure.
+ */
+async function drainNotifications(env: Env): Promise<void> {
+  const stub = env.App.get(env.App.idFromName(APP_DO_NAME));
+  const res = await stub.fetch(new Request("https://app/notifications/drain", {
+    method: "POST",
+  }));
+  if (!res.ok) {
+    throw new Error(`drain returned ${res.status}`);
+  }
+}
+
 // ---- export --------------------------------------------------------------
 
 export default {
   fetch: app.fetch,
 
   /**
-   * Cron-triggered: prime the warm pool so its alarm loop is running.
-   * Wrangler config wires this up to `* * * * *` (every minute).
+   * Cron-triggered (`* * * * *`):
+   *   1. Prime the warm pool so its alarm loop is running.
+   *   2. Drain the pending @mention notifications queue — fire any rows
+   *      whose debounce window has elapsed and whose recipient hasn't read
+   *      the mentioning message yet.
+   * Failures in either step are logged but never block the other.
    */
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await primePool(env);
+    const tasks: Promise<unknown>[] = [
+      primePool(env).catch(err => console.warn("[cron] primePool failed:", err)),
+      drainNotifications(env).catch(err => console.warn("[cron] notif drain failed:", err)),
+    ];
+    await Promise.all(tasks);
   },
 } satisfies ExportedHandler<Env>;

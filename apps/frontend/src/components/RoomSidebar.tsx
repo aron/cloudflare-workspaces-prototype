@@ -16,6 +16,7 @@ import { fetchMySettings } from "@/lib/api";
 import { listRooms } from "@/lib/api";
 import type { Me, RoomSummary } from "@/lib/api";
 import { navigate } from "@/lib/nav";
+import { useReceipts } from "@/lib/receipts";
 import { initials, relTime } from "@/lib/utils";
 
 const AVATAR_PALETTE = [
@@ -64,6 +65,9 @@ export function RoomSidebar({
     ? rooms.filter(r => r.name.toLowerCase().includes(filter.trim().toLowerCase()))
     : rooms;
 
+  // Unread indicator per room — cheap selector lookup, no extra fetch.
+  const { isUnread } = useReceipts();
+
   return (
     <aside className="flex h-full flex-col border-r border-kumo-line bg-kumo-base">
       <div className="flex h-14 flex-shrink-0 items-center justify-between px-5">
@@ -100,6 +104,7 @@ export function RoomSidebar({
             meta={relTime(r.createdAt)}
             active={r.id === activeRoomId}
             idx={avatarIdx(r.id)}
+            unread={isUnread("room", r.id)}
             onClick={() => navigate({ kind: "room", roomId: r.id })}
           />
         ))}
@@ -141,6 +146,7 @@ function RoomListItem({
   active = false,
   idx = 0,
   onClick,
+  unread = false,
 }: {
   letter:  string;
   title:   string;
@@ -148,6 +154,8 @@ function RoomListItem({
   active?: boolean;
   idx?:    number;
   onClick?: () => void;
+  /** Show an unread dot. Driven by ReceiptsProvider's `isUnread` selector. */
+  unread?: boolean;
 }) {
   return (
     <button
@@ -164,7 +172,16 @@ function RoomListItem({
         {letter}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-base font-medium text-kumo-default">{title}</div>
+        <div className="flex items-center gap-1.5">
+          <div className="truncate text-base font-medium text-kumo-default">{title}</div>
+          {unread && (
+            <span
+              aria-label="Unread"
+              title="Unread messages"
+              className="size-2 flex-shrink-0 rounded-full bg-kumo-brand"
+            />
+          )}
+        </div>
         <div className="truncate text-xs text-kumo-inactive">{meta}</div>
       </div>
     </button>
