@@ -34,7 +34,35 @@ export interface ContainerConnectionOptions {
   port: number;
   /** Fired exactly once when an established WebSocket transitions to closed/errored. */
   onClose?: () => void;
+  /**
+   * Total wall-clock budget for retrying a 503 upgrade response, in ms.
+   * Mirrors the Cloudflare sandbox SDK's `WebSocketTransport` /
+   * `ContainerControlClient` behaviour: when the container returns 503
+   * ("no instance available" / startup in progress), retry with
+   * exponential backoff (3s → 6s → 12s → 24s, capped at 30s) until either
+   * the upgrade succeeds, a non-503 status is returned, or this budget
+   * runs out.
+   *
+   * Without retry every transient 503 during container start / replacement
+   * propagates up as `WebSocket upgrade failed: 503 Service Unavailable`,
+   * which is what users see when the agent's `exec` tool wedges. Default
+   * matches the SDK's `DEFAULT_RETRY_TIMEOUT_MS` (90s).
+   */
+  retryTimeoutMs?: number;
+  /** Test seam: sleep implementation. Defaults to setTimeout-backed. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Test seam: clock source for measuring elapsed retry budget. Defaults to Date.now. */
+  now?: () => number;
 }
+
+/** Default retry budget for the 503-retry loop, matches sandbox SDK. */
+const DEFAULT_UPGRADE_RETRY_TIMEOUT_MS = 90_000;
+/** Cap on a single backoff sleep; matches the SDK. */
+const MAX_UPGRADE_BACKOFF_MS = 30_000;
+/** Base backoff before the first retry sleep. */
+const BASE_UPGRADE_BACKOFF_MS = 3_000;
+/** Stop retrying if less than this much budget remains — a sleep would burn it. */
+const MIN_REMAINING_FOR_RETRY_MS = 500;
 
 /**
  * RPC transport that queues sends and blocks receives until a WebSocket
@@ -128,11 +156,17 @@ export class ContainerConnection {
   private readonly containerStub: ContainerFetchStub;
   private readonly port: number;
   private readonly onClose: (() => void) | undefined;
+  private readonly retryTimeoutMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => number;
 
   constructor(opts: ContainerConnectionOptions) {
     this.containerStub = opts.stub;
     this.port = opts.port;
     this.onClose = opts.onClose;
+    this.retryTimeoutMs = opts.retryTimeoutMs ?? DEFAULT_UPGRADE_RETRY_TIMEOUT_MS;
+    this.sleep = opts.sleep ?? defaultSleep;
+    this.now = opts.now ?? Date.now;
 
     this.transport = new DeferredTransport();
     this.session = new RpcSession<ContainerRpc>(this.transport);
@@ -203,10 +237,7 @@ export class ContainerConnection {
 
   private async doConnect(): Promise<void> {
     try {
-      const req = new Request(`http://container/rpc`, {
-        headers: { Upgrade: "websocket", Connection: "upgrade" },
-      });
-      const res = await this.containerStub.fetch(switchPort(req, this.port));
+      const res = await this.upgradeWithRetry();
       if (res.status !== 101) {
         throw new Error(`WebSocket upgrade failed: ${res.status} ${res.statusText}`);
       }
@@ -228,4 +259,43 @@ export class ContainerConnection {
       throw err;
     }
   }
+
+  /**
+   * Attempt the WS upgrade, retrying transient 503s with exponential
+   * backoff. Mirrors the Cloudflare sandbox SDK's
+   * `ContainerControlClient.fetchUpgradeWithRetry` so that a container that
+   * is starting up, replacing instances, or briefly out of capacity does
+   * not surface as an immediate `WebSocket upgrade failed: 503` to the
+   * agent's `exec` tool. Anything other than 503 — including 101 success,
+   * fetch rejection, or e.g. 500/520 — returns/throws on the first
+   * attempt.
+   */
+  private async upgradeWithRetry(): Promise<Response> {
+    const startedAt = this.now();
+    let attempt = 0;
+    // The Request is rebuilt per attempt: AbortSignals attached to a
+    // Request body are single-use, and some workerd versions reject
+    // re-fetching a consumed Request.
+    while (true) {
+      const req = new Request(`http://container/rpc`, {
+        headers: { Upgrade: "websocket", Connection: "upgrade" },
+      });
+      const res = await this.containerStub.fetch(switchPort(req, this.port));
+      if (res.status !== 503) return res;
+      const elapsed = this.now() - startedAt;
+      const remaining = this.retryTimeoutMs - elapsed;
+      if (remaining <= MIN_REMAINING_FOR_RETRY_MS) return res;
+      const delay = Math.min(BASE_UPGRADE_BACKOFF_MS * 2 ** attempt, MAX_UPGRADE_BACKOFF_MS);
+      // Cap the sleep at the remaining budget so we don't oversleep into
+      // a window where the caller has already given up. Subtract the
+      // minimum so the next attempt still has room to run.
+      const sleepMs = Math.min(delay, Math.max(0, remaining - MIN_REMAINING_FOR_RETRY_MS));
+      await this.sleep(sleepMs);
+      attempt++;
+    }
+  }
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
