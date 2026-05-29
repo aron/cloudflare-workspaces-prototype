@@ -15,6 +15,10 @@ node_modules/
 # Build artifacts
 packages/workspace/dist/
 apps/agent/dist/
+
+# Captured `wrangler tail` JSON dumps for local inspection (see tail-agent.sh).
+logs.jsonl
+**/logs.jsonl
 apps/frontend/dist/
 ui-prototype/
 **/node_modules.host-backup.*/
