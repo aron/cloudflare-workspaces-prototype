@@ -7,6 +7,7 @@ import {
   buildPayload,
   buildSnippet,
   extractMentionedUserIds,
+  redactWebhookUrl,
 } from "../src/notify.js";
 
 describe("buildSnippet", () => {
@@ -95,5 +96,25 @@ describe("buildPayload", () => {
     // `\n_..._` — we just check there's no newline-prefixed underscore.
     expect(payload.text).not.toMatch(/\n_/);
     expect(payload.text).not.toMatch(/\n> /);
+  });
+});
+
+describe("redactWebhookUrl", () => {
+  it("masks key and token query params but keeps the rest of the URL", () => {
+    const out = redactWebhookUrl(
+      "https://chat.googleapis.com/v1/spaces/AAQ123/messages?key=AIzaSyTOPSECRET&token=WByNiSECRETTOKEN",
+    );
+    expect(out).toBe(
+      "https://chat.googleapis.com/v1/spaces/AAQ123/messages?key=REDACTED&token=REDACTED",
+    );
+  });
+  it("returns an empty string for empty input", () => {
+    expect(redactWebhookUrl("")).toBe("");
+  });
+  it("returns a placeholder for a malformed URL", () => {
+    expect(redactWebhookUrl("not a url")).toBe("<invalid-url>");
+  });
+  it("leaves URLs without key/token alone", () => {
+    expect(redactWebhookUrl("https://example.test/hook")).toBe("https://example.test/hook");
   });
 });

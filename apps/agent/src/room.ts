@@ -28,6 +28,7 @@ import { APP_DO_NAME } from "./app.js";
 import {
   buildSnippet,
   extractMentionedUserIds,
+  log,
   sendGChatMention,
 } from "./notify.js";
 import { resolveBaseUrl } from "./base-url.js";
@@ -332,7 +333,7 @@ export class Room extends Server<Env> {
           });
         }));
       } catch (e) {
-        console.warn(`[room] notify-mentions failed: ${(e as Error).message}`);
+        log("warn", "room notify-mentions failed", { error: (e as Error).message });
       }
     })());
   }

@@ -24,6 +24,7 @@ import { APP_DO_NAME } from "./app.js";
 import {
   buildSnippet,
   extractMentionedUserIds,
+  log,
   sendGChatMention,
 } from "./notify.js";
 
@@ -584,7 +585,7 @@ export class Agent extends Think<Env> {
       console.warn("[Agent] reflection injection failed:", err);
     }));
     this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
-      console.warn("[Agent] mention notifications failed:", err);
+      log("warn", "agent mention notifications failed", { error: (err as Error).message });
     }));
   }
 

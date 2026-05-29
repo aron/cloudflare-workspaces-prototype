@@ -68,6 +68,53 @@ export function buildPayload(n: MentionNotice): { text: string } {
 }
 
 /**
+ * Mask sensitive query params on a Google Chat webhook URL while keeping
+ * the bits that identify *which* webhook this is (host + space id). Used
+ * by the structured logger so the webhook URL can safely land in worker
+ * logs / dashboards.
+ *
+ * Input:  https://chat.googleapis.com/v1/spaces/AAQ.../messages?key=AIzaSy...&token=WByNi3...
+ * Output: https://chat.googleapis.com/v1/spaces/AAQ.../messages?key=REDACTED&token=REDACTED
+ */
+export function redactWebhookUrl(url: string): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    for (const k of ["key", "token"]) {
+      if (u.searchParams.has(k)) u.searchParams.set(k, "REDACTED");
+    }
+    return u.toString();
+  } catch {
+    // Malformed URL — don't leak it. Caller probably has bigger problems.
+    return "<invalid-url>";
+  }
+}
+
+/**
+ * Structured log line. We emit one JSON object per call (console.log /
+ * console.warn) so wrangler tail and the Workers dashboard can index
+ * fields without ad-hoc regex. The shape:
+ *
+ *   { module: "gchat", message: "...", level: "info" | "warn",
+ *     webhook_url?: "<redacted>", ...extra }
+ *
+ * `webhook_url` is automatically redacted when present. Extra fields are
+ * shallow-merged on top — don't pass anything sensitive in `extra`.
+ */
+export function log(
+  level: "info" | "warn",
+  message: string,
+  extra: Record<string, unknown> = {},
+): void {
+  const entry: Record<string, unknown> = { module: "gchat", message, level, ...extra };
+  if (typeof entry.webhook_url === "string") {
+    entry.webhook_url = redactWebhookUrl(entry.webhook_url as string);
+  }
+  if (level === "warn") console.warn(entry);
+  else console.log(entry);
+}
+
+/**
  * Fire-and-forget POST to the webhook. Never throws — failures are logged.
  * Returns true when the webhook accepted the message (2xx), false otherwise.
  */
@@ -80,12 +127,26 @@ export async function sendGChatMention(n: MentionNotice): Promise<boolean> {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.warn(`[notify] gchat webhook ${res.status}: ${body.slice(0, 200)}`);
+      log("warn", "gchat webhook returned non-2xx", {
+        webhook_url: n.webhookUrl,
+        status:           res.status,
+        google_chat_user: n.googleChatUserId,
+        room_name:        n.roomName,
+        body_preview:     body.slice(0, 200),
+      });
       return false;
     }
+    log("info", "gchat webhook ok", {
+      webhook_url: n.webhookUrl,
+      google_chat_user: n.googleChatUserId,
+      room_name:        n.roomName,
+    });
     return true;
   } catch (e) {
-    console.warn(`[notify] gchat webhook failed: ${(e as Error).message}`);
+    log("warn", "gchat webhook fetch failed", {
+      webhook_url: n.webhookUrl,
+      error: (e as Error).message,
+    });
     return false;
   }
 }
