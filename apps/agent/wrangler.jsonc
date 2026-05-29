@@ -49,11 +49,13 @@
   "triggers": { "crons": ["* * * * *"] },
 
   "vars": {
+    "SANDBOX_TRANSPORT": "rpc",
+
     // Number of pre-warmed sandbox containers to keep ready.
     "WARM_POOL_TARGET": "3",
     "WARM_POOL_REFRESH_INTERVAL": "10000",
 
-    "OPENAI_MODEL": "gpt-5.5",
+    "OPENAI_MODEL": "gpt-5.5"
 
     // Public origin used to build absolute URLs in agent messages and
     // Google Chat notifications. Leave unset to fall back to the origin of
