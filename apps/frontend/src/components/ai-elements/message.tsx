@@ -29,6 +29,7 @@ import {
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+import { Mention } from "@/components/Mention";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -323,6 +324,14 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+// Custom mention tag. Streamdown sanitises HTML by default; `allowedTags`
+// whitelists the `<mention>` element with its two attributes, and
+// `literalTagContent` tells the parser to treat the children as raw text
+// so the model can't smuggle nested markup through the label.
+const mentionAllowedTags = { mention: ["type", "id"] } as const;
+const mentionLiteralTags = ["mention"] as const;
+const mentionComponents  = { mention: Mention } as const;
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
@@ -331,6 +340,11 @@ export const MessageResponse = memo(
         className
       )}
       plugins={streamdownPlugins}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      allowedTags={mentionAllowedTags as any}
+      literalTagContent={mentionLiteralTags as unknown as string[]}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      components={mentionComponents as any}
       {...props}
     />
   ),

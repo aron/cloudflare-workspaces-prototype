@@ -24,11 +24,20 @@ const HANDLE_CHAR = /[a-z0-9._-]/i;
 const MENTION_RE = /@([a-z0-9][a-z0-9._-]{0,63})/gi;
 
 /**
- * Token mentions stored on the wire: `<user:HACKSPACE_USER_ID>` and
- * `<agent:AGENT_ID>`. Hackspace user ids are opaque short ids; agent ids
- * are short slugs. We accept the same loose `[A-Za-z0-9._-]` body for both.
+ * Token mentions stored on the wire:
+ *
+ *   <mention type="user"  id="HACKSPACE_USER_ID">@displayhandle</mention>
+ *   <mention type="agent" id="AGENT_ID">@agent</mention>
+ *
+ * The shape is real HTML so Streamdown can let it through sanitisation as
+ * a custom element. The label between the tags is for human readers when
+ * the message is viewed outside the app (Google Chat, copy-paste); the UI
+ * resolves the canonical display from the candidate pool keyed on id.
+ *
+ * The attribute order is fixed (`type` then `id`) for the regex; the React
+ * renderer reads them as props so attribute order doesn't matter there.
  */
-const TOKEN_RE = /<(user|agent):([A-Za-z0-9._-]{1,128})>/g;
+const TOKEN_RE = /<mention\s+type="(user|agent)"\s+id="([A-Za-z0-9._-]{1,128})"\s*>([^<]*)<\/mention>/g;
 
 export interface HandleMentionRun {
   type:   "mention";
@@ -40,11 +49,13 @@ export interface HandleMentionRun {
 
 export interface RefMentionRun {
   type: "ref";
-  /** Full matched token, e.g. `<user:abc123>`. */
+  /** Full matched token, e.g. `<mention type="user" id="abc">@bob</mention>`. */
   raw:  string;
   kind: "user" | "agent";
-  /** The id between the colon and the closing `>`. */
+  /** The id from the `id="..."` attribute. */
   id:   string;
+  /** Inner display label (may be empty). Already plain text, no markup. */
+  label: string;
 }
 
 export interface TextRun {
@@ -77,7 +88,13 @@ export function tokenize(text: string, known?: ReadonlySet<string>): Run[] {
     hits.push({
       start,
       end: start + m[0]!.length,
-      run: { type: "ref", raw: m[0]!, kind: m[1] as "user" | "agent", id: m[2]! },
+      run: {
+        type:  "ref",
+        raw:   m[0]!,
+        kind:  m[1] as "user" | "agent",
+        id:    m[2]!,
+        label: m[3] ?? "",
+      },
     });
   }
   for (const m of text.matchAll(MENTION_RE)) {
@@ -176,11 +193,13 @@ export type HandleResolver =
   (handle: string) => { kind: "user" | "agent"; id: string } | null;
 
 /**
- * Serialise `@handle` mentions to `<user:ID>` / `<agent:ID>` tokens for
- * persistence on the wire. Already-tokenised refs in the input pass through
- * unchanged. Unknown handles (no resolver match) also pass through verbatim
- * so the user's literal text is preserved — the server tokenizer will just
- * render them as plain `@symbols`.
+ * Serialise `@handle` mentions to `<mention type="..." id="...">@handle</mention>`
+ * tokens for persistence on the wire. Already-tokenised refs in the input
+ * pass through unchanged. Unknown handles (no resolver match) pass through
+ * verbatim so the user's literal text is preserved.
+ *
+ * The inner @handle is a hint for non-app viewers (e.g. Google Chat copy-
+ * paste); the UI ignores it and resolves the canonical label from the id.
  */
 export function serializeMentions(text: string, resolve: HandleResolver): string {
   const runs = tokenize(text);
@@ -189,7 +208,9 @@ export function serializeMentions(text: string, resolve: HandleResolver): string
     if (r.type === "text") { out += r.text; continue; }
     if (r.type === "ref")  { out += r.raw;  continue; }
     const ref = resolve(r.handle);
-    out += ref ? `<${ref.kind}:${ref.id}>` : r.raw;
+    out += ref
+      ? `<mention type="${ref.kind}" id="${ref.id}">@${r.handle}</mention>`
+      : r.raw;
   }
   return out;
 }

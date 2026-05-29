@@ -35,12 +35,14 @@ import { resolveBaseUrl } from "./base-url.js";
 
 /**
  * Triggers an agent thread when the message mentions the agent. Accepts
- * either the legacy `@agent` literal or the canonical `<agent:agent>` token.
+ * the canonical `<mention type="agent" id="...">@agent</mention>` token
+ * (emitted by the composer's serializer) and the legacy bare `@agent`
+ * literal (when the user types it raw without a known handle resolver).
  * Single-agent app: only one bot to address, so we don't parse ids.
  */
 function hasAgentMention(text: string): boolean {
   if (/(^|\s)@agent(\b|$)/i.test(text)) return true;
-  if (/<agent:[A-Za-z0-9._-]+>/.test(text)) return true;
+  if (/<mention\s+type="agent"\s+id="[A-Za-z0-9._-]+"\s*>[^<]*<\/mention>/.test(text)) return true;
   return false;
 }
 import type { Author, AppMessage, RoomMeta, ThreadRow } from "@app/shared";

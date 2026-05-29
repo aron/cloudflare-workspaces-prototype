@@ -72,10 +72,14 @@ export async function sendGChatMention(n: MentionNotice): Promise<boolean> {
   }
 }
 
-/** Extract `<user:HACKSPACE_ID>` tokens from a message body. Returns unique ids. */
+/**
+ * Extract Hackspace user ids from `<mention type="user" id="...">...</mention>`
+ * tokens in a message body. Returns unique ids in stable order.
+ */
 export function extractMentionedUserIds(text: string): string[] {
   const out = new Set<string>();
-  for (const m of text.matchAll(/<user:([A-Za-z0-9._-]{1,128})>/g)) {
+  const re = /<mention\s+type="user"\s+id="([A-Za-z0-9._-]{1,128})"\s*>[^<]*<\/mention>/g;
+  for (const m of text.matchAll(re)) {
     out.add(m[1]!);
   }
   return [...out];

@@ -79,7 +79,7 @@ describe("Room — mention notifications", () => {
     const res = await stub.fetch(asUser(`https://room/messages`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: `hey <user:${STANTZ.userId}> look at this` }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: `hey <mention type="user" id="${STANTZ.userId}">@x</mention> look at this` }] }),
     }));
     expect(res.status).toBe(201);
 
@@ -106,7 +106,7 @@ describe("Room — mention notifications", () => {
     const res = await stub.fetch(asUser(`https://room/messages`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: `<user:${STANTZ.userId}>` }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: `<mention type="user" id="${STANTZ.userId}">@x</mention>` }] }),
     }));
     const created = await res.json() as { message: { id: string } };
     await flush();
@@ -125,7 +125,7 @@ describe("Room — mention notifications", () => {
     await stub.fetch(asUser(`https://room/messages`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: `<user:${STANTZ.userId}>` }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: `<mention type="user" id="${STANTZ.userId}">@x</mention>` }] }),
     }));
 
     await flush();
@@ -142,7 +142,7 @@ describe("Room — mention notifications", () => {
     await stub.fetch(asUser(`https://room/messages`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: `<user:${STANTZ.userId}>` }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: `<mention type="user" id="${STANTZ.userId}">@x</mention>` }] }),
     }));
 
     await flush();
@@ -159,7 +159,7 @@ describe("Room — mention notifications", () => {
     await stub.fetch(asUser(`https://room/messages`, VENKMAN, {
       method:  "POST",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ parts: [{ type: "text", text: `<user:${VENKMAN.userId}> note to self` }] }),
+      body:    JSON.stringify({ parts: [{ type: "text", text: `<mention type="user" id="${VENKMAN.userId}">@x</mention> note to self` }] }),
     }));
 
     await flush();

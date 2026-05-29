@@ -25,12 +25,18 @@ describe("buildSnippet", () => {
 });
 
 describe("extractMentionedUserIds", () => {
-  it("pulls unique ids from <user:ID> tokens", () => {
-    const ids = extractMentionedUserIds("hi <user:abc> and <user:def> and <user:abc>");
+  it("pulls unique ids from <mention type=user id=ID> tokens", () => {
+    const ids = extractMentionedUserIds(
+      'hi <mention type="user" id="abc">@x</mention> and ' +
+      '<mention type="user" id="def">@x</mention> and ' +
+      '<mention type="user" id="abc">@x</mention>',
+    );
     expect(ids.sort()).toEqual(["abc", "def"]);
   });
-  it("ignores <agent:...> tokens and bare @handles", () => {
-    expect(extractMentionedUserIds("hey @bob and <agent:agent>")).toEqual([]);
+  it("ignores <mention type=agent> tokens and bare @handles", () => {
+    expect(extractMentionedUserIds(
+      'hey @bob and <mention type="agent" id="agent">@agent</mention>',
+    )).toEqual([]);
   });
   it("returns empty for input with no tokens", () => {
     expect(extractMentionedUserIds("plain text")).toEqual([]);

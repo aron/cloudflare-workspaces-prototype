@@ -45,7 +45,8 @@ export interface BuildSystemPromptOptions {
   now?: Date;
   /**
    * Person who started this thread. When set, the agent is instructed to
-   * close each turn by @-mentioning them with the `<user:ID>` token so the
+   * close each turn with a `<mention type="user" id="...">@name</mention>`
+   * tag so the notification webhook can ping them in Google Chat.
    * notification webhook can ping them in Google Chat.
    */
   originator?: { userId: string; name: string };
@@ -167,7 +168,7 @@ When a skill file references a relative path, resolve it against the skill direc
 /**
  * Section telling the agent to ping the thread's originator at the end of a
  * turn. Rendered only when {@link BuildSystemPromptOptions.originator} is set.
- * The exact `<user:ID>` token is critical — the notifications backend matches
+ * The exact `<mention type="user" id="...">@name</mention>` tag is critical —
  * on it to send a Google Chat webhook, so we spell it out verbatim and warn
  * against paraphrasing it as `@name`.
  */
@@ -183,11 +184,13 @@ function originatorNote(
   const deepLink = baseUrl && roomId && threadId
     ? `${baseUrl}/rooms/${roomId}/threads/${threadId}#<message-id>`
     : "";
+  // Pre-built example tag so the model has a copy-paste reference.
+  const tag = `<mention type="user" id="${o.userId}">@${o.name}</mention>`;
   return [
     "Thread originator:",
     `- This thread was started by ${o.name}.`,
-    `- It is very important that you @-mention them at the end of every turn by writing the exact token \`<user:${o.userId}>\`. This is what triggers their Google Chat notification.`,
-    "- Do not paraphrase the token (e.g. `@name`) and do not wrap it in backticks or code blocks — it must appear verbatim in the message body so the notifier can detect it.",
+    `- It is very important that you @-mention them at the end of every turn by writing the exact tag \`${tag}\` (including the closing \`</mention>\`). The text between the tags is the human-readable handle and can be \`@${o.name}\` or another short label.`,
+    "- Do not paraphrase the tag (e.g. plain `@name`) and do not wrap it in backticks or code blocks — it must appear verbatim in the message body so both the renderer and the notifier can detect it.",
     "- Mention them exactly once per turn, at the end. Skip the mention only if the turn produced no user-facing output (e.g. you were interrupted before responding).",
     ...(deepLink ? [
       `- The Google Chat ping will include a deep link back to your message of the form \`${deepLink}\`, where \`<message-id>\` is the id of your final assistant message. You don't construct this link — the notifier does — but it's useful to know it exists when deciding how much context to include in your closing line.`,
