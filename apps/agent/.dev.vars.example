@@ -20,3 +20,15 @@ OPENAI_API_KEY=sk-...
 # worker falls back to this dev identity so `wrangler dev` keeps working.
 # Leave unset to use the hardcoded "Local Dev" user.
 # ACCESS_DEV_USER={"userId":"u-venkman","email":"venkman@example.com","name":"Venkman"}
+
+# --- notifications ---
+# Optional: Google Chat incoming-webhook URL. When set, the Room DO fires a
+# ping at this webhook whenever a message contains a `<user:ID>` mention of
+# a user who has saved their Google Workspace user ID in Settings.
+# GCHAT_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=...
+
+# --- public origin ---
+# Used to build absolute URLs in agent messages and Google Chat pings.
+# When unset the worker derives the origin from the inbound request and
+# forwards it to DOs via the `x-app-base-url` header.
+# APP_BASE_URL=http://localhost:8787
