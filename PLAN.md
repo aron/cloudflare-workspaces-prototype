@@ -22,7 +22,9 @@ export class WorkspaceDurableObject extends DurableObject {
 }
 ```
 
-The first implementation should focus on `Workspace.fs`, backed by the documented `cf_vfs_*` SQLite schema. It should also expose VFS stats that can be served from a Durable Object endpoint, and a Node-oriented `node:fs`-like adapter that lets tests and future socket/container phases interact with the same VFS through familiar filesystem calls. Shell, container sync, FUSE, mounts, and RPC are out of scope unless needed to preserve schema compatibility.
+The first implementation should focus on `Workspace.fs`, backed by the documented `cf_vfs_*` SQLite schema. It should also expose VFS stats that can be served from a Durable Object endpoint, and a Node-oriented `node:fs`-like adapter that lets tests and future socket/container phases interact with the same VFS through familiar filesystem calls.
+
+The existing daemon/CLI/FUSE work should live in a separate sibling package, `packages/wsd`, published as `@cloudflare/wsd`. The core DO-backed VFS package remains `packages/workspace` / `@cloudflare/workspace`. The daemon package can depend on the workspace package and adapt it for local/server/FUSE usage without forcing Node-only dependencies into the Worker-compatible core package.
 
 ## Source References
 
@@ -35,7 +37,7 @@ The first implementation should focus on `Workspace.fs`, backed by the documente
 ## Goals
 
 - Start from an entirely clean branch with no inherited implementation files.
-- Provide a reusable JS module, not a command-line tool.
+- Provide a reusable JS module in `@cloudflare/workspace`; put command-line/daemon functionality in `@cloudflare/wsd`.
 - Accept a Cloudflare Durable Object storage object, or a narrow adapter around it, as the persistence layer.
 - Initialize and use the documented SQLite schema inside DO storage.
 - Expose the documented `WorkspaceFilesystem` API through `workspace.fs`.
@@ -46,15 +48,37 @@ The first implementation should focus on `Workspace.fs`, backed by the documente
 
 ## Non-goals
 
-- No CLI commands.
-- No FUSE implementation.
-- No WebSocket/RPC sync protocol.
-- No container shell execution.
+- No CLI commands in `@cloudflare/workspace`; CLI commands belong in `@cloudflare/wsd`.
+- No FUSE implementation in `@cloudflare/workspace`; FUSE belongs in `@cloudflare/wsd` and should consume the shared VFS interface.
+- No WebSocket/RPC sync protocol in this phase.
+- No container shell execution in this phase.
 - No R2 lazy mount implementation in the first pass.
 - No UI or full Worker app scaffold beyond tests/examples needed to validate package usage.
 - No transparent monkey-patching of the built-in `node:fs` module in the first pass; provide an explicit adapter/facade instead.
 
-## Proposed Package Shape
+## Proposed Package Layout
+
+```text
+packages/
+  workspace/              # @cloudflare/workspace
+    src/
+      index.ts            # createWorkspace(), shared public API
+      fs/                 # DO SQLite-backed WorkspaceFilesystem implementation
+      schema/             # cf_vfs_* schema setup and migrations
+      stats.ts            # workspace.stats()
+      http.ts             # createWorkspaceStatsResponse()
+      node-fs-adapter.ts  # explicit node:fs/promises-like facade
+  wsd/                    # @cloudflare/wsd
+    src/
+      cli/wsd.ts          # daemon/CLI entrypoint
+      fuse/               # fuse-native mount adapter
+      server/             # local HTTP server, health/stats endpoints, future sockets
+    tests/
+```
+
+`@cloudflare/workspace` must remain Worker-compatible and should not depend on Node-only packages such as `fuse-native`. `@cloudflare/wsd` is allowed to depend on Node/native modules and should use `@cloudflare/workspace` as its backing VFS library.
+
+## Proposed `@cloudflare/workspace` Package Shape
 
 ```ts
 export interface Workspace {
@@ -136,8 +160,10 @@ It is not expected to make the built-in `node:fs` module transparently point at 
 
 ## Architecture Decisions
 
-- Put the reusable package at `packages/workspace` and publish it as `@cloudflare/workspace`.
-- Keep implementation Worker-compatible: no Node-only APIs in package runtime code. Tests may use Node helpers.
+- Put the reusable VFS package at `packages/workspace` and publish it as `@cloudflare/workspace`.
+- Put daemon/CLI/FUSE code at `packages/wsd` and publish it as `@cloudflare/wsd`.
+- Keep `@cloudflare/workspace` Worker-compatible: no Node-only APIs in package runtime code. Tests may use Node helpers.
+- Allow `@cloudflare/wsd` to use Node-only dependencies such as `fuse-native`, `pkg`, and local HTTP server helpers.
 - Hide SQLite details behind internal modules; expose the documented workspace object/interface plus explicit stats and adapter helpers.
 - Use the `cf_vfs_*` table names exactly as documented so future Worker/container sync can share the database.
 - Split file data into 512 KiB chunks and content-address them with SHA-256 from the start.
@@ -146,6 +172,7 @@ It is not expected to make the built-in `node:fs` module transparently point at 
 - Throw `NodeJS.ErrnoException`-shaped errors with stable `code` values for POSIX-style behavior.
 - Keep stats read-only and cheap enough to serve on demand from a DO endpoint.
 - Keep the Node adapter as a thin translation layer over `WorkspaceFilesystem`, not a separate implementation.
+- Treat `@cloudflare/wsd` as a consumer of `@cloudflare/workspace` and the Node adapter, so socket/FUSE/daemon behavior does not fork filesystem semantics.
 
 ## Task List
 
@@ -158,7 +185,8 @@ It is not expected to make the built-in `node:fs` module transparently point at 
 **Acceptance criteria:**
 - [ ] Branch contains no existing source implementation from the design/main branches.
 - [ ] Root package config and TypeScript config exist.
-- [ ] `packages/workspace` exists as the package under development.
+- [ ] `packages/workspace` exists as the Worker-compatible VFS package under development.
+- [ ] `packages/wsd` exists as the Node/daemon package for CLI/FUSE/socket-facing code.
 - [ ] Relevant design docs are copied into `docs/` or referenced clearly.
 - [ ] Package exports are declared but may initially throw `NotImplemented`.
 
@@ -174,6 +202,8 @@ It is not expected to make the built-in `node:fs` module transparently point at 
 - `tsconfig.base.json`
 - `packages/workspace/package.json`
 - `packages/workspace/src/index.ts`
+- `packages/wsd/package.json`
+- `packages/wsd/src/cli/wsd.ts` or placeholder entrypoint
 - `docs/**`
 
 **Estimated scope:** Small/Medium
@@ -206,7 +236,7 @@ It is not expected to make the built-in `node:fs` module transparently point at 
 
 - [ ] Clean branch is ready.
 - [ ] Public API shape is locked by tests.
-- [ ] No CLI assumptions remain in docs or package design.
+- [ ] CLI/daemon assumptions are isolated to `@cloudflare/wsd`; `@cloudflare/workspace` remains a reusable package.
 
 ### Phase 2: SQLite schema and initialization
 
