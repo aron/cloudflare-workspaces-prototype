@@ -22,7 +22,7 @@ export class WorkspaceDurableObject extends DurableObject {
 }
 ```
 
-The first implementation should focus on `Workspace.fs`, backed by the documented `cf_vfs_*` SQLite schema. Shell, container sync, FUSE, mounts, and RPC are out of scope unless needed to preserve schema compatibility.
+The first implementation should focus on `Workspace.fs`, backed by the documented `cf_vfs_*` SQLite schema. It should also expose VFS stats that can be served from a Durable Object endpoint, and a Node-oriented `node:fs`-like adapter that lets tests and future socket/container phases interact with the same VFS through familiar filesystem calls. Shell, container sync, FUSE, mounts, and RPC are out of scope unless needed to preserve schema compatibility.
 
 ## Source References
 
@@ -39,6 +39,8 @@ The first implementation should focus on `Workspace.fs`, backed by the documente
 - Accept a Cloudflare Durable Object storage object, or a narrow adapter around it, as the persistence layer.
 - Initialize and use the documented SQLite schema inside DO storage.
 - Expose the documented `WorkspaceFilesystem` API through `workspace.fs`.
+- Expose VFS state/statistics through a package API that can be wired into a Durable Object HTTP endpoint.
+- Provide a Node-oriented filesystem adapter for tests and future socket/container integration.
 - Keep core behavior testable outside Workers by using a storage adapter/fake that mimics DO SQLite semantics.
 - Use TDD: write tests for schema/interface behavior before implementation.
 
@@ -49,13 +51,15 @@ The first implementation should focus on `Workspace.fs`, backed by the documente
 - No WebSocket/RPC sync protocol.
 - No container shell execution.
 - No R2 lazy mount implementation in the first pass.
-- No UI or Worker app scaffold beyond tests/examples needed to validate package usage.
+- No UI or full Worker app scaffold beyond tests/examples needed to validate package usage.
+- No transparent monkey-patching of the built-in `node:fs` module in the first pass; provide an explicit adapter/facade instead.
 
 ## Proposed Package Shape
 
 ```ts
 export interface Workspace {
   fs: WorkspaceFilesystem;
+  stats(): Promise<WorkspaceVfsStats>;
   gc(safetyWindowMs?: number): Promise<{ manifestsFreed: number; blobsFreed: number }>;
 }
 
@@ -73,7 +77,28 @@ export interface WorkspaceFilesystem {
   grep(pattern: string, path: string, options?: { ignoreCase?: boolean }): Promise<Array<{ path: string; line: number; text: string }>>;
 }
 
+export interface WorkspaceVfsStats {
+  schemaVersion: number;
+  rev: number;
+  pushRev: number;
+  fetchRev: number;
+  nodes: { files: number; directories: number; total: number };
+  dirents: number;
+  content: {
+    filesBytes: number;
+    chunks: number;
+    blobs: number;
+    blobBytes: number;
+    manifests: number;
+    deduplicatedBytes: number;
+  };
+  changes: { tombstones: number; latestRev: number | null };
+  mounts: { total: number; indexed: number };
+}
+
 export function createWorkspace(storage: DurableObjectStorage, options?: WorkspaceOptions): Workspace;
+export function createWorkspaceStatsResponse(workspace: Workspace): Promise<Response>;
+export function createNodeFsAdapter(fs: WorkspaceFilesystem): WorkspaceNodeFsAdapter;
 ```
 
 Implementation can introduce internal adapters if the exact Cloudflare type is inconvenient in tests:
@@ -86,16 +111,41 @@ interface WorkspaceSqlStorage {
 
 But the user-facing entrypoint should take the normal Durable Object storage interface.
 
+The stats endpoint should be a small helper rather than a full router, so DO code can opt in explicitly:
+
+```ts
+async fetch(request: Request) {
+  const url = new URL(request.url);
+  if (url.pathname === "/__workspace/stats") {
+    return createWorkspaceStatsResponse(this.workspace);
+  }
+  return new Response("not found", { status: 404 });
+}
+```
+
+The Node adapter should be an explicit `node:fs/promises`-style facade used by tests and future socket/container code:
+
+```ts
+const nodeFs = createNodeFsAdapter(workspace.fs);
+await nodeFs.mkdir("/workspace/src", { recursive: true });
+await nodeFs.writeFile("/workspace/src/index.ts", "export {};\n", "utf8");
+const text = await nodeFs.readFile("/workspace/src/index.ts", "utf8");
+```
+
+It is not expected to make the built-in `node:fs` module transparently point at the VFS without an explicit facade or later monkey-patching layer.
+
 ## Architecture Decisions
 
 - Put the reusable package at `packages/workspace` and publish it as `@cloudflare/workspace`.
 - Keep implementation Worker-compatible: no Node-only APIs in package runtime code. Tests may use Node helpers.
-- Hide SQLite details behind internal modules; expose only the documented workspace object/interface.
+- Hide SQLite details behind internal modules; expose the documented workspace object/interface plus explicit stats and adapter helpers.
 - Use the `cf_vfs_*` table names exactly as documented so future Worker/container sync can share the database.
 - Split file data into 512 KiB chunks and content-address them with SHA-256 from the start.
 - Store manifests using the documented encoded format, with tests pinning encoding/decoding behavior.
 - Bump the singleton `cf_vfs_meta.rev` on every mutation and write delete tombstones to `cf_vfs_changes`.
 - Throw `NodeJS.ErrnoException`-shaped errors with stable `code` values for POSIX-style behavior.
+- Keep stats read-only and cheap enough to serve on demand from a DO endpoint.
+- Keep the Node adapter as a thin translation layer over `WorkspaceFilesystem`, not a separate implementation.
 
 ## Task List
 
@@ -133,7 +183,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 **Description:** Define the public `createWorkspace(storage)` API and an internal storage adapter for DO SQLite. Add tests that instantiate the package against a fake/test SQLite storage and assert the shape of the returned object.
 
 **Acceptance criteria:**
-- [ ] `createWorkspace(storage)` returns `{ fs, gc }`.
+- [ ] `createWorkspace(storage)` returns `{ fs, stats, gc }`.
 - [ ] `fs` exposes all documented methods.
 - [ ] Runtime package code does not depend on Node-only modules.
 - [ ] Tests can run in Node using a fake/in-memory SQLite adapter while preserving DO-style SQL behavior.
@@ -378,9 +428,60 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 - [ ] Tests assert POSIX-style error `code` values.
 - [ ] The package works by calling `createWorkspace(storage).fs`, not by invoking a CLI.
 
-### Phase 5: Schema invariants, GC, and future-sync hooks
+### Phase 5: Stats, adapters, schema invariants, GC, and future-sync hooks
 
-## Task 12: Implement schema verification helpers
+## Task 12: Implement VFS stats API and stats endpoint helper
+
+**Description:** Add a read-only `workspace.stats()` API that summarizes the current VFS database, plus a small `createWorkspaceStatsResponse(workspace)` helper for exposing the stats from a Durable Object endpoint.
+
+**Acceptance criteria:**
+- [ ] `workspace.stats()` returns schema version, rev, watermarks, file/dir counts, dirent count, content/chunk/blob/manifest counts, total live file bytes, estimated deduplicated bytes, tombstone count, latest tombstone rev, and mount index counts.
+- [ ] Stats are computed from SQLite and do not depend on in-memory caches.
+- [ ] Stats queries are read-only and do not mutate `last_seen`, `rev`, or watermarks.
+- [ ] `createWorkspaceStatsResponse(workspace)` returns JSON with `content-type: application/json`.
+- [ ] Example Durable Object code shows routing `/__workspace/stats` to the helper.
+
+**Verification:**
+- [ ] Tests create files, duplicate content, directories, deletes, and mount rows, then assert stats values.
+- [ ] Endpoint helper test asserts status, content type, and JSON body.
+
+**Dependencies:** Tasks 3, 6, 8, 10
+
+**Files likely touched:**
+- `packages/workspace/src/stats.ts`
+- `packages/workspace/src/http.ts`
+- `packages/workspace/test/stats.test.ts`
+- `packages/workspace/test/http.test.ts`
+
+**Estimated scope:** Medium
+
+## Task 13: Implement Node filesystem adapter
+
+**Description:** Add a Node-oriented `node:fs/promises`-style adapter over `WorkspaceFilesystem` for tests and the next socket implementation phase. This adapter should let code use familiar methods without duplicating VFS behavior.
+
+**Acceptance criteria:**
+- [ ] `createNodeFsAdapter(workspace.fs)` returns an object with documented `node:fs/promises`-like methods backed by `WorkspaceFilesystem`.
+- [ ] Initial methods include `readFile`, `writeFile`, `mkdir`, `rm`, `readdir`, `stat`, `lstat`, `unlink`, `rmdir`, and `access` where they can map cleanly to the VFS.
+- [ ] `readFile` and `writeFile` support Node-like encoding/options forms used by tests.
+- [ ] `stat`/`lstat` return a `Stats`-like object with `isFile()` and `isDirectory()` methods.
+- [ ] Adapter errors preserve POSIX-style `code` values.
+- [ ] The adapter is explicit; it does not monkey-patch global `node:fs`.
+
+**Verification:**
+- [ ] Existing package tests can use the adapter for black-box filesystem behavior.
+- [ ] Adapter contract tests compare representative behavior with `node:fs/promises` for matching operations.
+- [ ] Future socket-facing tests can use the adapter without touching SQLite internals.
+
+**Dependencies:** Tasks 7-11
+
+**Files likely touched:**
+- `packages/workspace/src/node-fs-adapter.ts`
+- `packages/workspace/src/node-stats.ts`
+- `packages/workspace/test/node-fs-adapter.test.ts`
+
+**Estimated scope:** Medium
+
+## Task 14: Implement schema verification helpers
 
 **Description:** Add internal or exported diagnostic helpers to validate documented schema invariants.
 
@@ -400,7 +501,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 
 **Estimated scope:** Medium
 
-## Task 13: Implement `Workspace.gc`
+## Task 15: Implement `Workspace.gc`
 
 **Description:** Implement garbage collection for unreferenced manifests and blobs using the documented safety window.
 
@@ -414,7 +515,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 **Verification:**
 - [ ] Tests cover overwritten files, removed files, shared chunks, safety window behavior, and return counts.
 
-**Dependencies:** Tasks 6, 10, 12
+**Dependencies:** Tasks 6, 10, 14
 
 **Files likely touched:**
 - `packages/workspace/src/gc.ts`
@@ -422,7 +523,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 
 **Estimated scope:** Medium
 
-## Task 14: Add change/revision inspection for future sync
+## Task 16: Add change/revision inspection for future sync
 
 **Description:** Add a package-level read-only API for changed live nodes and delete tombstones since a revision. This is not the sync protocol, but it preserves the documented revision model and makes future sync implementation testable.
 
@@ -445,12 +546,13 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 
 ### Phase 6: Worker compatibility and documentation
 
-## Task 15: Add Worker/Durable Object integration tests or examples
+## Task 17: Add Worker/Durable Object integration tests or examples
 
 **Description:** Validate that the package can be constructed with a Durable Object storage-like interface and used in a Worker-compatible environment.
 
 **Acceptance criteria:**
 - [ ] Example Durable Object shows `createWorkspace(this.ctx.storage)`.
+- [ ] Example Durable Object exposes `/__workspace/stats` using `createWorkspaceStatsResponse(workspace)`.
 - [ ] Test harness verifies schema initialization and basic fs operations in a Worker-like environment if available.
 - [ ] Runtime package remains free of Node-only APIs.
 
@@ -458,7 +560,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 - [ ] Package tests pass in Node.
 - [ ] Worker compatibility test/example runs or is documented with exact command.
 
-**Dependencies:** Tasks 1-11
+**Dependencies:** Tasks 1-13
 
 **Files likely touched:**
 - `packages/workspace/examples/durable-object.ts`
@@ -467,13 +569,15 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 
 **Estimated scope:** Medium
 
-## Task 16: Final docs and package validation
+## Task 18: Final docs and package validation
 
 **Description:** Document package usage, API, schema compatibility, and known deferred features.
 
 **Acceptance criteria:**
 - [ ] README explains that this is a package, not a CLI.
 - [ ] README includes Durable Object usage example.
+- [ ] README documents the optional stats endpoint helper.
+- [ ] README documents the Node filesystem adapter and its explicit-facade limitation.
 - [ ] API docs mirror `docs/04_filesystem_interface.md`.
 - [ ] Deferred features are listed: shell, FUSE, WebSocket/RPC sync, lazy mounts, R2 tiering.
 - [ ] Build, typecheck, and tests all pass from a clean checkout.
@@ -484,7 +588,7 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 - [ ] `npm test`
 - [ ] Package export smoke test imports `@cloudflare/workspace` and calls `createWorkspace`.
 
-**Dependencies:** Tasks 1-15
+**Dependencies:** Tasks 1-17
 
 **Files likely touched:**
 - `README.md`
@@ -503,7 +607,9 @@ But the user-facing entrypoint should take the normal Durable Object storage int
 - **Path normalization:** Decide whether `..` is rejected outright or canonicalized while preventing root escape.
 - **Hardlinks/rename:** Schema supports inode indirection and hardlinks, but the documented fs interface does not currently expose `link`/`rename`; avoid implementing extra public API unless requested.
 - **Verification API visibility:** Decide whether invariant verification is public, internal, or test-only.
+- **Stats endpoint shape:** Decide whether `/__workspace/stats` is the recommended path or only an example, and whether stats need redaction/auth hooks.
+- **Node adapter scope:** Node does not let `node:fs` transparently target an arbitrary userland filesystem without monkey-patching or FUSE. Decide whether the first adapter remains an explicit facade or later grows a patching layer for socket-side code.
 
 ## Suggested First Milestone
 
-Complete Tasks 1-6 first. That yields a clean, tested package skeleton with schema initialization, path resolution, and chunk/manifest storage. Then Tasks 7-11 implement the full documented `Workspace.fs` interface on top of that foundation.
+Complete Tasks 1-6 first. That yields a clean, tested package skeleton with schema initialization, path resolution, and chunk/manifest storage. Then Tasks 7-11 implement the full documented `Workspace.fs` interface on top of that foundation. Tasks 12-13 add the stats endpoint helper and Node filesystem adapter needed for observability, tests, and the next socket phase.
