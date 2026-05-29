@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { mkdir } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { isAbsolute } from "node:path";
+import { MemoryVfs, mountFuse, type FuseMount } from "../fuse/index.js";
 
 const DEFAULT_PORT = 4567;
+const DEFAULT_MOUNT_POINT = "/workspace";
 const HOST = "0.0.0.0";
 
 function parsePort(value: string | undefined): number {
@@ -16,6 +20,15 @@ function parsePort(value: string | undefined): number {
   }
 
   return port;
+}
+
+function parseMountPoint(value: string | undefined): string {
+  const mountPoint = value === undefined || value === "" ? DEFAULT_MOUNT_POINT : value;
+  if (!isAbsolute(mountPoint)) {
+    throw new Error(`MOUNT_POINT must be an absolute path, got ${JSON.stringify(value)}`);
+  }
+
+  return mountPoint;
 }
 
 function send(
@@ -36,59 +49,104 @@ function requestPath(request: IncomingMessage): string {
   return url.pathname;
 }
 
-const server = createServer((request, response) => {
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    send(response, 405, "method not allowed\n", {
-      allow: "GET, HEAD",
-      "content-type": "text/plain; charset=utf-8",
-    });
-    return;
-  }
-
-  const path = requestPath(request);
-  if (path === "/health") {
-    const body = request.method === "HEAD" ? "" : "ok\n";
-    send(response, 200, body, {
-      "content-type": "text/plain; charset=utf-8",
-    });
-    return;
-  }
-
-  if (path === "/") {
-    const body = request.method === "HEAD" ? "" : "{}";
-    send(response, 200, body, {
-      "content-type": "application/json; charset=utf-8",
-    });
-    return;
-  }
-
-  send(response, 404, "not found\n", {
-    "content-type": "text/plain; charset=utf-8",
-  });
-});
-
-function closeThenExit(signal: NodeJS.Signals): void {
-  server.close((error) => {
-    if (error) {
-      console.error(error);
-      process.exit(1);
+function createHttpServer(): Server {
+  return createServer((request, response) => {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      send(response, 405, "method not allowed\n", {
+        allow: "GET, HEAD",
+        "content-type": "text/plain; charset=utf-8",
+      });
+      return;
     }
 
-    process.exit(signal === "SIGINT" ? 130 : 143);
+    const path = requestPath(request);
+    if (path === "/health") {
+      const body = request.method === "HEAD" ? "" : "ok\n";
+      send(response, 200, body, {
+        "content-type": "text/plain; charset=utf-8",
+      });
+      return;
+    }
+
+    if (path === "/") {
+      const body = request.method === "HEAD" ? "" : "{}";
+      send(response, 200, body, {
+        "content-type": "application/json; charset=utf-8",
+      });
+      return;
+    }
+
+    send(response, 404, "not found\n", {
+      "content-type": "text/plain; charset=utf-8",
+    });
   });
 }
 
-process.once("SIGINT", closeThenExit);
-process.once("SIGTERM", closeThenExit);
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error !== undefined) {
+        reject(error);
+        return;
+      }
 
-try {
-  const port = parsePort(process.env.PORT);
-  server.listen(port, HOST, () => {
-    const address = server.address();
-    const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    console.log(`wsd listening on ${HOST}:${boundPort}`);
+      resolve();
+    });
   });
-} catch (error) {
+}
+
+async function main(): Promise<void> {
+  const port = parsePort(process.env.PORT);
+  const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
+  const vfs = new MemoryVfs();
+
+  await mkdir(mountPoint, { recursive: true });
+  const fuse = await mountFuse({ mountPoint, vfs });
+  const server = createHttpServer();
+
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+
+    try {
+      await closeServer(server);
+    } catch (error) {
+      console.error(error);
+    }
+
+    await unmount(fuse);
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+
+  process.once("SIGINT", (signal) => {
+    void shutdown(signal);
+  });
+  process.once("SIGTERM", (signal) => {
+    void shutdown(signal);
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(port, HOST, () => {
+      const address = server.address();
+      const boundPort = typeof address === "object" && address !== null ? address.port : port;
+      console.log(`wsd listening on ${HOST}:${boundPort} mount=${mountPoint}`);
+      resolve();
+    });
+  });
+}
+
+async function unmount(fuse: FuseMount): Promise<void> {
+  try {
+    await fuse.unmount();
+  } catch (error) {
+    console.error("failed to unmount FUSE:", error instanceof Error ? error.message : error);
+  }
+}
+
+main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
-}
+});

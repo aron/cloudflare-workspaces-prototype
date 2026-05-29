@@ -18,5 +18,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "fuse-native": "^2.2.6"
   }
 }

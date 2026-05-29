@@ -13,7 +13,6 @@ const pkgBin = process.platform === "win32" ? "pkg.cmd" : "pkg";
 const targets = [
   ["node18-linux-x64", "wsd-linux-x64"],
   ["node18-macos-x64", "wsd-macos-x64"],
-  ["node18-macos-arm64", "wsd-macos-arm64"],
 ];
 
 await run("npm", ["run", "build"], packageRoot);
@@ -23,6 +22,8 @@ await mkdir(outputDir, { recursive: true });
 for (const [target, outputName] of targets) {
   await run(pkgBin, [
     resolve(packageRoot, "dist/cli/wsd.cjs"),
+    "--config",
+    resolve(repoRoot, "package.json"),
     "--target",
     target,
     "--output",

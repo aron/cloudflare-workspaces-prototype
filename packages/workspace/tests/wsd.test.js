@@ -1,19 +1,83 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
+const fs = require("node:fs/promises");
 const http = require("node:http");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
 const packageRoot = path.resolve(__dirname, "..");
 const cliPath = path.join(packageRoot, "dist", "cli", "wsd.cjs");
 
-test("wsd starts an HTTP server on PORT", async (t) => {
+test("wsd rejects relative MOUNT_POINT values", async () => {
   const port = await getAvailablePort();
   const child = spawn(cliPath, {
     cwd: packageRoot,
     env: {
       ...process.env,
+      MOUNT_POINT: "relative-workspace",
+      PORT: String(port),
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  assert.equal(code, 1);
+  assert.match(stderr, /MOUNT_POINT must be an absolute path/);
+});
+
+test("wsd starts an HTTP server after mounting FUSE", async (t) => {
+  const reason = await fuseSkipReason();
+  if (reason !== undefined) {
+    t.skip(reason);
+    return;
+  }
+
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, { port, mountPoint });
+
+  const health = await request(`http://127.0.0.1:${port}/health`);
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.body, "ok\n");
+
+  const root = await request(`http://127.0.0.1:${port}/`);
+  assert.equal(root.statusCode, 200);
+  assert.equal(root.headers["content-type"], "application/json; charset=utf-8");
+  assert.deepEqual(JSON.parse(root.body), {});
+});
+
+test("wsd exposes file IO through the mounted filesystem", async (t) => {
+  const reason = await fuseSkipReason();
+  if (reason !== undefined) {
+    t.skip(reason);
+    return;
+  }
+
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, { port, mountPoint });
+
+  await fs.mkdir(path.join(mountPoint, "dir"));
+  await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello fuse");
+  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello fuse");
+  assert.deepEqual(await fs.readdir(path.join(mountPoint, "dir")), ["hello.txt"]);
+
+  await fs.rename(path.join(mountPoint, "dir", "hello.txt"), path.join(mountPoint, "dir", "renamed.txt"));
+  await fs.truncate(path.join(mountPoint, "dir", "renamed.txt"), 5);
+  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "renamed.txt"), "utf8"), "hello");
+
+  await fs.unlink(path.join(mountPoint, "dir", "renamed.txt"));
+  assert.deepEqual(await fs.readdir(path.join(mountPoint, "dir")), []);
+});
+
+async function startWsd(t, { port, mountPoint }) {
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: mountPoint,
       PORT: String(port),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -32,19 +96,34 @@ test("wsd starts an HTTP server on PORT", async (t) => {
 
   t.after(async () => {
     await stopProcess(child);
+    await fs.rm(mountPoint, { recursive: true, force: true });
   });
 
   await waitForHttpOk(`http://127.0.0.1:${port}/health`, child, () => stderr || stdout);
+  return child;
+}
 
-  const health = await request(`http://127.0.0.1:${port}/health`);
-  assert.equal(health.statusCode, 200);
-  assert.equal(health.body, "ok\n");
+async function fuseSkipReason() {
+  if (process.platform === "linux") {
+    try {
+      await fs.access("/dev/fuse");
+      return undefined;
+    } catch {
+      return "FUSE smoke test skipped because /dev/fuse is unavailable";
+    }
+  }
 
-  const root = await request(`http://127.0.0.1:${port}/`);
-  assert.equal(root.statusCode, 200);
-  assert.equal(root.headers["content-type"], "application/json; charset=utf-8");
-  assert.deepEqual(JSON.parse(root.body), {});
-});
+  if (process.platform === "darwin") {
+    try {
+      await fs.access("/Library/Filesystems/macfuse.fs");
+      return undefined;
+    } catch {
+      return "FUSE smoke test skipped because macFUSE is unavailable";
+    }
+  }
+
+  return `FUSE smoke test skipped on unsupported platform ${process.platform}`;
+}
 
 function getAvailablePort() {
   return new Promise((resolve, reject) => {
@@ -63,6 +142,26 @@ function getAvailablePort() {
 
         resolve(port);
       });
+    });
+  });
+}
+
+async function waitForExit(child, timeoutMs = 2_000) {
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("timed out waiting for wsd to exit"));
+    }, timeoutMs);
+
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal, stderr });
     });
   });
 }
