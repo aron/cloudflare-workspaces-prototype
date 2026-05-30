@@ -24,15 +24,12 @@ export default defineConfig({
   test: {
     globals: true,
     include: ["src/**/*.test.ts"],
-    // testing.test.ts and schema/index.test.ts cover the node-only test
-    // fixtures (SqliteTestStorage, RecordingStorage). They have no
-    // meaning under workerd — the workerd runner uses real DO storage
-    // via withDB instead.
-    exclude: [
-      "src/testing.test.ts",
-      "src/schema/index.test.ts",
-      "src/provider.test.ts",
-      "src/provider-fd.test.ts",
-    ],
+    // testing.test.ts exercises SQLiteTestStorage directly — the
+    // node:sqlite-backed fixture has no analogue under workerd, so
+    // the test is meaningful only against the real node runtime.
+    // All other tests run under both backends; provider/provider-fd
+    // use a withProvider helper that delegates to withDB, which the
+    // workers config aliases to a DO-backed implementation.
+    exclude: ["src/testing.test.ts"],
   },
 });

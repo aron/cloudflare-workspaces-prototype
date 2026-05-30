@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createWorkspaceFilesystem } from "../index.js";
-import { RecordingStorage } from "../testing.js";
+import { RecordingStorage } from "../testing-recording.js";
 
 describe("createWorkspaceFilesystem", () => {
   it("lazily initializes the documented schema on first use", async () => {

@@ -55,4 +55,8 @@ export { buildManifest, MANIFEST_VERSION } from "./sync/manifests.js";
 export { pushObjects } from "./sync/push.js";
 export type { WatermarkKey } from "./sync/watermarks.js";
 export { currentRev, readWatermark, writeWatermark } from "./sync/watermarks.js";
-export { RecordingStorage, SQLiteTestStorage } from "./testing.js";
+export type { ExecutedStatement } from "./testing-recording.js";
+// RecordingStorage is workerd-safe (pure JS). SQLiteTestStorage
+// wraps node:sqlite and must be imported from
+// '@cloudflare/workspace-fs/testing' under node-only call sites.
+export { RecordingStorage } from "./testing-recording.js";

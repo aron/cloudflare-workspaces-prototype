@@ -3,10 +3,10 @@ import {
   type ChangeEntry,
   Database,
   initializeSchema,
-  SQLiteTestStorage,
   SQLiteWorkspaceProvider,
   stageBlob,
 } from "@cloudflare/workspace-fs";
+import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
 import type { SyncRPC } from "@cloudflare/workspace-rpc";
 import { create, type VirtualFileSystem, VirtualProvider } from "@platformatic/vfs";
 

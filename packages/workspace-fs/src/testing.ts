@@ -1,10 +1,22 @@
+// Real-DB DurableObjectStorageLike for unit tests. Backed by Node's
+// built-in node:sqlite running an in-memory database. Workers' DO SQL
+// surface is a subset of this, so anything that works here works on
+// the real platform too.
+//
+// This module imports node:sqlite at the top level and therefore
+// cannot be loaded under workerd. RecordingStorage \u2014 the
+// pure-JS fixture that also lives in workspace-fs's testing surface
+// \u2014 has moved to ./testing-recording.ts so it can be imported
+// from workerd-runnable tests. We re-export it here so existing
+// `import { RecordingStorage } from "@cloudflare/workspace-fs/testing"`
+// call sites keep working under node.
+
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+
 import type { DurableObjectStorageLike, SqlCursorLike } from "./types.js";
 
-export interface ExecutedStatement {
-  query: string;
-  bindings: unknown[];
-}
+export type { ExecutedStatement } from "./testing-recording.js";
+export { RecordingStorage } from "./testing-recording.js";
 
 class TestCursor<Row extends object> implements SqlCursorLike<Row> {
   private readonly rows: Row[];
@@ -18,61 +30,6 @@ class TestCursor<Row extends object> implements SqlCursorLike<Row> {
   }
 }
 
-export class RecordingStorage implements DurableObjectStorageLike {
-  readonly statements: ExecutedStatement[] = [];
-  readonly sql = {
-    exec: <Row extends object = Record<string, unknown>>(
-      query: string,
-      ...bindings: unknown[]
-    ): SqlCursorLike<Row> => {
-      this.statements.push({ query, bindings });
-      return new TestCursor<Row>(this.rowsFor<Row>(query, bindings));
-    },
-  };
-
-  private readonly meta = new Map<string, number>();
-
-  constructor(seed?: { schemaVersion?: number; rev?: number }) {
-    if (seed?.schemaVersion !== undefined) {
-      this.meta.set("schema_version", seed.schemaVersion);
-    }
-    if (seed?.rev !== undefined) {
-      this.meta.set("rev", seed.rev);
-    }
-  }
-
-  transactionSync<T>(closure: () => T): T {
-    return closure();
-  }
-
-  private rowsFor<Row extends object>(query: string, bindings: unknown[]): Row[] {
-    const normalized = query.replace(/\s+/g, " ").trim().toLowerCase();
-    if (normalized === "select v from vfs_meta where k = ?") {
-      const key = String(bindings[0]);
-      const value = this.meta.get(key);
-      return value === undefined ? [] : ([{ v: value }] as Row[]);
-    }
-
-    if (normalized.startsWith("insert or ignore into vfs_meta")) {
-      const key = String(bindings[0]);
-      const value = Number(bindings[1]);
-      if (!this.meta.has(key)) {
-        this.meta.set(key, value);
-      }
-    }
-
-    if (normalized.startsWith("update vfs_meta set v = ? where k = ?")) {
-      this.meta.set(String(bindings[1]), Number(bindings[0]));
-    }
-
-    return [];
-  }
-}
-
-// Real-DB DurableObjectStorageLike for unit tests. Backed by Node's
-// built-in node:sqlite running an in-memory database. Workers' DO SQL
-// surface is a subset of this, so anything that works here works on the
-// real platform too.
 export class SQLiteTestStorage implements DurableObjectStorageLike {
   private readonly db: DatabaseSync;
   private readonly cache = new Map<string, StatementSync>();
