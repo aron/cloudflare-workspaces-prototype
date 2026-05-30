@@ -1,9 +1,13 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { ChangeEntry } from "@cloudflare/workspace-fs";
+
 import {
+  type ChangeEntry,
+  coalesceChanges,
   Database,
+  fetchObjects,
   initializeSchema,
+  ROOT_INODE,
   SQLiteTestStorage,
   SQLiteWorkspaceProvider,
 } from "@cloudflare/workspace-fs";
@@ -81,6 +85,89 @@ describe("SyncRPC over a real WebSocket", () => {
       }
     } finally {
       await client.close();
+    }
+  });
+});
+
+describe("SyncRPC push convergence", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("client pushes ChangeEntry + bytes; server converges", async () => {
+    // Two DBs: A holds the pre-populated state, B is the receiver
+    // we connect to over the wire. The client collects A's changes
+    // and pushes them to B via push() + pushObjects().
+    const senderStorage = new SQLiteTestStorage();
+    const senderDb = new Database(senderStorage);
+    initializeSchema(senderDb, () => 1000);
+    const senderProvider = new SQLiteWorkspaceProvider(senderDb, { now: () => 1500 });
+    senderProvider.writeFileSync("/a.txt", "alpha");
+    senderProvider.writeFileSync("/b.txt", "beta");
+
+    try {
+      harness = await startHarness();
+      const client = createSyncClient({ url: harness.url });
+      try {
+        // Stage every chunk the sender has into the server first,
+        // then push the change list.
+        const entries: ChangeEntry[] = [];
+        const hashes: Uint8Array[] = [];
+        const seenHash = new Set<string>();
+        for await (const e of coalesceChanges(senderDb, 0)) {
+          entries.push(e);
+          if (e.kind === "file") {
+            for (const c of e.chunks) {
+              const k = Array.from(c.hash).join(",");
+              if (!seenHash.has(k)) {
+                seenHash.add(k);
+                hashes.push(c.hash);
+              }
+            }
+          }
+        }
+        // Stream bytes to the server.
+        const objects = new ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>({
+          async start(controller) {
+            for await (const { hash, bytes } of fetchObjects(senderDb, hashes)) {
+              controller.enqueue({ hash, bytes });
+            }
+            controller.close();
+          },
+        });
+        await client.pushObjects(objects);
+
+        // Push the entries. The server's push() drains the stream
+        // and applies under transactionSync.
+        const changes = new ReadableStream<ChangeEntry>({
+          start(controller) {
+            for (const e of entries) controller.enqueue(e);
+            controller.close();
+          },
+        });
+        const result = await client.push(changes);
+        expect(result.rev).toBeGreaterThan(0);
+
+        // Inspect the server DB directly through the harness handle.
+        const a = harness.db.one<{ child_inode: number }>(
+          "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
+          ROOT_INODE,
+          "a.txt",
+        );
+        expect(a?.child_inode).toBeGreaterThan(0);
+        const b = harness.db.one<{ child_inode: number }>(
+          "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
+          ROOT_INODE,
+          "b.txt",
+        );
+        expect(b?.child_inode).toBeGreaterThan(0);
+      } finally {
+        await client.close();
+      }
+    } finally {
+      senderStorage.close();
     }
   });
 });
