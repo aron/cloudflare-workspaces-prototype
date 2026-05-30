@@ -27,8 +27,8 @@ export function readdir(db: Database, path: string): WorkspaceDirentResult[] {
 
   const rows = db.all<DirentRow>(
     `SELECT d.name AS name, n.type AS type
-       FROM cf_vfs_dirents d
-       JOIN cf_vfs_nodes n ON n.inode = d.child_inode
+       FROM vfs_dirents d
+       JOIN vfs_nodes n ON n.inode = d.child_inode
       WHERE d.parent_inode = ?
       ORDER BY d.name`,
     node.inode,

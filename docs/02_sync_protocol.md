@@ -59,7 +59,7 @@ A typical `exec()` round-trip:
    inline. The DO consumes entries as they arrive so peak memory
    stays bounded regardless of how much the exec touched.
 5. **Diff.** The DO unions all chunk hashes from the entry stream,
-   probes its own `cf_vfs_blobs` for which it already has, and calls
+   probes its own `vfs_blobs` for which it already has, and calls
    `fetchObjects` for the missing subset.
 6. **Apply.** Entries + new objects land in the DO's SQLite **in
    bounded transactions** (default cap: 64 MiB of new bytes or 1024
@@ -99,7 +99,7 @@ one name.
 | `currentRev` | Container | Latest `rev` stamped on a container-side mutation. |
 | `appliedPushRev` | Container | Largest DO `rev` the container has fully applied. Echoed on every push response and pull stream. |
 
-The DO watermarks live in the `_cf_vfs_watermark` table so they survive DO
+The DO watermarks live in the `_vfs_watermark` table so they survive DO
 restarts. The container's revisions are in-memory only; if the container
 restarts, the next push from the DO is treated as an authoritative
 baseline.
@@ -205,11 +205,11 @@ from the DO. Two options worth weighing later:
 Either way, the bytes never cross the wire; the question is purely how
 much the DO admits exists.
 
-### Bloom/cuckoo filter over `cf_vfs_blobs.hash`
+### Bloom/cuckoo filter over `vfs_blobs.hash`
 
 Every pull does a `hasObjects` probe round-trip. With tens of thousands
 of chunks per pull the bytes are small but the latency is real. A DO-
-side probabilistic filter rebuilt lazily from `cf_vfs_blobs` would let the
+side probabilistic filter rebuilt lazily from `vfs_blobs` would let the
 DO skip the probe for chunks it can prove it doesn't have, falling
 back to `hasObjects` only for likely-present hits. No protocol change
 needed; pure DO-side optimisation.
@@ -249,9 +249,9 @@ format.*
 
 **casync.** The closest fit: built by Lennart Poettering for exactly
 this problem. The `.caidx` chunk-index format is an ordered list of
-`(sha256, offset, size)` per file — our `cf_vfs_manifests.encoded` is
+`(sha256, offset, size)` per file — our `vfs_manifests.encoded` is
 a homebrew of the same shape. The `.castr` chunk store is our
-`cf_vfs_blobs`. Buzhash content-defined chunking solves the
+`vfs_blobs`. Buzhash content-defined chunking solves the
 head-insertion problem in this appendix. Full POSIX metadata
 (symlinks, hardlinks, xattrs, mode, mtime) is built in. The blocker
 is implementation: casync is C, the only good port is Go (`desync`),

@@ -19,7 +19,7 @@ interface DirChild {
 // Walk a directory subtree post-order so we delete leaves before
 // parents. Yields { path, inode, type } for each node to remove. The
 // caller appends one tombstone per yielded path and clears
-// cf_vfs_chunks for file inodes.
+// vfs_chunks for file inodes.
 function* walkPostOrder(
   db: Database,
   rootInode: number,
@@ -39,8 +39,8 @@ function* walkPostOrder(
     top.expanded = true;
     const children = db.all<DirChild>(
       `SELECT d.name AS name, d.child_inode AS child_inode, n.type AS type
-         FROM cf_vfs_dirents d
-         JOIN cf_vfs_nodes n ON n.inode = d.child_inode
+         FROM vfs_dirents d
+         JOIN vfs_nodes n ON n.inode = d.child_inode
         WHERE d.parent_inode = ?
         ORDER BY d.name`,
       top.inode,
@@ -78,7 +78,7 @@ export function rm(db: Database, path: string, options: RmOptions): void {
 
     if (node.type === "dir" && !recursive) {
       const childCount = db.scalar<number>(
-        "SELECT COUNT(*) FROM cf_vfs_dirents WHERE parent_inode = ?",
+        "SELECT COUNT(*) FROM vfs_dirents WHERE parent_inode = ?",
         node.inode,
       );
       if ((childCount ?? 0) > 0) {
@@ -108,9 +108,9 @@ function removeInode(db: Database, inode: number, type: "file" | "dir"): void {
   // Drop the dirent referencing this inode. There should be exactly one
   // (no hardlinks yet); if zero, we're deleting the root which we've
   // already refused.
-  db.run("DELETE FROM cf_vfs_dirents WHERE child_inode = ?", inode);
+  db.run("DELETE FROM vfs_dirents WHERE child_inode = ?", inode);
   if (type === "file") {
-    db.run("DELETE FROM cf_vfs_chunks WHERE inode = ?", inode);
+    db.run("DELETE FROM vfs_chunks WHERE inode = ?", inode);
   }
-  db.run("DELETE FROM cf_vfs_nodes WHERE inode = ?", inode);
+  db.run("DELETE FROM vfs_nodes WHERE inode = ?", inode);
 }

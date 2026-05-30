@@ -46,7 +46,7 @@ export async function readFile(
   }
 
   const chunks = db.all<ChunkRow>(
-    "SELECT hash, size FROM cf_vfs_chunks WHERE inode = ? ORDER BY idx",
+    "SELECT hash, size FROM vfs_chunks WHERE inode = ? ORDER BY idx",
     node.inode,
   );
 
@@ -60,7 +60,7 @@ export async function readFile(
     const touched = now();
     for (const chunk of chunks) {
       const row = db.one<{ bytes: Uint8Array }>(
-        "SELECT bytes FROM cf_vfs_blob_bytes WHERE hash = ?",
+        "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
         chunk.hash,
       );
       if (row === undefined) {
@@ -87,14 +87,14 @@ export async function readFile(
       }
       const chunk = chunks[i++];
       const row = db.one<{ bytes: Uint8Array }>(
-        "SELECT bytes FROM cf_vfs_blob_bytes WHERE hash = ?",
+        "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
         chunk.hash,
       );
       if (row === undefined) {
         controller.error(createWorkspaceError("EIO", `missing blob bytes for ${path}`, path));
         return;
       }
-      db.run("UPDATE cf_vfs_blobs SET last_seen = ? WHERE hash = ?", now(), chunk.hash);
+      db.run("UPDATE vfs_blobs SET last_seen = ? WHERE hash = ?", now(), chunk.hash);
       controller.enqueue(row.bytes);
     },
   });
@@ -108,7 +108,7 @@ function touchBlobs(db: Database, chunks: ChunkRow[], at: number): void {
     const key = bufferKey(chunk.hash);
     if (seen.has(key)) continue;
     seen.add(key);
-    db.run("UPDATE cf_vfs_blobs SET last_seen = ? WHERE hash = ?", at, chunk.hash);
+    db.run("UPDATE vfs_blobs SET last_seen = ? WHERE hash = ?", at, chunk.hash);
   }
 }
 

@@ -47,13 +47,13 @@ export class RecordingStorage implements DurableObjectStorageLike {
 
   private rowsFor<Row extends object>(query: string, bindings: unknown[]): Row[] {
     const normalized = query.replace(/\s+/g, " ").trim().toLowerCase();
-    if (normalized === "select v from cf_vfs_meta where k = ?") {
+    if (normalized === "select v from vfs_meta where k = ?") {
       const key = String(bindings[0]);
       const value = this.meta.get(key);
       return value === undefined ? [] : ([{ v: value }] as Row[]);
     }
 
-    if (normalized.startsWith("insert or ignore into cf_vfs_meta")) {
+    if (normalized.startsWith("insert or ignore into vfs_meta")) {
       const key = String(bindings[0]);
       const value = Number(bindings[1]);
       if (!this.meta.has(key)) {
@@ -61,7 +61,7 @@ export class RecordingStorage implements DurableObjectStorageLike {
       }
     }
 
-    if (normalized.startsWith("update cf_vfs_meta set v = ? where k = ?")) {
+    if (normalized.startsWith("update vfs_meta set v = ? where k = ?")) {
       this.meta.set(String(bindings[1]), Number(bindings[0]));
     }
 

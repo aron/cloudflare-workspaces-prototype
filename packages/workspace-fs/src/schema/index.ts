@@ -19,7 +19,7 @@ export function initializeSchema(db: Database, now: () => number): void {
     }
 
     const schemaVersion = db.one<MetaRow>(
-      "SELECT v FROM cf_vfs_meta WHERE k = ?",
+      "SELECT v FROM vfs_meta WHERE k = ?",
       "schema_version",
     )?.v;
     if (schemaVersion !== undefined && schemaVersion > SCHEMA_VERSION) {
@@ -30,17 +30,17 @@ export function initializeSchema(db: Database, now: () => number): void {
     }
 
     db.run(
-      "INSERT OR IGNORE INTO cf_vfs_meta (k, v) VALUES (?, ?)",
+      "INSERT OR IGNORE INTO vfs_meta (k, v) VALUES (?, ?)",
       "schema_version",
       SCHEMA_VERSION,
     );
-    db.run("UPDATE cf_vfs_meta SET v = ? WHERE k = ?", SCHEMA_VERSION, "schema_version");
-    db.run("INSERT OR IGNORE INTO cf_vfs_meta (k, v) VALUES (?, ?)", "rev", 1);
-    db.run("INSERT OR IGNORE INTO _cf_vfs_watermark (k, v) VALUES (?, ?)", "pushRev", 0);
-    db.run("INSERT OR IGNORE INTO _cf_vfs_watermark (k, v) VALUES (?, ?)", "fetchRev", 0);
+    db.run("UPDATE vfs_meta SET v = ? WHERE k = ?", SCHEMA_VERSION, "schema_version");
+    db.run("INSERT OR IGNORE INTO vfs_meta (k, v) VALUES (?, ?)", "rev", 1);
+    db.run("INSERT OR IGNORE INTO _vfs_watermark (k, v) VALUES (?, ?)", "pushRev", 0);
+    db.run("INSERT OR IGNORE INTO _vfs_watermark (k, v) VALUES (?, ?)", "fetchRev", 0);
 
     db.run(
-      `INSERT OR IGNORE INTO cf_vfs_nodes
+      `INSERT OR IGNORE INTO vfs_nodes
         (inode, type, mode, mtime, rev)
         VALUES (?, 'dir', ?, ?, 0)`,
       ROOT_INODE,

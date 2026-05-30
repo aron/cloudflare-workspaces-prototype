@@ -20,7 +20,7 @@ interface ChildRow {
   child_inode: number;
 }
 
-// Walk cf_vfs_dirents from ROOT_INODE down to `path`. Returns null when
+// Walk vfs_dirents from ROOT_INODE down to `path`. Returns null when
 // any segment is missing, or when an intermediate segment is a file
 // (which a real filesystem would surface as ENOTDIR — callers map the
 // `null` to the appropriate POSIX code based on context).
@@ -32,7 +32,7 @@ export function resolveInode(db: Database, path: string): ResolvedInode | null {
   const { parts } = canonicalizePath(path);
 
   const root = db.one<NodeRow>(
-    "SELECT inode, type, mode, mtime FROM cf_vfs_nodes WHERE inode = ?",
+    "SELECT inode, type, mode, mtime FROM vfs_nodes WHERE inode = ?",
     ROOT_INODE,
   );
   if (root === undefined) {
@@ -48,7 +48,7 @@ export function resolveInode(db: Database, path: string): ResolvedInode | null {
       return null;
     }
     const child = db.one<ChildRow>(
-      "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
       current.inode,
       name,
     );
@@ -56,7 +56,7 @@ export function resolveInode(db: Database, path: string): ResolvedInode | null {
       return null;
     }
     const next = db.one<NodeRow>(
-      "SELECT inode, type, mode, mtime FROM cf_vfs_nodes WHERE inode = ?",
+      "SELECT inode, type, mode, mtime FROM vfs_nodes WHERE inode = ?",
       child.child_inode,
     );
     if (next === undefined) {

@@ -23,7 +23,7 @@ export type {
  * Create a Workspace filesystem backed by Durable Object SQLite storage.
  *
  * The returned object implements the package-level filesystem API and lazily
- * initializes the documented `cf_vfs_*` schema on first use.
+ * initializes the documented `vfs_*` schema on first use.
  */
 export function createWorkspaceFilesystem(
   storage: DurableObjectStorageLike,

@@ -23,11 +23,11 @@ interface ChangeRow {
 }
 
 function listChanges(db: Database): ChangeRow[] {
-  return db.all<ChangeRow>("SELECT rev, path, op FROM cf_vfs_changes ORDER BY rev");
+  return db.all<ChangeRow>("SELECT rev, path, op FROM vfs_changes ORDER BY rev");
 }
 
 function countBlobs(db: Database): number {
-  return db.scalar<number>("SELECT COUNT(*) FROM cf_vfs_blobs") ?? 0;
+  return db.scalar<number>("SELECT COUNT(*) FROM vfs_blobs") ?? 0;
 }
 
 describe("rm", () => {
@@ -49,9 +49,9 @@ describe("rm", () => {
   it("bumps rev once per call", async () => {
     const db = freshDB();
     await writeFile(db, "/a.txt", "hi", {}, () => 0);
-    const before = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'") ?? 0;
+    const before = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'") ?? 0;
     rm(db, "/a.txt", {});
-    const after = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'") ?? 0;
+    const after = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'") ?? 0;
     expect(after).toBe(before + 1);
   });
 
@@ -131,9 +131,9 @@ describe("rm", () => {
     mkdir(db, "/d", {}, () => 0);
     await writeFile(db, "/d/a", "x", {}, () => 0);
     await writeFile(db, "/d/b", "y", {}, () => 0);
-    const before = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'") ?? 0;
+    const before = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'") ?? 0;
     rm(db, "/d", { recursive: true });
-    const after = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'") ?? 0;
+    const after = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'") ?? 0;
     expect(after).toBe(before + 1);
   });
 
@@ -143,7 +143,7 @@ describe("rm", () => {
     await writeFile(db, "/d/a", "first", {}, () => 0);
     await writeFile(db, "/d/b", "second", {}, () => 0);
     rm(db, "/d", { recursive: true });
-    const chunkRows = db.scalar<number>("SELECT COUNT(*) FROM cf_vfs_chunks") ?? 0;
+    const chunkRows = db.scalar<number>("SELECT COUNT(*) FROM vfs_chunks") ?? 0;
     expect(chunkRows).toBe(0);
   });
 

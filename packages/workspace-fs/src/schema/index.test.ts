@@ -13,21 +13,21 @@ describe("createWorkspaceFilesystem", () => {
     const executed = storage.statements.map((statement) => statement.query);
     expect(executed).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_meta"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_nodes"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_dirents"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_blobs"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_blob_bytes"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_chunks"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_manifests"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS cf_vfs_changes"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS _cf_vfs_watermark"),
-        expect.stringContaining("CREATE TABLE IF NOT EXISTS _cf_vfs_mounts"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_meta"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_nodes"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_dirents"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_blobs"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_blob_bytes"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_chunks"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_manifests"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS vfs_changes"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS _vfs_watermark"),
+        expect.stringContaining("CREATE TABLE IF NOT EXISTS _vfs_mounts"),
       ]),
     );
     expect(storage.statements).toContainEqual(
       expect.objectContaining({
-        query: expect.stringContaining("INSERT OR IGNORE INTO cf_vfs_nodes"),
+        query: expect.stringContaining("INSERT OR IGNORE INTO vfs_nodes"),
         bindings: [1, 493, 1234],
       }),
     );

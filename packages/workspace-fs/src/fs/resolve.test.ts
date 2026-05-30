@@ -25,7 +25,7 @@ function addNode(
   const mode = options.mode ?? (type === "dir" ? 0o755 : 0o644);
   const mtime = options.mtime ?? 0;
   db.run(
-    "INSERT INTO cf_vfs_nodes (type, mode, mtime, rev) VALUES (?, ?, ?, 0)",
+    "INSERT INTO vfs_nodes (type, mode, mtime, rev) VALUES (?, ?, ?, 0)",
     type,
     mode,
     mtime,
@@ -35,7 +35,7 @@ function addNode(
     throw new Error("failed to allocate inode");
   }
   db.run(
-    "INSERT INTO cf_vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+    "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
     parentInode,
     name,
     inode,

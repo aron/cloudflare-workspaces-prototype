@@ -87,13 +87,13 @@ describe("readFile", () => {
     expect(await readFile(db, "/empty", "utf8")).toBe("");
   });
 
-  it("touches cf_vfs_blobs.last_seen when chunks are read", async () => {
+  it("touches vfs_blobs.last_seen when chunks are read", async () => {
     const db = freshDB();
     await writeFile(db, "/x.txt", "content", {}, () => 100);
-    const before = db.scalar<number>("SELECT last_seen FROM cf_vfs_blobs");
+    const before = db.scalar<number>("SELECT last_seen FROM vfs_blobs");
     expect(before).toBe(100);
     await readFile(db, "/x.txt", "utf8", () => 200);
-    const after = db.scalar<number>("SELECT last_seen FROM cf_vfs_blobs");
+    const after = db.scalar<number>("SELECT last_seen FROM vfs_blobs");
     expect(after).toBe(200);
   });
 

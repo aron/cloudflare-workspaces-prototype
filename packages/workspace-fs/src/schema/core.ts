@@ -5,11 +5,11 @@ export const SCHEMA_VERSION = 1;
 export const ROOT_INODE = 1;
 
 export const CORE_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS cf_vfs_meta (
+  `CREATE TABLE IF NOT EXISTS vfs_meta (
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL
   )`,
-  `CREATE TABLE IF NOT EXISTS cf_vfs_nodes (
+  `CREATE TABLE IF NOT EXISTS vfs_nodes (
     inode         INTEGER PRIMARY KEY AUTOINCREMENT,
     type          TEXT    NOT NULL CHECK(type IN ('file','dir')),
     mode          INTEGER NOT NULL DEFAULT 493,
@@ -19,28 +19,28 @@ export const CORE_STATEMENTS = [
     stub_size     INTEGER,
     manifest_hash BLOB
   )`,
-  `CREATE TABLE IF NOT EXISTS cf_vfs_dirents (
+  `CREATE TABLE IF NOT EXISTS vfs_dirents (
     parent_inode INTEGER NOT NULL,
     name         TEXT    NOT NULL,
     child_inode  INTEGER NOT NULL,
     PRIMARY KEY (parent_inode, name)
   )`,
-  `CREATE INDEX IF NOT EXISTS cf_vfs_dirents_by_child ON cf_vfs_dirents(child_inode)`,
-  `CREATE TABLE IF NOT EXISTS cf_vfs_blobs (
+  `CREATE INDEX IF NOT EXISTS vfs_dirents_by_child ON vfs_dirents(child_inode)`,
+  `CREATE TABLE IF NOT EXISTS vfs_blobs (
     hash      BLOB    PRIMARY KEY,
     size      INTEGER NOT NULL,
     last_seen INTEGER NOT NULL
   )`,
-  `CREATE TABLE IF NOT EXISTS cf_vfs_blob_bytes (
-    hash  BLOB PRIMARY KEY REFERENCES cf_vfs_blobs(hash) ON DELETE CASCADE,
+  `CREATE TABLE IF NOT EXISTS vfs_blob_bytes (
+    hash  BLOB PRIMARY KEY REFERENCES vfs_blobs(hash) ON DELETE CASCADE,
     bytes BLOB NOT NULL
   )`,
-  `CREATE TABLE IF NOT EXISTS cf_vfs_chunks (
+  `CREATE TABLE IF NOT EXISTS vfs_chunks (
     inode INTEGER NOT NULL,
     idx   INTEGER NOT NULL,
     hash  BLOB    NOT NULL,
     size  INTEGER NOT NULL,
     PRIMARY KEY (inode, idx)
   )`,
-  `CREATE INDEX IF NOT EXISTS cf_vfs_chunks_by_hash ON cf_vfs_chunks(hash)`,
+  `CREATE INDEX IF NOT EXISTS vfs_chunks_by_hash ON vfs_chunks(hash)`,
 ] as const;

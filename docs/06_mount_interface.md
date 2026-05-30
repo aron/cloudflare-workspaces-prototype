@@ -38,7 +38,7 @@ A mount is either **lazy** or **eager**.
 
 `list()` enumerates the tree; `fetch(relPath)` returns one file's bytes.
 The workspace calls `list()` once on first use to insert stubs into
-`cf_vfs_nodes`, then calls `fetch()` on demand the first time something
+`vfs_nodes`, then calls `fetch()` on demand the first time something
 reads a stub.
 
 ```ts
@@ -105,7 +105,7 @@ Bare `Mount` objects are also accepted for back-compat.
 Mounts default to `mode: "read-only"`. Writes anywhere under the mount
 root throw `EROFS`, and writes that occur container-side during `exec()`
 are dropped on the post-exec pull (after the bytes are received, before
-they hit `cf_vfs_nodes`).
+they hit `vfs_nodes`).
 
 Pass `mode: "read-write"` to opt in to write-through. Container-side
 writes are mirrored to the mount with bounded concurrency after the
@@ -192,7 +192,7 @@ const ArtifactBundle = (id: string): MountFactory => ({ sessionId, root, vfs }: 
 ## Indexing and persistence
 
 On first call to any `fs`, `shell`, or `prefetch` method, every mount
-is indexed in parallel. Index state is persisted to `_cf_vfs_mounts`
+is indexed in parallel. Index state is persisted to `_vfs_mounts`
 in SQLite so DO restarts don't trigger a re-list.
 
 `workspace.prefetch(root?)` eagerly hydrates lazy stubs under the given
@@ -213,7 +213,7 @@ provider-specific config:
 | `ignore` | `[]` | Path segments hidden from the pull *and* from `Workspace.fs`. Composed with the top-level `ignore` by union. See [02. Sync Protocol → Ignored entries](./02_sync_protocol.md#ignored-entries). |
 | `writeBack` | `"debounce"` | `"debounce"` (default) or `"manual"`. See “Write-back gating” above. |
 | `writeBackMs` | `500` | Debounce window in milliseconds. Ignored when `writeBack: "manual"`. |
-| `maxBytes` | unbounded | Hard cap on total bytes indexed from this mount. Exceeding throws at index time before any data lands in `cf_vfs_nodes`. |
+| `maxBytes` | unbounded | Hard cap on total bytes indexed from this mount. Exceeding throws at index time before any data lands in `vfs_nodes`. |
 | `maxEntries` | unbounded | Hard cap on entry count. Same enforcement timing as `maxBytes`. |
 
 The workspace-level `ignore` option (the renamed `pullIgnore`) applies

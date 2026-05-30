@@ -18,7 +18,7 @@ interface ResolvedSegment {
 // when there's no dirent. The caller decides whether that's an error.
 function lookupChild(db: Database, parentInode: number, name: string): ResolvedSegment | undefined {
   const row = db.one<{ child_inode: number }>(
-    "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+    "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
     parentInode,
     name,
   );
@@ -26,7 +26,7 @@ function lookupChild(db: Database, parentInode: number, name: string): ResolvedS
     return undefined;
   }
   const node = db.one<{ inode: number; type: "file" | "dir" }>(
-    "SELECT inode, type FROM cf_vfs_nodes WHERE inode = ?",
+    "SELECT inode, type FROM vfs_nodes WHERE inode = ?",
     row.child_inode,
   );
   if (node === undefined) {
@@ -46,7 +46,7 @@ function createDir(
   rev: number,
 ): number {
   db.run(
-    "INSERT INTO cf_vfs_nodes (type, mode, mtime, rev) VALUES ('dir', ?, ?, ?)",
+    "INSERT INTO vfs_nodes (type, mode, mtime, rev) VALUES ('dir', ?, ?, ?)",
     mode,
     mtime,
     rev,
@@ -56,7 +56,7 @@ function createDir(
     throw createWorkspaceError("EIO", "failed to allocate inode");
   }
   db.run(
-    "INSERT INTO cf_vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+    "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
     parentInode,
     name,
     inode,

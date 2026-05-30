@@ -23,7 +23,7 @@ export function stat(db: Database, path: string): WorkspaceStatResult {
   const isFile = node.type === "file";
   const size = isFile
     ? (db.scalar<number>(
-        "SELECT COALESCE(SUM(size), 0) FROM cf_vfs_chunks WHERE inode = ?",
+        "SELECT COALESCE(SUM(size), 0) FROM vfs_chunks WHERE inode = ?",
         node.inode,
       ) ?? 0)
     : 0;

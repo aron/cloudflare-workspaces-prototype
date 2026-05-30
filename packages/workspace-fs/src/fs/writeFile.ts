@@ -23,7 +23,7 @@ function resolveParent(db: Database, parts: string[], canonical: string): number
   for (let i = 0; i < parts.length - 1; i++) {
     const name = parts[i];
     const child = db.one<{ child_inode: number }>(
-      "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
       parentInode,
       name,
     );
@@ -31,7 +31,7 @@ function resolveParent(db: Database, parts: string[], canonical: string): number
       throw createWorkspaceError("ENOENT", `parent directory missing: ${canonical}`, canonical);
     }
     const next = db.one<{ inode: number; type: "file" | "dir" }>(
-      "SELECT inode, type FROM cf_vfs_nodes WHERE inode = ?",
+      "SELECT inode, type FROM vfs_nodes WHERE inode = ?",
       child.child_inode,
     );
     if (next === undefined) {
@@ -135,7 +135,7 @@ export async function writeFile(
     const parentInode = resolveParent(db, parts, canonical);
     const leafName = parts[parts.length - 1];
     const existing = db.one<{ child_inode: number }>(
-      "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
       parentInode,
       leafName,
     );
@@ -143,7 +143,7 @@ export async function writeFile(
     let inode: number;
     if (existing !== undefined) {
       const node = db.one<{ type: "file" | "dir" }>(
-        "SELECT type FROM cf_vfs_nodes WHERE inode = ?",
+        "SELECT type FROM vfs_nodes WHERE inode = ?",
         existing.child_inode,
       );
       if (node?.type === "dir") {
@@ -152,10 +152,10 @@ export async function writeFile(
       inode = existing.child_inode;
       // Replace the chunk list. Orphaned blobs (if any) are cleaned up
       // by a later gc() pass.
-      db.run("DELETE FROM cf_vfs_chunks WHERE inode = ?", inode);
+      db.run("DELETE FROM vfs_chunks WHERE inode = ?", inode);
     } else {
       db.run(
-        "INSERT INTO cf_vfs_nodes (type, mode, mtime, rev) VALUES ('file', ?, ?, 0)",
+        "INSERT INTO vfs_nodes (type, mode, mtime, rev) VALUES ('file', ?, ?, 0)",
         mode,
         mtime,
       );
@@ -165,7 +165,7 @@ export async function writeFile(
       }
       inode = allocated;
       db.run(
-        "INSERT INTO cf_vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+        "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
         parentInode,
         leafName,
         inode,
@@ -176,18 +176,18 @@ export async function writeFile(
     for (let idx = 0; idx < chunks.length; idx++) {
       const chunk = chunks[idx];
       db.run(
-        "INSERT INTO cf_vfs_blobs (hash, size, last_seen) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
+        "INSERT INTO vfs_blobs (hash, size, last_seen) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
         chunk.hash,
         chunk.size,
         mtime,
       );
       db.run(
-        "INSERT INTO cf_vfs_blob_bytes (hash, bytes) VALUES (?, ?) ON CONFLICT(hash) DO NOTHING",
+        "INSERT INTO vfs_blob_bytes (hash, bytes) VALUES (?, ?) ON CONFLICT(hash) DO NOTHING",
         chunk.hash,
         chunk.bytes,
       );
       db.run(
-        "INSERT INTO cf_vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
+        "INSERT INTO vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
         inode,
         idx,
         chunk.hash,
@@ -197,7 +197,7 @@ export async function writeFile(
 
     const rev = incrementRev(db);
     db.run(
-      "UPDATE cf_vfs_nodes SET mode = ?, mtime = ?, rev = ? WHERE inode = ?",
+      "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ? WHERE inode = ?",
       mode,
       mtime,
       rev,

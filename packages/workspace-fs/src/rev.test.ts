@@ -13,13 +13,13 @@ function freshDB() {
 }
 
 describe("incrementRev", () => {
-  it("returns the new rev value and persists it to cf_vfs_meta", () => {
+  it("returns the new rev value and persists it to vfs_meta", () => {
     const db = freshDB();
     // initializeSchema seeds rev = 1.
     const next = incrementRev(db);
     expect(next).toBe(2);
 
-    const stored = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = ?", "rev");
+    const stored = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = ?", "rev");
     expect(stored).toBe(2);
   });
 
@@ -33,7 +33,7 @@ describe("incrementRev", () => {
     });
     expect(a).toBe(2);
     expect(b).toBe(3);
-    const stored = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = ?", "rev");
+    const stored = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = ?", "rev");
     expect(stored).toBe(3);
   });
 
@@ -45,7 +45,7 @@ describe("incrementRev", () => {
         throw new Error("abort");
       });
     }).toThrow("abort");
-    const stored = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = ?", "rev");
+    const stored = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = ?", "rev");
     expect(stored).toBe(1);
   });
 });

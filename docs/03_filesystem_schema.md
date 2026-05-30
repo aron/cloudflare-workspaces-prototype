@@ -10,19 +10,19 @@
 
 The VFS lives in the Durable Object's SQLite. Every read and write
 ultimately hits one of these tables. All tables are prefixed with
-`cf_vfs_` (or `_cf_vfs_` for internal bookkeeping) so they don't
+`vfs_` (or `_vfs_` for internal bookkeeping) so they don't
 collide with application-owned tables in the same DO storage.
 
-Paths are resolved through an inode-style indirection (`cf_vfs_dirents`
-→ `cf_vfs_nodes`), so renames are O(1) regardless of subtree size and
+Paths are resolved through an inode-style indirection (`vfs_dirents`
+→ `vfs_nodes`), so renames are O(1) regardless of subtree size and
 hardlinks fall out for free.
 
 ## Tables
 
-### `cf_vfs_meta` — schema version and singletons
+### `vfs_meta` — schema version and singletons
 
 ```sql
-CREATE TABLE cf_vfs_meta (
+CREATE TABLE vfs_meta (
   k TEXT PRIMARY KEY,
   v INTEGER NOT NULL
 );
@@ -33,17 +33,17 @@ revision counter row `rev`. Open() refuses to run if the binary is
 older than the on-disk `schema_version`.
 
 `rev` is bumped atomically on every mutation; the new value is stamped
-into `cf_vfs_nodes.rev` (or `cf_vfs_changes.rev`) to drive incremental
+into `vfs_nodes.rev` (or `vfs_changes.rev`) to drive incremental
 sync. Mutations are serialized upstream by the Workspace FIFO (see
 [02. Sync Protocol](./02_sync_protocol.md#failure-handling)), so this
 single-row counter is never contended in practice — but it is
 deliberately single-writer, and adding concurrent mutators would
 require revisiting it.
 
-### `cf_vfs_nodes` — inode metadata
+### `vfs_nodes` — inode metadata
 
 ```sql
-CREATE TABLE cf_vfs_nodes (
+CREATE TABLE vfs_nodes (
   inode         INTEGER PRIMARY KEY AUTOINCREMENT,
   type          TEXT    NOT NULL CHECK(type IN ('file','dir')),
   mode          INTEGER NOT NULL DEFAULT 493,        -- 0o755
@@ -51,7 +51,7 @@ CREATE TABLE cf_vfs_nodes (
   rev           INTEGER NOT NULL DEFAULT 0,          -- last write's rev
   mount_root    TEXT,                                -- nullable; tags mount provenance
   stub_size     INTEGER,                             -- non-null while a lazy stub
-  manifest_hash BLOB                                 -- references cf_vfs_manifests.hash
+  manifest_hash BLOB                                 -- references vfs_manifests.hash
 );
 ```
 
@@ -65,38 +65,38 @@ There is no `ignored` column: ignored paths are entirely invisible to
 the DO-side filesystem API (see
 [02. Sync Protocol → Ignored entries](./02_sync_protocol.md#ignored-entries)).
 
-### `cf_vfs_dirents` — name → inode mapping
+### `vfs_dirents` — name → inode mapping
 
 ```sql
-CREATE TABLE cf_vfs_dirents (
+CREATE TABLE vfs_dirents (
   parent_inode INTEGER NOT NULL,
   name         TEXT    NOT NULL,
   child_inode  INTEGER NOT NULL,
   PRIMARY KEY (parent_inode, name)
 );
-CREATE INDEX cf_vfs_dirents_by_child ON cf_vfs_dirents(child_inode);
+CREATE INDEX vfs_dirents_by_child ON vfs_dirents(child_inode);
 ```
 
-Path resolution walks `cf_vfs_dirents` from the root inode (`inode = 1`,
+Path resolution walks `vfs_dirents` from the root inode (`inode = 1`,
 created on init). For typical agent trees (<10 deep) this is
 sub-millisecond. Rename is one `UPDATE`; hardlinks are two dirents
 pointing at the same inode.
 
-### `cf_vfs_blobs` — content-addressed chunk metadata
+### `vfs_blobs` — content-addressed chunk metadata
 
 ```sql
-CREATE TABLE cf_vfs_blobs (
+CREATE TABLE vfs_blobs (
   hash      BLOB    PRIMARY KEY,   -- 32 bytes, sha256(bytes)
   size      INTEGER NOT NULL,       -- length(bytes)
   last_seen INTEGER NOT NULL        -- ms since epoch; touched on every ref (GC clock)
 );
 ```
 
-### `cf_vfs_blob_bytes` — chunk bytes
+### `vfs_blob_bytes` — chunk bytes
 
 ```sql
-CREATE TABLE cf_vfs_blob_bytes (
-  hash  BLOB PRIMARY KEY REFERENCES cf_vfs_blobs(hash) ON DELETE CASCADE,
+CREATE TABLE vfs_blob_bytes (
+  hash  BLOB PRIMARY KEY REFERENCES vfs_blobs(hash) ON DELETE CASCADE,
   bytes BLOB NOT NULL
 );
 ```
@@ -109,27 +109,27 @@ on every reference; the byte pages stay cold.
 Every file chunk and every manifest is stored here, keyed by sha256.
 Identical bytes anywhere in the tree share one row.
 
-### `cf_vfs_chunks` — file content mapping
+### `vfs_chunks` — file content mapping
 
 ```sql
-CREATE TABLE cf_vfs_chunks (
+CREATE TABLE vfs_chunks (
   inode INTEGER NOT NULL,
   idx   INTEGER NOT NULL,           -- chunk index inside the file (0-based)
-  hash  BLOB    NOT NULL,           -- references cf_vfs_blobs.hash
+  hash  BLOB    NOT NULL,           -- references vfs_blobs.hash
   size  INTEGER NOT NULL,           -- denormalized for fast stat()/SUM()
   PRIMARY KEY (inode, idx)
 );
-CREATE INDEX cf_vfs_chunks_by_hash ON cf_vfs_chunks(hash);
+CREATE INDEX vfs_chunks_by_hash ON vfs_chunks(hash);
 ```
 
 Files are split into chunks of at most `CHUNK_SIZE` (512 KiB). Each
 chunk is one row pointing at the underlying blob. The by-hash index
 lets the manifest pull resolve "which inodes share this blob" quickly.
 
-### `cf_vfs_manifests` — chunk-list lookup
+### `vfs_manifests` — chunk-list lookup
 
 ```sql
-CREATE TABLE cf_vfs_manifests (
+CREATE TABLE vfs_manifests (
   hash    BLOB    PRIMARY KEY,    -- sha256(encoded)
   size    INTEGER NOT NULL,        -- total file size in bytes
   encoded BLOB    NOT NULL         -- 0x01 || repeated (32-byte hash || varint offset || varint size)
@@ -139,21 +139,21 @@ CREATE TABLE cf_vfs_manifests (
 A manifest is the ordered `(chunk hash, size)` list for one file. Files
 with identical content share a manifest hash (and thus avoid being
 re-uploaded over the sync wire). The `manifest_hash` column on
-`cf_vfs_nodes` points here.
+`vfs_nodes` points here.
 
-### `cf_vfs_changes` — tombstones
+### `vfs_changes` — tombstones
 
 ```sql
-CREATE TABLE cf_vfs_changes (
+CREATE TABLE vfs_changes (
   id   INTEGER PRIMARY KEY AUTOINCREMENT,
   rev  INTEGER NOT NULL,
   path TEXT    NOT NULL,
   op   TEXT    NOT NULL CHECK(op IN ('delete'))
 );
-CREATE INDEX cf_vfs_changes_by_rev ON cf_vfs_changes(rev);
+CREATE INDEX vfs_changes_by_rev ON vfs_changes(rev);
 ```
 
-Deletes leave no row in `cf_vfs_nodes`, so they're recorded here for
+Deletes leave no row in `vfs_nodes`, so they're recorded here for
 the incremental push to tell the container "this path is gone". A
 single mutation (e.g. `rm -r`) records one tombstone per removed
 path, all sharing the same `rev` — the bumped value at delete time.
@@ -163,10 +163,10 @@ transaction that advances `pushRev` (see
 [02. Sync Protocol](./02_sync_protocol.md#watermarks)). The container
 has acknowledged them; no future pull needs to replay them.
 
-### `_cf_vfs_watermark` — sync state
+### `_vfs_watermark` — sync state
 
 ```sql
-CREATE TABLE _cf_vfs_watermark (
+CREATE TABLE _vfs_watermark (
   k TEXT PRIMARY KEY,
   v INTEGER NOT NULL
 );
@@ -176,10 +176,10 @@ Stores `pushRev` and `fetchRev` (see
 [02. Sync Protocol](./02_sync_protocol.md#watermarks)). Survives DO
 restarts so reconnects resume cleanly.
 
-### `_cf_vfs_mounts` — mount index state
+### `_vfs_mounts` — mount index state
 
 ```sql
-CREATE TABLE _cf_vfs_mounts (
+CREATE TABLE _vfs_mounts (
   root    TEXT PRIMARY KEY,
   kind    TEXT NOT NULL,
   indexed INTEGER NOT NULL DEFAULT 0
@@ -188,33 +188,33 @@ CREATE TABLE _cf_vfs_mounts (
 
 Tracks which mounts have been indexed. Once a mount is indexed (its
 directory tree has been listed and stub rows inserted into
-`cf_vfs_nodes`), that fact is persisted so a DO reload doesn't
+`vfs_nodes`), that fact is persisted so a DO reload doesn't
 re-list.
 
 ## Invariants
 
 - The root directory is always `inode = 1`, type `dir`, with no
   parent dirent.
-- A `cf_vfs_nodes` row with `type = 'file'` has either:
-  - `stub_size NOT NULL` and no `cf_vfs_chunks` rows (lazy stub), **or**
-  - `manifest_hash NOT NULL`, a matching `cf_vfs_manifests` row, and
-    one `cf_vfs_chunks` row per chunk.
-- Every `cf_vfs_chunks.hash` references an existing `cf_vfs_blobs.hash`.
-- Every `cf_vfs_blobs.hash` has a matching `cf_vfs_blob_bytes` row.
-- Every `cf_vfs_manifests.hash` referenced by
-  `cf_vfs_nodes.manifest_hash` exists.
-- Every `cf_vfs_dirents.child_inode` references an existing
-  `cf_vfs_nodes.inode`.
-- The singleton `rev` in `cf_vfs_meta` is strictly greater than every
-  `cf_vfs_nodes.rev` and every `cf_vfs_changes.rev` between
+- A `vfs_nodes` row with `type = 'file'` has either:
+  - `stub_size NOT NULL` and no `vfs_chunks` rows (lazy stub), **or**
+  - `manifest_hash NOT NULL`, a matching `vfs_manifests` row, and
+    one `vfs_chunks` row per chunk.
+- Every `vfs_chunks.hash` references an existing `vfs_blobs.hash`.
+- Every `vfs_blobs.hash` has a matching `vfs_blob_bytes` row.
+- Every `vfs_manifests.hash` referenced by
+  `vfs_nodes.manifest_hash` exists.
+- Every `vfs_dirents.child_inode` references an existing
+  `vfs_nodes.inode`.
+- The singleton `rev` in `vfs_meta` is strictly greater than every
+  `vfs_nodes.rev` and every `vfs_changes.rev` between
   transactions.
 
 ## Garbage collection
 
-`Workspace.gc(safetyWindowMs?)` sweeps `cf_vfs_blobs` and
-`cf_vfs_manifests` for rows with no live references and a `last_seen`
+`Workspace.gc(safetyWindowMs?)` sweeps `vfs_blobs` and
+`vfs_manifests` for rows with no live references and a `last_seen`
 older than the safety window (default conservative). Cascaded
-`cf_vfs_blob_bytes` rows are deleted with their parent. It returns
+`vfs_blob_bytes` rows are deleted with their parent. It returns
 `{ manifestsFreed, blobsFreed }`.
 
 ## Future considerations
@@ -230,12 +230,12 @@ workspaces. If a single workspace needs to hold large datasets
 (parquet, sqlite databases, model weights, video), an optional R2
 binding could write blobs over a configurable threshold (default
 4 MiB) to R2 keyed by `hex(hash)`. Small/hot content stays in
-`cf_vfs_blob_bytes`.
+`vfs_blob_bytes`.
 
 Sketch:
 
 ```sql
-ALTER TABLE cf_vfs_blobs ADD COLUMN location TEXT NOT NULL DEFAULT 'sqlite';
+ALTER TABLE vfs_blobs ADD COLUMN location TEXT NOT NULL DEFAULT 'sqlite';
 -- 'sqlite' | 'r2'
 ```
 
@@ -290,7 +290,7 @@ different fixed chunk sizes today.
 
 ### Symlinks and xattrs
 
-The current `cf_vfs_nodes` `type` is restricted to `'file' | 'dir'`,
+The current `vfs_nodes` `type` is restricted to `'file' | 'dir'`,
 and there is no place to hang per-inode metadata beyond `mode` and
 `mtime`. Real tooling leans on both:
 
@@ -300,8 +300,8 @@ and there is no place to hang per-inode metadata beyond `mode` and
   language toolchains.
 
 A future iteration would add `'symlink'` to the `type` check and a
-`link_target TEXT` column on `cf_vfs_nodes`, plus a separate
-`cf_vfs_xattrs(inode, key, value)` table. Both are additive; neither
+`link_target TEXT` column on `vfs_nodes`, plus a separate
+`vfs_xattrs(inode, key, value)` table. Both are additive; neither
 is required for the initial agent workloads.
 
 ### Prior art and selective reuse
@@ -330,15 +330,15 @@ against. Mapping our tables onto AgentFS:
 
 | AgentFS | Ours | Notes |
 | --- | --- | --- |
-| `fs_inode` | `cf_vfs_nodes` | Same role. AgentFS carries `nlink`, `uid`/`gid`, `rdev`, separate `atime`/`mtime`/`ctime` with `_nsec` columns. We carry `mtime` only plus content-sync columns (`rev`, `mount_root`, `stub_size`, `manifest_hash`). |
-| `fs_dentry` | `cf_vfs_dirents` | Same role. AgentFS adds a surrogate `id INTEGER PRIMARY KEY AUTOINCREMENT`; we use the composite `(parent_inode, name)` directly. |
-| `fs_data` | `cf_vfs_chunks` + `cf_vfs_blobs` + `cf_vfs_blob_bytes` | **Fundamental divergence.** AgentFS stores chunks as `(ino, chunk_index)` rows with the bytes inline — no content addressing, no dedup. Our split into hash-keyed blob metadata, blob bytes, and an `inode`-keyed chunk map is what makes the sync protocol's incremental transfer work. |
+| `fs_inode` | `vfs_nodes` | Same role. AgentFS carries `nlink`, `uid`/`gid`, `rdev`, separate `atime`/`mtime`/`ctime` with `_nsec` columns. We carry `mtime` only plus content-sync columns (`rev`, `mount_root`, `stub_size`, `manifest_hash`). |
+| `fs_dentry` | `vfs_dirents` | Same role. AgentFS adds a surrogate `id INTEGER PRIMARY KEY AUTOINCREMENT`; we use the composite `(parent_inode, name)` directly. |
+| `fs_data` | `vfs_chunks` + `vfs_blobs` + `vfs_blob_bytes` | **Fundamental divergence.** AgentFS stores chunks as `(ino, chunk_index)` rows with the bytes inline — no content addressing, no dedup. Our split into hash-keyed blob metadata, blob bytes, and an `inode`-keyed chunk map is what makes the sync protocol's incremental transfer work. |
 | `fs_symlink` | (not yet implemented) | AgentFS has a clean answer; our Future-considerations item should adopt the same `(ino, target)` shape. |
-| `fs_config` | `cf_vfs_meta` | Same role. |
+| `fs_config` | `vfs_meta` | Same role. |
 | `fs_whiteout`, `fs_origin` | (no equivalent) | Overlay/COW semantics. Not needed today; potentially interesting if read-only mount overlays grow up. |
-| (no equivalent) | `cf_vfs_manifests` | Content-addressed per-file chunk list; required by our sync protocol. |
-| (no equivalent) | `cf_vfs_changes` | Tombstones for incremental push; required by our sync protocol. |
-| (no equivalent) | `_cf_vfs_watermark`, `_cf_vfs_mounts` | Sync and mount bookkeeping. |
+| (no equivalent) | `vfs_manifests` | Content-addressed per-file chunk list; required by our sync protocol. |
+| (no equivalent) | `vfs_changes` | Tombstones for incremental push; required by our sync protocol. |
+| (no equivalent) | `_vfs_watermark`, `_vfs_mounts` | Sync and mount bookkeeping. |
 
 **Why not adopt AgentFS as the schema.** The blocker is the data
 table. AgentFS keys chunks by `(ino, chunk_index)` with raw bytes
@@ -367,7 +367,7 @@ Two concrete borrows, no runtime dependency:
    `uid`/`gid`/`rdev`: align with their definitions even if we don't
    surface every field today.
 2. **Document the divergence and the integration path.** A
-   `cf_vfs_*` workspace lives happily alongside an AgentFS database
+   `vfs_*` workspace lives happily alongside an AgentFS database
    in the same DO storage (different prefixes), so an agent could
    use AgentFS for tool-call audit + KV state and our workspace for
    the synced FUSE-mounted file tree. Worth saying explicitly so

@@ -22,14 +22,14 @@ function readBack(db: Database, path: string): Uint8Array {
   if (node === null) throw new Error(`no such path: ${path}`);
   if (node.type !== "file") throw new Error(`not a file: ${path}`);
   const chunks = db.all<{ hash: Uint8Array; size: number }>(
-    "SELECT hash, size FROM cf_vfs_chunks WHERE inode = ? ORDER BY idx",
+    "SELECT hash, size FROM vfs_chunks WHERE inode = ? ORDER BY idx",
     node.inode,
   );
   const parts: Uint8Array[] = [];
   let total = 0;
   for (const chunk of chunks) {
     const row = db.one<{ bytes: Uint8Array }>(
-      "SELECT bytes FROM cf_vfs_blob_bytes WHERE hash = ?",
+      "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
       chunk.hash,
     );
     if (row === undefined) throw new Error("missing blob bytes");
@@ -46,7 +46,7 @@ function readBack(db: Database, path: string): Uint8Array {
 }
 
 function countBlobs(db: Database): number {
-  return db.scalar<number>("SELECT COUNT(*) FROM cf_vfs_blobs") ?? 0;
+  return db.scalar<number>("SELECT COUNT(*) FROM vfs_blobs") ?? 0;
 }
 
 function streamOf(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {
@@ -71,7 +71,7 @@ describe("writeFile", () => {
     expect(new TextDecoder().decode(bytes)).toBe("hello fuse");
 
     const chunkCount = db.scalar<number>(
-      "SELECT COUNT(*) FROM cf_vfs_chunks WHERE inode = (SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?)",
+      "SELECT COUNT(*) FROM vfs_chunks WHERE inode = (SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?)",
       ROOT_INODE,
       "hello.txt",
     );
@@ -103,7 +103,7 @@ describe("writeFile", () => {
     const node = resolveInode(db, "/empty");
     expect(node?.type).toBe("file");
     const chunks = db.scalar<number>(
-      "SELECT COUNT(*) FROM cf_vfs_chunks WHERE inode = ?",
+      "SELECT COUNT(*) FROM vfs_chunks WHERE inode = ?",
       node?.inode,
     );
     expect(chunks).toBe(0);
@@ -122,14 +122,14 @@ describe("writeFile", () => {
 
     const node = resolveInode(db, "/big");
     const chunkCount = db.scalar<number>(
-      "SELECT COUNT(*) FROM cf_vfs_chunks WHERE inode = ?",
+      "SELECT COUNT(*) FROM vfs_chunks WHERE inode = ?",
       node?.inode,
     );
     expect(chunkCount).toBe(2);
 
     const sizes = db
       .all<{ idx: number; size: number }>(
-        "SELECT idx, size FROM cf_vfs_chunks WHERE inode = ? ORDER BY idx",
+        "SELECT idx, size FROM vfs_chunks WHERE inode = ? ORDER BY idx",
         node?.inode,
       )
       .map((r) => r.size);
@@ -181,14 +181,14 @@ describe("writeFile", () => {
 
   it("honors mode and bumps rev on first write", async () => {
     const db = freshDB();
-    const beforeRev = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'");
+    const beforeRev = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'");
     await writeFile(db, "/run.sh", "#!/bin/sh\n", { mode: 0o755 }, () => 4242);
     const node = resolveInode(db, "/run.sh");
     expect(node?.mode).toBe(0o755);
     expect(node?.mtime).toBe(4242);
-    const afterRev = db.scalar<number>("SELECT v FROM cf_vfs_meta WHERE k = 'rev'");
+    const afterRev = db.scalar<number>("SELECT v FROM vfs_meta WHERE k = 'rev'");
     expect(afterRev).toBe((beforeRev ?? 0) + 1);
-    const nodeRev = db.scalar<number>("SELECT rev FROM cf_vfs_nodes WHERE inode = ?", node?.inode);
+    const nodeRev = db.scalar<number>("SELECT rev FROM vfs_nodes WHERE inode = ?", node?.inode);
     expect(nodeRev).toBe(afterRev);
   });
 
@@ -196,13 +196,13 @@ describe("writeFile", () => {
     const db = freshDB();
     await writeFile(db, "/x.txt", "v1", {}, () => 100);
     const v1 = resolveInode(db, "/x.txt");
-    const v1Rev = db.scalar<number>("SELECT rev FROM cf_vfs_nodes WHERE inode = ?", v1?.inode);
+    const v1Rev = db.scalar<number>("SELECT rev FROM vfs_nodes WHERE inode = ?", v1?.inode);
 
     await writeFile(db, "/x.txt", "v2", {}, () => 200);
     const v2 = resolveInode(db, "/x.txt");
     expect(v2?.inode).toBe(v1?.inode); // same inode reused
     expect(v2?.mtime).toBe(200);
-    const v2Rev = db.scalar<number>("SELECT rev FROM cf_vfs_nodes WHERE inode = ?", v2?.inode);
+    const v2Rev = db.scalar<number>("SELECT rev FROM vfs_nodes WHERE inode = ?", v2?.inode);
     expect((v2Rev ?? 0) > (v1Rev ?? 0)).toBe(true);
   });
 
