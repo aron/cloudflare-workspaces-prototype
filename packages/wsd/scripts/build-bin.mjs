@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(packageRoot, "../..");

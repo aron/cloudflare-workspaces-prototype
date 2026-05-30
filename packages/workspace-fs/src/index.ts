@@ -5,6 +5,8 @@ import type {
   WorkspaceFilesystemOptions,
 } from "./types.js";
 
+export type { WorkspaceErrorCode, WorkspaceFsError } from "./errors.js";
+export { createWorkspaceError } from "./errors.js";
 export type {
   DurableObjectStorageLike,
   SqlCursorLike,
@@ -16,8 +18,6 @@ export type {
   WorkspaceGrepMatch,
   WorkspaceStat,
 } from "./types.js";
-export type { WorkspaceErrorCode, WorkspaceFsError } from "./errors.js";
-export { createWorkspaceError } from "./errors.js";
 
 /**
  * Create a Workspace filesystem backed by Durable Object SQLite storage.

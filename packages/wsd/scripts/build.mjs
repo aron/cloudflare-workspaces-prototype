@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { chmod, copyFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tscBin = process.platform === "win32" ? "tsc.cmd" : "tsc";

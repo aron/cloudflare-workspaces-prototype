@@ -6,9 +6,9 @@ import { isAbsolute } from "node:path";
 import {
   createNodeVirtualFileSystem,
   detectFUSEBackend,
-  mountFuse,
   type FUSEBackend,
   type FuseMount,
+  mountFuse,
 } from "../fuse/index.js";
 
 const DEFAULT_PORT = 45678;

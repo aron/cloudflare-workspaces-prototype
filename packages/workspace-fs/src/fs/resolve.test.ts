@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ROOT_INODE, initializeSchema } from "../schema/index.js";
+import { initializeSchema, ROOT_INODE } from "../schema/index.js";
 import { Database } from "../storage.js";
 import { SqliteTestStorage } from "../testing.js";
 import { resolveInode } from "./resolve.js";
