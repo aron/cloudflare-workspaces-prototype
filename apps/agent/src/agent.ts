@@ -74,6 +74,7 @@ import { parseFetchCall, fetchAgainstWorker } from "./worker/fetch.js";
 import type { FetchToolResult, ParsedFetch } from "./worker/fetch.js";
 import { buildSystemPrompt, type Skill } from "./system-prompt.js";
 import { discoverSkills } from "./skills.js";
+import { trace, redactSecrets } from "./tracing.js";
 
 export { WorkerDeployer, parseFetchCall, fetchAgainstWorker };
 export type { DeployResult, FetchToolResult, ParsedFetch };
@@ -295,18 +296,27 @@ export class Agent extends Think<Env> {
    * actually finished.
    */
   private async _recoverInflightExecs(): Promise<void> {
-    const inflight = this._inflight();
-    const rows = inflight.list();
-    if (rows.length === 0) return;
-    for (const row of rows) {
-      try {
-        await this._recoverOneInflightExec(row.toolCallId, row.processId);
-      } catch (err) {
-        console.warn(`[Agent] recovery for ${row.toolCallId} failed:`, err);
-      } finally {
-        inflight.clear(row.toolCallId);
+    return trace("agent.recoverInflightExecs", { "hackspace.thread_id": this.name }, async (span) => {
+      const inflight = this._inflight();
+      const rows = inflight.list();
+      span.set("hackspace.inflight_rows", () => rows.length);
+      if (rows.length === 0) return;
+      let recovered = 0;
+      let failed = 0;
+      for (const row of rows) {
+        try {
+          await this._recoverOneInflightExec(row.toolCallId, row.processId);
+          recovered++;
+        } catch (err) {
+          failed++;
+          console.warn(`[Agent] recovery for ${row.toolCallId} failed:`, err);
+        } finally {
+          inflight.clear(row.toolCallId);
+        }
       }
-    }
+      span.set("hackspace.recovered", () => recovered);
+      span.set("hackspace.failed", () => failed);
+    });
   }
 
   private async _recoverOneInflightExec(toolCallId: string, processId: string): Promise<void> {
@@ -437,51 +447,58 @@ export class Agent extends Think<Env> {
    *     reasoning is round-tripped inline rather than referenced by id.
    */
   override async beforeTurn(ctx?: TurnContext) {
-    this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+    return trace("agent.beforeTurn", {
+      "hackspace.thread_id": this.name,
+      "hackspace.continuation": ctx?.continuation ?? false,
+    }, async (span) => {
+      span.set("hackspace.messages", () => this.messages.length);
+      this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
 
-    // Patch dangling tool calls before the model sees them. A tool
-    // result that never lands (exec timeout, container loss, DO eviction
-    // mid-call) leaves the part in `input-available` / `input-streaming`
-    // / `approval-requested`. convertToModelMessages then emits the
-    // assistant's tool call with no matching tool-result row, the
-    // provider rejects it, and the thread wedges. Rewrite those parts
-    // to `output-error: cancelled` so the SDK emits a proper result row,
-    // and persist the patch so reconnects and future turns see it too.
-    const swept = resolveOrphanToolCalls(this.messages);
-    if (swept.changed) {
-      console.warn(
-        `[Agent] patched ${swept.patched.length} orphan tool call(s):`,
-        swept.patched,
-      );
-      for (let i = 0; i < swept.messages.length; i++) {
-        const patched = swept.messages[i];
-        const original = this.messages[i];
-        if (patched !== original) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          await this.updateMessageInHistory(patched as any);
+      // Patch dangling tool calls before the model sees them. A tool
+      // result that never lands (exec timeout, container loss, DO eviction
+      // mid-call) leaves the part in `input-available` / `input-streaming`
+      // / `approval-requested`. convertToModelMessages then emits the
+      // assistant's tool call with no matching tool-result row, the
+      // provider rejects it, and the thread wedges. Rewrite those parts
+      // to `output-error: cancelled` so the SDK emits a proper result row,
+      // and persist the patch so reconnects and future turns see it too.
+      const swept = resolveOrphanToolCalls(this.messages);
+      span.set("hackspace.orphan_patches", () => swept.patched.length);
+      if (swept.changed) {
+        console.warn(
+          `[Agent] patched ${swept.patched.length} orphan tool call(s):`,
+          swept.patched,
+        );
+        for (let i = 0; i < swept.messages.length; i++) {
+          const patched = swept.messages[i];
+          const original = this.messages[i];
+          if (patched !== original) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await this.updateMessageInHistory(patched as any);
+          }
         }
       }
-    }
 
-    // Reset per-turn budget/loop state at the start of a fresh user
-    // turn. Continuation turns (auto-continue after tool result, or
-    // our injected reflection itself) keep the counters so the guard
-    // works across the whole logical turn.
-    if (!ctx?.continuation) this._loop.reset();
-    return {
-      // Hard ceiling well above the soft budget — the LoopTracker
-      // decides when to fire a reflection.
-      maxSteps: 60,
-      providerOptions: {
-        openai: {
-          reasoningEffort:
-            (this.env as any).OPENAI_REASONING_EFFORT ?? "medium",
-          reasoningSummary: "auto",
-          store: false,
-          include: ["reasoning.encrypted_content"]
+      // Reset per-turn budget/loop state at the start of a fresh user
+      // turn. Continuation turns (auto-continue after tool result, or
+      // our injected reflection itself) keep the counters so the guard
+      // works across the whole logical turn.
+      if (!ctx?.continuation) this._loop.reset();
+      return {
+        // Hard ceiling well above the soft budget — the LoopTracker
+        // decides when to fire a reflection.
+        maxSteps: 60,
+        providerOptions: {
+          openai: {
+            reasoningEffort:
+              (this.env as any).OPENAI_REASONING_EFFORT ?? "medium",
+            reasoningSummary: "auto",
+            store: false,
+            include: ["reasoning.encrypted_content"]
+          }
         }
-      }
-    };
+      };
+    });
   }
 
   /** Feed the LoopTracker after every model step. */
@@ -578,20 +595,41 @@ export class Agent extends Think<Env> {
    * block the summary kick or the reflection injector that the room
    * view depends on.
    */
-  override onChatResponse(result: ChatResponseResult): void {
-    this.ctx.waitUntil(this._stampToolDurations(result).catch(err => {
-      console.warn("[Agent] tool duration stamping failed:", err);
-    }));
-    this.ctx.waitUntil(this.kickSummary());
-    this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
-      console.warn("[Agent] reflection injection failed:", err);
-    }));
-    this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
-      log("warn", "agent mention notifications failed", { error: (err as Error).message });
-    }));
-    // Bump the activity tip so room sidebars light up an unread badge on
-    // any tab that isn't currently focused on this thread.
-    this.postActivity();
+  override onChatResponse(result: ChatResponseResult): void | Promise<void> {
+    // Span shape: one span per finished turn, covering the synchronous
+    // fanout that schedules the four background tasks. The tasks
+    // themselves keep running after the span closes (they're
+    // `waitUntil`-attached, not awaited here) — we accept that the
+    // span's duration only measures the dispatch, not the work, in
+    // exchange for keeping `onChatResponse` non-blocking. The
+    // individual background tasks (stamp / summary / reflection /
+    // notify) get their own spans further down so the work is still
+    // observable, just not nested under this one.
+    return trace("agent.onChatResponse", {
+      "hackspace.thread_id": this.name,
+      "hackspace.status": result.status,
+      "hackspace.continuation": result.continuation,
+    }, async (span) => {
+      const parts = (result.message?.parts ?? []) as Array<{ type?: string }>;
+      span.set("hackspace.parts", () => parts.length);
+      span.set("hackspace.tool_calls", () => parts.filter(p => typeof p?.type === "string" && p.type.startsWith("tool-")).length);
+      if (result.status === "error" && result.error) {
+        span.setError(new Error(result.error));
+      }
+      this.ctx.waitUntil(this._stampToolDurations(result).catch(err => {
+        console.warn("[Agent] tool duration stamping failed:", err);
+      }));
+      this.ctx.waitUntil(this.kickSummary());
+      this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
+        console.warn("[Agent] reflection injection failed:", err);
+      }));
+      this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
+        log("warn", "agent mention notifications failed", { error: (err as Error).message });
+      }));
+      // Bump the activity tip so room sidebars light up an unread badge on
+      // any tab that isn't currently focused on this thread.
+      this.postActivity();
+    });
   }
 
   /**
@@ -712,7 +750,27 @@ export class Agent extends Think<Env> {
   }
 
   async onRequest(request: Request): Promise<Response> {
+    // Wrap the whole dispatcher in one span; downstream workspace /
+    // file calls re-nest underneath. `route` is the path with secrets
+    // (e.g. preview-share tokens, future query-param API keys) stripped
+    // by `redactSecrets` — we want grouping by route, not high-
+    // cardinality URL strings, so query string is truncated by
+    // taking just the pathname.
     const url = new URL(request.url);
+    return trace("agent.onRequest", {
+      "hackspace.thread_id": this.name,
+      "hackspace.method": request.method,
+      "hackspace.path": redactSecrets(url.pathname).slice(0, 256),
+    }, async (span) => {
+      const res = await this._onRequestImpl(request, url);
+      span.set("hackspace.status", () => res.status);
+      return res;
+    });
+  }
+
+  /** Dispatcher body for `onRequest`. Extracted so the span wrapping in
+   *  the public method stays small; the body is unchanged. */
+  private async _onRequestImpl(request: Request, url: URL): Promise<Response> {
 
     if (request.method === "GET" && url.pathname.endsWith("/messages")) {
       return Response.json({
@@ -1235,10 +1293,16 @@ export class Agent extends Think<Env> {
    */
   @callable()
   async cancelToolCall(toolCallId: string): Promise<{ cancelled: boolean }> {
-    const ctrl = this._toolAborts.get(toolCallId);
-    if (!ctrl) return { cancelled: false };
-    ctrl.abort(new Error("tool call cancelled by user"));
-    return { cancelled: true };
+    return trace("agent.cancelToolCall", {
+      "hackspace.thread_id": this.name,
+      "hackspace.tool_call_id": toolCallId,
+    }, async (span) => {
+      const ctrl = this._toolAborts.get(toolCallId);
+      span.set("hackspace.had_controller", () => ctrl !== undefined);
+      if (!ctrl) return { cancelled: false };
+      ctrl.abort(new Error("tool call cancelled by user"));
+      return { cancelled: true };
+    });
   }
 
   // ── Sub-agent spawning ─────────────────────────────────────────────
@@ -1336,41 +1400,54 @@ export class Agent extends Think<Env> {
    * idle threads stop consuming model calls.
    */
   async runSummary(): Promise<void> {
-    const count = this.messages.length;
-    if (count === 0) return;
+    return trace("agent.runSummary", { "hackspace.thread_id": this.name }, async (span) => {
+      const count = this.messages.length;
+      span.set("hackspace.messages", () => count);
+      if (count === 0) return;
 
-    const cached = await this.ctx.storage.get<{ count: number; text: string }>(
-      Agent.SUMMARY_STORAGE_KEY,
-    );
-    if (cached && cached.count === count) return;
+      const cached = await this.ctx.storage.get<{ count: number; text: string }>(
+        Agent.SUMMARY_STORAGE_KEY,
+      );
+      if (cached && cached.count === count) {
+        span.set("hackspace.outcome", () => "cache-hit");
+        return;
+      }
 
-    const transcript = renderTranscriptForSummary(this.messages);
-    if (!transcript) {
-      await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, { count, text: "" });
-      return;
-    }
+      const transcript = renderTranscriptForSummary(this.messages);
+      if (!transcript) {
+        await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, { count, text: "" });
+        span.set("hackspace.outcome", () => "empty-transcript");
+        return;
+      }
+      span.set("hackspace.transcript_bytes", () => transcript.length);
 
-    try {
-      const kimi = createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
-      const { text } = await generateText({
-        model: kimi,
-        system:
-          "You summarise short chat threads for a sidebar preview. Reply with one " +
-          "or two plain sentences. The first sentence states the overall topic. " +
-          "Add a second sentence only if the current status (resolved, blocked, " +
-          "in progress, awaiting input) is worth surfacing. No greetings, no " +
-          "bullet points, no markdown.",
-        prompt: transcript,
-      });
-      await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, {
-        count,
-        text: text.trim(),
-      });
-    } catch {
-      // Swallow — the next message will trigger another attempt. We
-      // intentionally don't overwrite the cached summary on failure so
-      // a transient model error doesn't blank out a usable preview.
-    }
+      try {
+        const kimi = createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+        const { text } = await generateText({
+          model: kimi,
+          system:
+            "You summarise short chat threads for a sidebar preview. Reply with one " +
+            "or two plain sentences. The first sentence states the overall topic. " +
+            "Add a second sentence only if the current status (resolved, blocked, " +
+            "in progress, awaiting input) is worth surfacing. No greetings, no " +
+            "bullet points, no markdown.",
+          prompt: transcript,
+        });
+        await this.ctx.storage.put(Agent.SUMMARY_STORAGE_KEY, {
+          count,
+          text: text.trim(),
+        });
+        span.set("hackspace.summary_bytes", () => text.trim().length);
+        span.set("hackspace.outcome", () => "generated");
+      } catch (err) {
+        // Swallow — the next message will trigger another attempt. We
+        // intentionally don't overwrite the cached summary on failure so
+        // a transient model error doesn't blank out a usable preview.
+        // The span still records the error via setError so dashboards
+        // can count failed summary runs without parsing logs.
+        span.setError(err);
+      }
+    });
   }
 }
 /**
