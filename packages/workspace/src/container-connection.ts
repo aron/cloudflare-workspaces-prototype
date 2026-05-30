@@ -21,6 +21,7 @@ import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
 import { switchPort } from "@cloudflare/containers";
 import type { Sandbox } from "@cloudflare/sandbox";
 import type { ContainerRpc } from "./shared/index.js";
+import { trace } from "./tracing.js";
 
 /** Stub shape that exposes the container fetch surface we depend on. */
 export interface ContainerFetchStub {
@@ -236,28 +237,38 @@ export class ContainerConnection {
   };
 
   private async doConnect(): Promise<void> {
-    try {
-      const res = await this.upgradeWithRetry();
-      if (res.status !== 101) {
-        throw new Error(`WebSocket upgrade failed: ${res.status} ${res.statusText}`);
+    // Span boundary covers the entire upgrade including the 503-retry
+    // loop. `final_status` distinguishes a clean 101 from a 101 reached
+    // after retries from a non-101 surfaced as an error. `attempts > 1`
+    // is the signal we want to see in dashboards — it means the
+    // container was either starting or capacity-pressured and the fix
+    // from 41932a4 saved a turn.
+    return trace("container.upgrade", { "hackspace.port": this.port }, async (span) => {
+      try {
+        const { res, attempts } = await this.upgradeWithRetry();
+        span.set("hackspace.attempts", () => attempts);
+        span.set("hackspace.final_status", () => res.status);
+        if (res.status !== 101) {
+          throw new Error(`WebSocket upgrade failed: ${res.status} ${res.statusText}`);
+        }
+        const ws = (res as unknown as { webSocket?: WebSocket }).webSocket;
+        // Dispose the Response stub so workerd doesn't warn at hibernate time.
+        try { (res as unknown as Disposable)[Symbol.dispose]?.(); } catch { /* older runtimes */ }
+        if (!ws) throw new Error("No WebSocket in upgrade response");
+        ws.accept();
+
+        ws.addEventListener("close", this.onWsClose);
+        ws.addEventListener("error", this.onWsError);
+
+        this.ws = ws;
+        this.transport.activate(ws);
+        this.connected = true;
+      } catch (err) {
+        this.connected = false;
+        this.transport.abort(err);
+        throw err;
       }
-      const ws = (res as unknown as { webSocket?: WebSocket }).webSocket;
-      // Dispose the Response stub so workerd doesn't warn at hibernate time.
-      try { (res as unknown as Disposable)[Symbol.dispose]?.(); } catch { /* older runtimes */ }
-      if (!ws) throw new Error("No WebSocket in upgrade response");
-      ws.accept();
-
-      ws.addEventListener("close", this.onWsClose);
-      ws.addEventListener("error", this.onWsError);
-
-      this.ws = ws;
-      this.transport.activate(ws);
-      this.connected = true;
-    } catch (err) {
-      this.connected = false;
-      this.transport.abort(err);
-      throw err;
-    }
+    });
   }
 
   /**
@@ -270,7 +281,7 @@ export class ContainerConnection {
    * fetch rejection, or e.g. 500/520 — returns/throws on the first
    * attempt.
    */
-  private async upgradeWithRetry(): Promise<Response> {
+  private async upgradeWithRetry(): Promise<{ res: Response; attempts: number }> {
     const startedAt = this.now();
     let attempt = 0;
     // The Request is rebuilt per attempt: AbortSignals attached to a
@@ -281,10 +292,12 @@ export class ContainerConnection {
         headers: { Upgrade: "websocket", Connection: "upgrade" },
       });
       const res = await this.containerStub.fetch(switchPort(req, this.port));
-      if (res.status !== 503) return res;
+      // `attempts` is 1-indexed in the span attribute (so a clean
+      // first-attempt success reads as `attempts=1`, not `=0`).
+      if (res.status !== 503) return { res, attempts: attempt + 1 };
       const elapsed = this.now() - startedAt;
       const remaining = this.retryTimeoutMs - elapsed;
-      if (remaining <= MIN_REMAINING_FOR_RETRY_MS) return res;
+      if (remaining <= MIN_REMAINING_FOR_RETRY_MS) return { res, attempts: attempt + 1 };
       const delay = Math.min(BASE_UPGRADE_BACKOFF_MS * 2 ** attempt, MAX_UPGRADE_BACKOFF_MS);
       // Cap the sleep at the remaining budget so we don't oversleep into
       // a window where the caller has already given up. Subtract the
