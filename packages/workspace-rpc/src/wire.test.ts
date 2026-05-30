@@ -305,3 +305,32 @@ describe("onRpcEvent observability", () => {
     }
   });
 });
+
+describe("client lifecycle", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("close() is idempotent", async () => {
+    harness = await startHarness();
+    const client = createSyncClient({ url: harness.url });
+    await client.close();
+    // Second close() must not throw or hang.
+    await client.close();
+  });
+
+  it("a call after close() rejects rather than hanging", async () => {
+    harness = await startHarness();
+    const client = createSyncClient({ url: harness.url });
+    await client.close();
+    let caught: unknown;
+    try {
+      await client.hasObjects([]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+});
