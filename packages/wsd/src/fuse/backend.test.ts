@@ -32,33 +32,7 @@ test("detectFUSEBackend reports none on linux without /dev/fuse", async () => {
   );
 });
 
-test("detectFUSEBackend prefers FUSE-T over macFUSE on macOS", async () => {
-  assert.deepEqual(
-    await detectFUSEBackend({
-      access: accessFor([
-        "/Library/Filesystems/fuse-t.fs",
-        "/Library/Filesystems/macfuse.fs",
-        "/opt/homebrew/lib",
-      ]),
-      arch: "arm64",
-      platform: "darwin",
-    }),
-    { kind: "fuse-t", dylibDir: "/opt/homebrew/lib" },
-  );
-});
-
-test("detectFUSEBackend detects FUSE-T installed under /Library/Application Support", async () => {
-  assert.deepEqual(
-    await detectFUSEBackend({
-      access: accessFor(["/Library/Application Support/fuse-t/lib"]),
-      arch: "arm64",
-      platform: "darwin",
-    }),
-    { kind: "fuse-t", dylibDir: "/Library/Application Support/fuse-t/lib" },
-  );
-});
-
-test("detectFUSEBackend falls back to macFUSE on macOS", async () => {
+test("detectFUSEBackend detects macFUSE on macOS", async () => {
   assert.deepEqual(
     await detectFUSEBackend({
       access: accessFor(["/Library/Filesystems/macfuse.fs"]),
@@ -71,12 +45,7 @@ test("detectFUSEBackend falls back to macFUSE on macOS", async () => {
 test("detectFUSEBackend honors WSD_FUSE_BACKEND", async () => {
   assert.deepEqual(
     await detectFUSEBackend({
-      access: accessFor([
-        "/Library/Filesystems/fuse-t.fs",
-        "/Library/Filesystems/macfuse.fs",
-        "/usr/local/lib",
-      ]),
-      arch: "x64",
+      access: accessFor(["/Library/Filesystems/macfuse.fs"]),
       env: { WSD_FUSE_BACKEND: "macfuse" },
       platform: "darwin",
     }),
@@ -90,7 +59,7 @@ test("detectFUSEBackend reports a macOS skip reason when neither backend is inst
       access: accessFor([]),
       platform: "darwin",
     }),
-    { kind: "none", reason: "install FUSE-T (recommended) or macFUSE" },
+    { kind: "none", reason: "macFUSE is not installed" },
   );
 });
 

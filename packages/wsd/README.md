@@ -29,24 +29,19 @@ Current filesystem support:
 
 Linux hosts/containers need access to `/dev/fuse` and mount permissions.
 
-### macOS: FUSE-T recommended, macFUSE supported
+### macOS: macFUSE
 
-On macOS, `wsd` auto-detects FUSE backends and prefers FUSE-T when both FUSE-T and macFUSE are installed. FUSE-T is recommended because it does not require a kernel extension.
-
-Install FUSE-T with Homebrew:
-
-```sh
-brew install macos-fuse-t/homebrew-cask/fuse-t
-```
-
-Alternatively, install macFUSE. On Apple Silicon, macFUSE may require Reduced Security / kernel extension approval.
+Install macFUSE. On Apple Silicon, macFUSE may require Reduced
+Security / kernel extension approval. FUSE-T is intentionally
+unsupported — the libfuse2 surface our `fuse-native` dependency
+wraps does not work against the FUSE-T userland.
 
 You can override backend detection for debugging:
 
 ```sh
-WSD_FUSE_BACKEND=auto    # default: prefer FUSE-T, then macFUSE
-WSD_FUSE_BACKEND=fuse-t  # require FUSE-T
+WSD_FUSE_BACKEND=auto    # default: detect macFUSE on macOS, /dev/fuse on linux
 WSD_FUSE_BACKEND=macfuse # require macFUSE
+WSD_FUSE_BACKEND=linux   # require /dev/fuse
 ```
 
 If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain directory.

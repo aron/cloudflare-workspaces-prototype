@@ -452,7 +452,6 @@ export async function mountFuse(options: {
   mountPoint: string;
   vfs: NodeVirtualFileSystem;
 }): Promise<FuseMount> {
-  configureFUSEDylibPath(options.backend);
   // fuse-native is CJS; require() it directly. We used to dynamic-import
   // for ESM compat, but pkg's snapshot loader has no V8
   // HostImportModuleDynamically callback wired up, so any import() inside
@@ -505,23 +504,6 @@ export async function mountFuse(options: {
       });
     },
   };
-}
-
-function configureFUSEDylibPath(backend: FUSEBackend | undefined): void {
-  if (backend?.kind !== "fuse-t") {
-    return;
-  }
-
-  process.env.DYLD_FALLBACK_LIBRARY_PATH = prependPath(
-    process.env.DYLD_FALLBACK_LIBRARY_PATH,
-    backend.dylibDir,
-  );
-  process.env.DYLD_LIBRARY_PATH = prependPath(process.env.DYLD_LIBRARY_PATH, backend.dylibDir);
-}
-
-function prependPath(value: string | undefined, entry: string): string {
-  const entries = value?.split(":").filter(Boolean) ?? [];
-  return entries.includes(entry) ? entries.join(":") : [entry, ...entries].join(":");
 }
 
 const warnedOperations = new Set<string>();
