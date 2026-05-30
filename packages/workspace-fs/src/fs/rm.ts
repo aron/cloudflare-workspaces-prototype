@@ -13,7 +13,7 @@ export interface RmOptions {
 interface DirChild {
   name: string;
   child_inode: number;
-  type: "file" | "dir";
+  type: "file" | "dir" | "symlink";
 }
 
 // Walk a directory subtree post-order so we delete leaves before
@@ -24,9 +24,9 @@ function* walkPostOrder(
   db: Database,
   rootInode: number,
   rootPath: string,
-): Generator<{ path: string; inode: number; type: "file" | "dir" }> {
+): Generator<{ path: string; inode: number; type: "file" | "dir" | "symlink" }> {
   // Stack-based DFS to avoid recursion limits on deep trees.
-  type Frame = { inode: number; path: string; type: "file" | "dir"; expanded: boolean };
+  type Frame = { inode: number; path: string; type: "file" | "dir" | "symlink"; expanded: boolean };
   const stack: Frame[] = [{ inode: rootInode, path: rootPath, type: "dir", expanded: false }];
 
   while (stack.length > 0) {
@@ -104,7 +104,7 @@ export function rm(db: Database, path: string, options: RmOptions): void {
   });
 }
 
-function removeInode(db: Database, inode: number, type: "file" | "dir"): void {
+function removeInode(db: Database, inode: number, type: "file" | "dir" | "symlink"): void {
   // Drop the dirent referencing this inode. There should be exactly one
   // (no hardlinks yet); if zero, we're deleting the root which we've
   // already refused.

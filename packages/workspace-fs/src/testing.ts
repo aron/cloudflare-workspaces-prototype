@@ -113,9 +113,7 @@ export class SQLiteTestStorage implements DurableObjectStorageLike {
   }
 
   close(): void {
-    for (const stmt of this.cache.values()) {
-      stmt.finalize?.();
-    }
+    // StatementSync instances are released when the database closes.
     this.cache.clear();
     this.db.close();
   }

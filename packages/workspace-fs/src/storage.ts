@@ -34,7 +34,7 @@ export class Database {
 
   all<Row extends object>(query: string, ...bindings: unknown[]): Row[] {
     const rows = this.sql.exec<Row>(query, ...bindings).toArray();
-    return rows.map(normalizeRow) as Row[];
+    return rows.map((row) => normalizeRow(row as Record<string, unknown>)) as Row[];
   }
 
   one<Row extends object>(query: string, ...bindings: unknown[]): Row | undefined {

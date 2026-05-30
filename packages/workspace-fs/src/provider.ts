@@ -772,10 +772,7 @@ function spliceBytes(
   const newLength = Math.max(dst.byteLength, at + length);
   const out = new Uint8Array(newLength);
   out.set(dst, 0);
-  const srcView =
-    src instanceof Uint8Array
-      ? src.subarray(srcOffset, srcOffset + length)
-      : new Uint8Array(src.buffer, src.byteOffset + srcOffset, length);
+  const srcView = src.subarray(srcOffset, srcOffset + length);
   out.set(srcView, at);
   return out;
 }

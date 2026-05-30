@@ -31,3 +31,9 @@ export function createWorkspaceFilesystem(
 ): WorkspaceFilesystem {
   return new SQLiteWorkspaceFilesystem(storage, options);
 }
+
+export type { SQLiteWorkspaceProviderOptions } from "./provider.js";
+export { SQLiteWorkspaceProvider } from "./provider.js";
+export { initializeSchema, ROOT_INODE, SCHEMA_VERSION } from "./schema/index.js";
+export { Database } from "./storage.js";
+export { RecordingStorage, SQLiteTestStorage } from "./testing.js";
