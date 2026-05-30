@@ -56,13 +56,15 @@ export class Database {
 // whereas node:sqlite returns Uint8Array. Normalise to Uint8Array so
 // the rest of the code only has to handle one shape.
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  let out: Record<string, unknown> | undefined;
+  // node:sqlite hands back rows with a null prototype; the DO SQL
+  // flavour returns ArrayBuffer for BLOB columns. Re-key into a plain
+  // {} so consumers get Object.prototype-shaped rows (capnweb's
+  // serializer keys off Object.prototype to detect "object") and
+  // convert any ArrayBuffer to Uint8Array in the same pass.
+  const out: Record<string, unknown> = {};
   for (const key of Object.keys(row)) {
     const value = row[key];
-    if (value instanceof ArrayBuffer) {
-      if (out === undefined) out = { ...row };
-      out[key] = new Uint8Array(value);
-    }
+    out[key] = value instanceof ArrayBuffer ? new Uint8Array(value) : value;
   }
-  return out ?? row;
+  return out;
 }
