@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./tracing": {
+      "types": "./src/tracing.ts",
+      "import": "./src/tracing.ts"
     }
   },
   "scripts": {
