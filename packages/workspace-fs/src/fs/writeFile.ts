@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createWorkspaceError } from "../errors.js";
 import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
@@ -80,16 +81,14 @@ async function materialize(content: WriteFileContent): Promise<Uint8Array> {
   return out;
 }
 
-async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  // crypto.subtle is available in both Workers and Node 22. We pass a
-  // copy of the .buffer slice in case `bytes` is a view over a larger
-  // ArrayBuffer (TextEncoder output sometimes is).
-  const slice =
-    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-      ? bytes.buffer
-      : bytes.slice().buffer;
-  const digest = await crypto.subtle.digest("SHA-256", slice);
-  return new Uint8Array(digest);
+// sha256 with a synchronous code path so writeFile can be called both
+// from async drivers (the FS API) and from sync drivers (the
+// VirtualProvider). node:crypto is available natively on Node and
+// polyfilled by workerd.
+function sha256(bytes: Uint8Array): Uint8Array {
+  const hash = createHash("sha256");
+  hash.update(bytes);
+  return new Uint8Array(hash.digest());
 }
 
 interface PreparedChunk {
@@ -98,14 +97,14 @@ interface PreparedChunk {
   size: number;
 }
 
-async function chunkAndHash(bytes: Uint8Array): Promise<PreparedChunk[]> {
+export function chunksOf(bytes: Uint8Array): PreparedChunk[] {
   const chunks: PreparedChunk[] = [];
   for (let offset = 0; offset < bytes.byteLength; offset += CHUNK_SIZE) {
     const end = Math.min(offset + CHUNK_SIZE, bytes.byteLength);
     // subarray (not slice) avoids an extra copy; sha256() takes its own
     // copy when needed.
     const slice = bytes.subarray(offset, end);
-    const hash = await sha256(slice);
+    const hash = sha256(slice);
     chunks.push({ hash, bytes: slice, size: slice.byteLength });
   }
   return chunks;
@@ -128,7 +127,7 @@ export async function writeFile(
   // can be slow for large inputs, and transactionSync wants a
   // synchronous closure.
   const bytes = await materialize(content);
-  const chunks = await chunkAndHash(bytes);
+  const chunks = chunksOf(bytes);
   const mtime = now();
 
   db.transactionSync(() => {
