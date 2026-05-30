@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const {
   NotImplementedError,
   createNodeVirtualFileSystem,
-  makeFuseOps,
+  makeFUSEOps,
 } = require("../../dist/fuse/index.js");
 
 const callback = (fn: (cb: (errno: number, result: unknown) => void) => void) =>
@@ -52,7 +52,7 @@ const fuseNativeOperationNames = [
 const notImplementedOperationNames = ["error", "utimens", "readlink", "mknod", "link", "symlink"];
 
 test("FUSE ops expose the complete fuse-native operation surface", () => {
-  const ops = makeFuseOps(createNodeVirtualFileSystem());
+  const ops = makeFUSEOps(createNodeVirtualFileSystem());
 
   for (const name of fuseNativeOperationNames) {
     assert.equal(typeof ops[name], "function", `${name} should be defined`);
@@ -60,7 +60,7 @@ test("FUSE ops expose the complete fuse-native operation surface", () => {
 });
 
 test("not-yet-implemented FUSE ops raise NotImplementedError", () => {
-  const ops = makeFuseOps(createNodeVirtualFileSystem());
+  const ops = makeFUSEOps(createNodeVirtualFileSystem());
 
   for (const name of notImplementedOperationNames) {
     assert.throws(
@@ -73,7 +73,7 @@ test("not-yet-implemented FUSE ops raise NotImplementedError", () => {
 
 test("implemented FUSE ops all have explicit current expectations", async () => {
   const vfs = createNodeVirtualFileSystem();
-  const ops = makeFuseOps(vfs);
+  const ops = makeFUSEOps(vfs);
 
   assert.equal(await status((cb) => ops.init(cb)), 0);
 
@@ -150,7 +150,7 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
 });
 
 test("FUSE ops return errno values instead of throwing for expected filesystem errors", async () => {
-  const ops = makeFuseOps(createNodeVirtualFileSystem());
+  const ops = makeFUSEOps(createNodeVirtualFileSystem());
 
   const missing = await callback((cb) => ops.getattr("/missing", cb));
   assert.equal(missing.errno, -2);

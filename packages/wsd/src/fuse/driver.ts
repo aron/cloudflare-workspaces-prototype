@@ -74,7 +74,7 @@ export interface FuseMount {
   unmount(): Promise<void>;
 }
 
-export function makeFuseOps(vfs: NodeVirtualFileSystem): FuseOps {
+export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
   const handles = new Map<number, string>();
   let nextHandle = 1;
 
@@ -315,7 +315,7 @@ export function makeFuseOps(vfs: NodeVirtualFileSystem): FuseOps {
 export async function mountFuse(options: { mountPoint: string; vfs: NodeVirtualFileSystem }): Promise<FuseMount> {
   const module = await import("fuse-native");
   const Fuse = module.default ?? module;
-  const fuse = new Fuse(options.mountPoint, makeFuseOps(options.vfs), {
+  const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
     debug: false,
   });

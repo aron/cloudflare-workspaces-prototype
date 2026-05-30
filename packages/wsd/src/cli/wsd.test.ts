@@ -66,7 +66,7 @@ async function startWsd(t, { port, mountPoint }: { port: number; mountPoint: str
     await fs.rm(mountPoint, { recursive: true, force: true });
   });
 
-  await waitForHttpOk(`http://127.0.0.1:${port}/health`, child, () => stderr || stdout);
+  await waitForHTTPOK(`http://127.0.0.1:${port}/health`, child, () => stderr || stdout);
   return child;
 }
 
@@ -127,7 +127,7 @@ async function waitForExit(child, timeoutMs = 2_000) {
   });
 }
 
-async function waitForHttpOk(url, child, output, timeoutMs = 5_000) {
+async function waitForHTTPOK(url, child, output, timeoutMs = 5_000) {
   const started = Date.now();
 
   while (Date.now() - started < timeoutMs) {

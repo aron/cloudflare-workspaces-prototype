@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isAbsolute } from "node:path";
 import { createNodeVirtualFileSystem, mountFuse, type FuseMount } from "../fuse/index.js";
 
-const DEFAULT_PORT = 4567;
+const DEFAULT_PORT = 45678;
 const DEFAULT_MOUNT_POINT = "/workspace";
 const HOST = "0.0.0.0";
 
@@ -49,7 +49,7 @@ function requestPath(request: IncomingMessage): string {
   return url.pathname;
 }
 
-function createHttpServer(): Server {
+function createHTTPServer(): Server {
   return createServer((request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
       send(response, 405, "method not allowed\n", {
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
 
   await mkdir(mountPoint, { recursive: true });
   const fuse = await mountFuse({ mountPoint, vfs });
-  const server = createHttpServer();
+  const server = createHTTPServer();
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
