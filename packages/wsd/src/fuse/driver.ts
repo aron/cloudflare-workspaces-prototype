@@ -100,6 +100,24 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     meta.set(path, { ...meta.get(path), ...patch });
   };
 
+  // Buffer-backed file content store. Sidesteps platformatic VFS's
+  // whole-file readFileSync/writeFileSync cycle, which is O(N²) for
+  // sequential writes. We keep an in-memory Buffer per regular file with
+  // amortized doubling on growth.
+  interface FileEntry {
+    buf: Buffer;     // capacity buffer (may be larger than size)
+    size: number;    // logical end-of-file
+  }
+  const files = new Map<string, FileEntry>();
+  const ensureCapacity = (entry: FileEntry, needed: number): void => {
+    if (needed <= entry.buf.length) return;
+    let cap = Math.max(entry.buf.length * 2, 64 * 1024);
+    while (cap < needed) cap *= 2;
+    const next = Buffer.alloc(cap);
+    entry.buf.copy(next, 0, 0, entry.size);
+    entry.buf = next;
+  };
+
   return {
     init(cb) {
       cb?.(0);
@@ -118,10 +136,12 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     getattr(path, cb) {
       try {
         const stat = statNode(vfs.lstatSync(path));
+        // File content lives outside the VFS, so prefer our size.
+        const entry = files.get(path);
+        if (entry !== undefined) stat.size = entry.size;
         const override = meta.get(path);
         if (override) {
           if (override.mode !== undefined) {
-            // Preserve file-type bits (S_IFMT) from the VFS, override perm bits.
             stat.mode = (stat.mode & 0o170000) | (override.mode & 0o7777);
           }
           if (override.uid !== undefined) stat.uid = override.uid;
@@ -173,8 +193,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
           cb(ERRNO.EEXIST, 0);
           return;
         }
-
+        // Register the inode in the VFS so dir listings / stat see it,
+        // but keep actual content in our buffer store.
         vfs.writeFileSync(path, Buffer.alloc(0), { mode });
+        files.set(path, { buf: Buffer.alloc(0), size: 0 });
         cb(0, openHandle(path));
       } catch (error) {
         cb(toErrno(error), 0);
@@ -182,28 +204,43 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     read(path, _fh, buffer, length, position, cb) {
-      try {
-        const data = vfs.readFileSync(path);
-        const chunk = data.subarray(position, Math.min(position + length, data.length));
-        chunk.copy(buffer);
-        cb(chunk.length);
-      } catch (error) {
-        cb(toErrno(error));
+      let entry = files.get(path);
+      if (entry === undefined) {
+        // File was created out-of-band (e.g. before this driver started
+        // tracking it). Lazy-hydrate from the VFS.
+        try {
+          const data = vfs.readFileSync(path);
+          entry = { buf: data, size: data.length };
+          files.set(path, entry);
+        } catch (error) {
+          cb(toErrno(error));
+          return;
+        }
       }
+      if (position >= entry.size) {
+        cb(0);
+        return;
+      }
+      const end = Math.min(position + length, entry.size);
+      entry.buf.copy(buffer, 0, position, end);
+      cb(end - position);
     },
 
     write(path, _fh, buffer, length, position, cb) {
-      try {
-        const existing = vfs.existsSync(path) ? vfs.readFileSync(path) : Buffer.alloc(0);
-        const needed = position + length;
-        const next = Buffer.alloc(Math.max(existing.length, needed));
-        existing.copy(next);
-        buffer.copy(next, position, 0, length);
-        vfs.writeFileSync(path, next);
-        cb(length);
-      } catch (error) {
-        cb(toErrno(error));
+      let entry = files.get(path);
+      if (entry === undefined) {
+        if (!vfs.existsSync(path)) {
+          cb(ERRNO.ENOENT);
+          return;
+        }
+        entry = { buf: Buffer.alloc(0), size: 0 };
+        files.set(path, entry);
       }
+      const end = position + length;
+      ensureCapacity(entry, end);
+      buffer.copy(entry.buf, position, 0, length);
+      if (end > entry.size) entry.size = end;
+      cb(length);
     },
 
     release(_path, fh, cb) {
@@ -221,27 +258,32 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     truncate(path, size, cb) {
-      try {
-        truncate(vfs, path, size);
-        cb(0);
-      } catch (error) {
-        cb(toErrno(error));
+      if (!vfs.existsSync(path)) {
+        cb(ERRNO.ENOENT);
+        return;
       }
+      let entry = files.get(path);
+      if (entry === undefined) {
+        entry = { buf: Buffer.alloc(0), size: 0 };
+        files.set(path, entry);
+      }
+      if (size > entry.size) {
+        ensureCapacity(entry, size);
+        entry.buf.fill(0, entry.size, size);
+      }
+      entry.size = size;
+      cb(0);
     },
 
     ftruncate(path, _fh, size, cb) {
-      try {
-        truncate(vfs, path, size);
-        cb(0);
-      } catch (error) {
-        cb(toErrno(error));
-      }
+      this.truncate(path, size, cb);
     },
 
     unlink(path, cb) {
       try {
         vfs.unlinkSync(path);
         meta.delete(path);
+        files.delete(path);
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -273,6 +315,11 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
         if (m !== undefined) {
           meta.delete(source);
           meta.set(destination, m);
+        }
+        const entry = files.get(source);
+        if (entry !== undefined) {
+          files.delete(source);
+          files.set(destination, entry);
         }
         cb(0);
       } catch (error) {
@@ -448,17 +495,6 @@ function configureFUSEDylibPath(backend: FUSEBackend | undefined): void {
 function prependPath(value: string | undefined, entry: string): string {
   const entries = value?.split(":").filter(Boolean) ?? [];
   return entries.includes(entry) ? entries.join(":") : [entry, ...entries].join(":");
-}
-
-function truncate(vfs: NodeVirtualFileSystem, path: string, size: number): void {
-  const existing = vfs.readFileSync(path);
-  if (existing.length === size) {
-    return;
-  }
-
-  const next = Buffer.alloc(size);
-  existing.copy(next, 0, 0, Math.min(existing.length, size));
-  vfs.writeFileSync(path, next);
 }
 
 const warnedOperations = new Set<string>();

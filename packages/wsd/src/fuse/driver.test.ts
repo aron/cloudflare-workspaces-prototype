@@ -107,13 +107,19 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
   assert.equal(await status((cb) => ops.utimens("/missing", Date.now(), Date.now(), cb)), -2);
 
   assert.equal(await status((cb) => ops.rename("/dir/file.txt", "/dir/renamed.txt", cb)), 0);
-  assert.equal(vfs.readFileSync("/dir/renamed.txt").toString(), "hello fuse");
+  const renamedBuf = Buffer.alloc(64);
+  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, renamedBuf, renamedBuf.length, 0, cb)), bytes.length);
+  assert.equal(renamedBuf.subarray(0, bytes.length).toString(), "hello fuse");
 
   assert.equal(await status((cb) => ops.truncate("/dir/renamed.txt", 5, cb)), 0);
-  assert.equal(vfs.readFileSync("/dir/renamed.txt").toString(), "hello");
+  const truncBuf = Buffer.alloc(64);
+  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, truncBuf, truncBuf.length, 0, cb)), 5);
+  assert.equal(truncBuf.subarray(0, 5).toString(), "hello");
 
   assert.equal(await status((cb) => ops.ftruncate("/dir/renamed.txt", create.result as number, 2, cb)), 0);
-  assert.equal(vfs.readFileSync("/dir/renamed.txt").toString(), "he");
+  const ftruncBuf = Buffer.alloc(64);
+  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, ftruncBuf, ftruncBuf.length, 0, cb)), 2);
+  assert.equal(ftruncBuf.subarray(0, 2).toString(), "he");
 
   assert.equal(await status((cb) => ops.release("/dir/renamed.txt", create.result as number, cb)), 0);
   assert.equal(await status((cb) => ops.release("/dir/renamed.txt", open.result as number, cb)), 0);
