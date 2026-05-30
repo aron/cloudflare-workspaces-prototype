@@ -11,13 +11,14 @@ export const CORE_STATEMENTS = [
   )`,
   `CREATE TABLE IF NOT EXISTS vfs_nodes (
     inode         INTEGER PRIMARY KEY AUTOINCREMENT,
-    type          TEXT    NOT NULL CHECK(type IN ('file','dir')),
+    type          TEXT    NOT NULL CHECK(type IN ('file','dir','symlink')),
     mode          INTEGER NOT NULL DEFAULT 493,
     mtime         INTEGER NOT NULL,
     rev           INTEGER NOT NULL DEFAULT 0,
     mount_root    TEXT,
     stub_size     INTEGER,
-    manifest_hash BLOB
+    manifest_hash BLOB,
+    link_target   TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS vfs_dirents (
     parent_inode INTEGER NOT NULL,

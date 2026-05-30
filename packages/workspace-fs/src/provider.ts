@@ -11,9 +11,11 @@ import { createWorkspaceError } from "./errors.js";
 import type { MkdirOptions } from "./fs/mkdir.js";
 import { mkdir as mkdirImpl } from "./fs/mkdir.js";
 import { readdir as readdirImpl } from "./fs/readdir.js";
+import { readlink as readlinkImpl } from "./fs/readlink.js";
 import { resolveInode } from "./fs/resolve.js";
 import { rm as rmImpl } from "./fs/rm.js";
 import { stat as statImpl } from "./fs/stat.js";
+import { symlink as symlinkImpl } from "./fs/symlink.js";
 import { writeFileSync as writeFileSyncImpl } from "./fs/writeFile.js";
 import { canonicalizePath } from "./path.js";
 import type { Database } from "./storage.js";
@@ -81,7 +83,7 @@ export class SQLiteWorkspaceProvider {
 
   // Capability flags consulted by @platformatic/vfs callers.
   readonly readonly = false;
-  readonly supportsSymlinks = false;
+  readonly supportsSymlinks = true;
   readonly supportsWatch = false;
 
   // Fd table. Start at 3 — 0/1/2 are reserved by convention even
@@ -157,10 +159,29 @@ export class SQLiteWorkspaceProvider {
     return Promise.resolve(this.lstatSync(path, options));
   }
 
-  lstatSync(path: string, options?: { bigint?: boolean }): VirtualStatsLike {
-    // No symlinks yet, so lstat == stat. When symlinks land this method
-    // will diverge to inspect the inode type directly without following.
-    return this.statSync(path, options);
+  lstatSync(path: string, _options?: { bigint?: boolean }): VirtualStatsLike {
+    const node = resolveInode(this.db, path, { followSymlinks: false });
+    if (node === null) {
+      throw createWorkspaceError("ENOENT", `no such path: ${path}`, path);
+    }
+    const isSymlink = node.type === "symlink";
+    const size = isSymlink
+      ? (node.linkTarget ?? "").length
+      : node.type === "file"
+        ? (this.db.scalar<number>(
+            "SELECT COALESCE(SUM(size), 0) FROM vfs_chunks WHERE inode = ?",
+            node.inode,
+          ) ?? 0)
+        : 0;
+    return wrapStats({
+      mode: node.mode,
+      size,
+      mtimeMs: node.mtime,
+      ino: node.inode,
+      isFile: node.type === "file",
+      isDirectory: node.type === "dir",
+      isSymbolicLink: isSymlink,
+    });
   }
 
   readdir(
@@ -473,22 +494,23 @@ export class SQLiteWorkspaceProvider {
     return state;
   }
 
-  // -- Symlinks (stubbed) --------------------------------------------
+  // -- Symlinks ------------------------------------------------------
 
-  readlink(_path: string, _options?: { encoding?: BufferEncoding }): Promise<string> {
-    return Promise.reject(notImplemented("readlink"));
+  readlink(path: string, _options?: { encoding?: BufferEncoding }): Promise<string> {
+    return Promise.resolve(this.readlinkSync(path));
   }
 
-  readlinkSync(_path: string, _options?: { encoding?: BufferEncoding }): string {
-    throw notImplemented("readlinkSync");
+  readlinkSync(path: string, _options?: { encoding?: BufferEncoding }): string {
+    return readlinkImpl(this.db, path);
   }
 
-  symlink(_target: string, _path: string, _type?: string): Promise<void> {
-    return Promise.reject(notImplemented("symlink"));
+  symlink(target: string, path: string, _type?: string): Promise<void> {
+    this.symlinkSync(target, path);
+    return Promise.resolve();
   }
 
-  symlinkSync(_target: string, _path: string, _type?: string): void {
-    throw notImplemented("symlinkSync");
+  symlinkSync(target: string, path: string, _type?: string): void {
+    symlinkImpl(this.db, target, path, this.now);
   }
 
   // -- Watch (stubbed) -----------------------------------------------

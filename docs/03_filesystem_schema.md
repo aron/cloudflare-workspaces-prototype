@@ -45,13 +45,14 @@ require revisiting it.
 ```sql
 CREATE TABLE vfs_nodes (
   inode         INTEGER PRIMARY KEY AUTOINCREMENT,
-  type          TEXT    NOT NULL CHECK(type IN ('file','dir')),
+  type          TEXT    NOT NULL CHECK(type IN ('file','dir','symlink')),
   mode          INTEGER NOT NULL DEFAULT 493,        -- 0o755
   mtime         INTEGER NOT NULL,                    -- ms since epoch
   rev           INTEGER NOT NULL DEFAULT 0,          -- last write's rev
   mount_root    TEXT,                                -- nullable; tags mount provenance
   stub_size     INTEGER,                             -- non-null while a lazy stub
-  manifest_hash BLOB                                 -- references vfs_manifests.hash
+  manifest_hash BLOB,                                -- references vfs_manifests.hash
+  link_target   TEXT                                 -- non-null when type = 'symlink'
 );
 ```
 

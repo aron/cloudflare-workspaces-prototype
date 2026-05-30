@@ -1,68 +1,112 @@
+import { createWorkspaceError } from "../errors.js";
 import { canonicalizePath } from "../path.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 
 export interface ResolvedInode {
   inode: number;
-  type: "file" | "dir";
+  type: "file" | "dir" | "symlink";
   mode: number;
   mtime: number;
+  // Populated only when type === "symlink". Higher layers (readlink,
+  // lstat) consume this; resolveInode follows it transparently unless
+  // the caller asks otherwise.
+  linkTarget?: string;
+}
+
+export interface ResolveOptions {
+  // Default true. Pass false to land on a symlink itself \u2014 the
+  // lstat / readlink code paths rely on this. Loops are still
+  // detected when following.
+  followSymlinks?: boolean;
 }
 
 interface NodeRow {
   inode: number;
-  type: "file" | "dir";
+  type: "file" | "dir" | "symlink";
   mode: number;
   mtime: number;
+  link_target: string | null;
 }
 
 interface ChildRow {
   child_inode: number;
 }
 
+// Cap the total number of symlinks resolved across a single
+// resolveInode() call. Matches Linux's default SYMLOOP_MAX of 40.
+const MAX_SYMLINK_FOLLOWS = 40;
+
 // Walk vfs_dirents from ROOT_INODE down to `path`. Returns null when
-// any segment is missing, or when an intermediate segment is a file
-// (which a real filesystem would surface as ENOTDIR — callers map the
-// `null` to the appropriate POSIX code based on context).
+// any segment is missing, when an intermediate segment is a file
+// (which a real filesystem would surface as ENOTDIR \u2014 callers map
+// the `null` to the appropriate POSIX code), or when a final-segment
+// symlink dangles. Throws ELOOP when a cycle is detected.
 //
 // `path` is canonicalized internally so callers can pass user input
 // directly. Pre-canonicalized paths are also accepted and incur the
 // same trivial re-canonicalization cost.
-export function resolveInode(db: Database, path: string): ResolvedInode | null {
-  const { parts } = canonicalizePath(path);
+export function resolveInode(
+  db: Database,
+  path: string,
+  options: ResolveOptions = {},
+): ResolvedInode | null {
+  const followFinal = options.followSymlinks !== false;
+  return resolveParts(db, canonicalizePath(path).parts, followFinal, 0);
+}
 
-  const root = db.one<NodeRow>(
-    "SELECT inode, type, mode, mtime FROM vfs_nodes WHERE inode = ?",
-    ROOT_INODE,
-  );
-  if (root === undefined) {
-    // initializeSchema was not run, or someone deleted the root row.
-    // Either way the FS is unusable; surface as not-found rather than
-    // throwing here.
+function resolveParts(
+  db: Database,
+  parts: string[],
+  followFinal: boolean,
+  follows: number,
+): ResolvedInode | null {
+  const root = readNode(db, ROOT_INODE);
+  if (root === null) {
     return null;
   }
 
   let current: NodeRow = root;
-  for (const name of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const isFinal = i === parts.length - 1;
     if (current.type !== "dir") {
       return null;
     }
     const child = db.one<ChildRow>(
       "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
       current.inode,
-      name,
+      parts[i],
     );
     if (child === undefined) {
       return null;
     }
-    const next = db.one<NodeRow>(
-      "SELECT inode, type, mode, mtime FROM vfs_nodes WHERE inode = ?",
-      child.child_inode,
-    );
-    if (next === undefined) {
-      // Dangling dirent. The schema invariant in docs/03 says this
-      // should never happen; treat as not-found rather than crash.
+    const next = readNode(db, child.child_inode);
+    if (next === null) {
       return null;
+    }
+    // Intermediate symlinks always get followed; final-segment symlinks
+    // are only followed when the caller wants. A dangling intermediate
+    // is the same as a missing intermediate (return null).
+    if (next.type === "symlink" && (!isFinal || followFinal)) {
+      follows += 1;
+      if (follows > MAX_SYMLINK_FOLLOWS) {
+        throw createWorkspaceError("ELOOP", "too many symlinks resolving path");
+      }
+      const target = next.link_target ?? "";
+      const resolved = resolveParts(db, canonicalizePath(target).parts, true, follows);
+      if (resolved === null) {
+        return null;
+      }
+      // Replace the current dirent-resolved node with the followed
+      // result, then keep walking remaining segments (if any).
+      current = {
+        inode: resolved.inode,
+        type: resolved.type,
+        mode: resolved.mode,
+        mtime: resolved.mtime,
+        link_target: resolved.linkTarget ?? null,
+      };
+      continue;
     }
     current = next;
   }
@@ -72,5 +116,14 @@ export function resolveInode(db: Database, path: string): ResolvedInode | null {
     type: current.type,
     mode: current.mode,
     mtime: current.mtime,
+    linkTarget: current.link_target ?? undefined,
   };
+}
+
+function readNode(db: Database, inode: number): NodeRow | null {
+  const row = db.one<NodeRow>(
+    "SELECT inode, type, mode, mtime, link_target FROM vfs_nodes WHERE inode = ?",
+    inode,
+  );
+  return row ?? null;
 }

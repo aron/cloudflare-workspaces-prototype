@@ -10,6 +10,7 @@ export type WorkspaceErrorCode =
   | "EROFS"
   | "ENOSYS"
   | "EBADF"
+  | "ELOOP"
   | "EIO";
 
 export interface WorkspaceFsError extends Error {
