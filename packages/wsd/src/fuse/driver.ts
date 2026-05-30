@@ -1,12 +1,14 @@
-import type { MemoryVfs, VfsNode } from "./vfs.js";
+import type { NodeVirtualFileSystem } from "./vfs.js";
 
 const ERRNO = {
   ENOENT: -2,
   EIO: -5,
   EEXIST: -17,
-  ENODATA: -61,
+  ENOTDIR: -20,
   EISDIR: -21,
+  EINVAL: -22,
   ENOTEMPTY: -39,
+  ENODATA: -61,
 } as const;
 
 type StatusCallback = (errnoOrBytes: number) => void;
@@ -72,7 +74,7 @@ export interface FuseMount {
   unmount(): Promise<void>;
 }
 
-export function makeFuseOps(vfs: MemoryVfs): FuseOps {
+export function makeFuseOps(vfs: NodeVirtualFileSystem): FuseOps {
   const handles = new Map<number, string>();
   let nextHandle = 1;
 
@@ -91,26 +93,18 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
 
     readdir(path, cb) {
       try {
-        const node = vfs.get(path);
-        if (node?.type !== "dir") {
-          cb(ERRNO.ENOENT, []);
-          return;
-        }
-
-        cb(0, vfs.readdir(path));
-      } catch {
-        cb(ERRNO.EIO, []);
+        cb(0, vfs.readdirSync(path));
+      } catch (error) {
+        cb(toErrno(error), []);
       }
     },
 
     getattr(path, cb) {
-      const node = vfs.get(path);
-      if (node === undefined) {
-        cb(ERRNO.ENOENT, null);
-        return;
+      try {
+        cb(0, statNode(vfs.statSync(path)));
+      } catch (error) {
+        cb(toErrno(error), null);
       }
-
-      cb(0, statNode(node));
     },
 
     fgetattr(path, _fh, cb) {
@@ -118,61 +112,70 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
     },
 
     open(path, _flags, cb) {
-      const node = vfs.get(path);
-      if (node === undefined) {
-        cb(ERRNO.ENOENT, 0);
-        return;
-      }
-      if (node.type !== "file") {
-        cb(ERRNO.EISDIR, 0);
-        return;
-      }
+      try {
+        const stat = vfs.statSync(path);
+        if (stat.isDirectory()) {
+          cb(ERRNO.EISDIR, 0);
+          return;
+        }
 
-      cb(0, openHandle(path));
+        cb(0, openHandle(path));
+      } catch (error) {
+        cb(toErrno(error), 0);
+      }
     },
 
     opendir(path, _flags, cb) {
-      const node = vfs.get(path);
-      if (node === undefined) {
-        cb(ERRNO.ENOENT, 0);
-        return;
-      }
-      if (node.type !== "dir") {
-        cb(ERRNO.ENOTEMPTY, 0);
-        return;
-      }
+      try {
+        const stat = vfs.statSync(path);
+        if (!stat.isDirectory()) {
+          cb(ERRNO.ENOTDIR, 0);
+          return;
+        }
 
-      cb(0, openHandle(path));
+        cb(0, openHandle(path));
+      } catch (error) {
+        cb(toErrno(error), 0);
+      }
     },
 
     create(path, mode, cb) {
       try {
-        if (vfs.exists(path)) {
+        if (vfs.existsSync(path)) {
           cb(ERRNO.EEXIST, 0);
           return;
         }
 
-        vfs.createFile(path, 0o100000 | mode);
+        vfs.writeFileSync(path, Buffer.alloc(0), { mode });
         cb(0, openHandle(path));
-      } catch {
-        cb(ERRNO.ENOENT, 0);
+      } catch (error) {
+        cb(toErrno(error), 0);
       }
     },
 
     read(path, _fh, buffer, length, position, cb) {
-      const chunk = vfs.read(path, length, position);
-      if (chunk === undefined) {
-        cb(ERRNO.ENOENT);
-        return;
+      try {
+        const data = vfs.readFileSync(path);
+        const chunk = data.subarray(position, Math.min(position + length, data.length));
+        chunk.copy(buffer);
+        cb(chunk.length);
+      } catch (error) {
+        cb(toErrno(error));
       }
-
-      chunk.copy(buffer);
-      cb(chunk.length);
     },
 
     write(path, _fh, buffer, length, position, cb) {
-      const written = vfs.write(path, buffer.subarray(0, length), position);
-      cb(written < 0 ? ERRNO.ENOENT : written);
+      try {
+        const existing = vfs.existsSync(path) ? vfs.readFileSync(path) : Buffer.alloc(0);
+        const needed = position + length;
+        const next = Buffer.alloc(Math.max(existing.length, needed));
+        existing.copy(next);
+        buffer.copy(next, position, 0, length);
+        vfs.writeFileSync(path, next);
+        cb(length);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     release(_path, fh, cb) {
@@ -190,43 +193,66 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
     },
 
     truncate(path, size, cb) {
-      cb(vfs.truncate(path, size) ? 0 : ERRNO.ENOENT);
+      try {
+        truncate(vfs, path, size);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     ftruncate(path, _fh, size, cb) {
-      cb(vfs.truncate(path, size) ? 0 : ERRNO.ENOENT);
+      try {
+        truncate(vfs, path, size);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     unlink(path, cb) {
-      cb(vfs.unlink(path) ? 0 : ERRNO.ENOENT);
+      try {
+        vfs.unlinkSync(path);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     mkdir(path, mode, cb) {
       try {
-        vfs.mkdir(path, mode);
+        vfs.mkdirSync(path, { mode });
         cb(0);
-      } catch {
-        cb(vfs.exists(path) ? ERRNO.EEXIST : ERRNO.ENOENT);
+      } catch (error) {
+        cb(toErrno(error));
       }
     },
 
     rmdir(path, cb) {
-      const result = vfs.rmdir(path);
-      if (result === "ok") cb(0);
-      else if (result === "not-empty") cb(ERRNO.ENOTEMPTY);
-      else cb(ERRNO.ENOENT);
+      try {
+        vfs.rmdirSync(path);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     rename(source, destination, cb) {
       try {
-        cb(vfs.rename(source, destination) ? 0 : ERRNO.ENOENT);
-      } catch {
-        cb(ERRNO.ENOENT);
+        vfs.renameSync(source, destination);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
       }
     },
 
-    access(path, _mode, cb) {
-      cb(vfs.exists(path) ? 0 : ERRNO.ENOENT);
+    access(path, mode, cb) {
+      try {
+        vfs.accessSync(path, mode);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
     },
 
     statfs(_path, cb) {
@@ -245,14 +271,7 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
       });
     },
 
-    chmod(path, mode, cb) {
-      const node = vfs.get(path);
-      if (node === undefined) {
-        cb(ERRNO.ENOENT);
-        return;
-      }
-      node.mode = (node.mode & 0o170000) | (mode & 0o7777);
-      node.mtimeMs = Date.now();
+    chmod(_path, _mode, cb) {
       cb(0);
     },
 
@@ -271,27 +290,29 @@ export function makeFuseOps(vfs: MemoryVfs): FuseOps {
     utimens: notImplemented("utimens"),
     readlink: notImplemented("readlink"),
     mknod: notImplemented("mknod"),
+
     setxattr(path, _name, _value, _position, _flags, cb) {
-      cb(vfs.exists(path) ? 0 : ERRNO.ENOENT);
+      cb(vfs.existsSync(path) ? 0 : ERRNO.ENOENT);
     },
 
     getxattr(path, _name, _position, cb) {
-      cb(vfs.exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(vfs.existsSync(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
 
     listxattr(path, cb) {
-      cb(vfs.exists(path) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
+      cb(vfs.existsSync(path) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
     },
 
     removexattr(path, _name, cb) {
-      cb(vfs.exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(vfs.existsSync(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
+
     link: notImplemented("link"),
     symlink: notImplemented("symlink"),
   };
 }
 
-export async function mountFuse(options: { mountPoint: string; vfs: MemoryVfs }): Promise<FuseMount> {
+export async function mountFuse(options: { mountPoint: string; vfs: NodeVirtualFileSystem }): Promise<FuseMount> {
   const module = await import("fuse-native");
   const Fuse = module.default ?? module;
   const fuse = new Fuse(options.mountPoint, makeFuseOps(options.vfs), {
@@ -328,22 +349,43 @@ export async function mountFuse(options: { mountPoint: string; vfs: MemoryVfs })
   };
 }
 
+function truncate(vfs: NodeVirtualFileSystem, path: string, size: number): void {
+  const existing = vfs.readFileSync(path);
+  if (existing.length === size) {
+    return;
+  }
+
+  const next = Buffer.alloc(size);
+  existing.copy(next, 0, 0, Math.min(existing.length, size));
+  vfs.writeFileSync(path, next);
+}
+
 function notImplemented(operation: string): NotImplementedOperation {
   return () => {
     throw new NotImplementedError(operation);
   };
 }
 
-function statNode(node: VfsNode): FuseStat {
-  const time = new Date(node.mtimeMs);
+function statNode(stat: { mtime: Date; atime: Date; ctime: Date; size: number; mode: number; isDirectory(): boolean }): FuseStat {
   return {
-    mtime: time,
-    atime: time,
-    ctime: time,
-    size: node.type === "file" ? node.size : 0,
-    mode: node.mode,
+    mtime: stat.mtime,
+    atime: stat.atime,
+    ctime: stat.ctime,
+    size: stat.size,
+    mode: stat.mode,
     uid: typeof process.getuid === "function" ? process.getuid() : 0,
     gid: typeof process.getgid === "function" ? process.getgid() : 0,
-    nlink: node.type === "dir" ? 2 : 1,
+    nlink: stat.isDirectory() ? 2 : 1,
   };
+}
+
+function toErrno(error: unknown): number {
+  const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+  if (code === "ENOENT") return ERRNO.ENOENT;
+  if (code === "EEXIST") return ERRNO.EEXIST;
+  if (code === "ENOTDIR") return ERRNO.ENOTDIR;
+  if (code === "EISDIR") return ERRNO.EISDIR;
+  if (code === "ENOTEMPTY") return ERRNO.ENOTEMPTY;
+  if (code === "EINVAL") return ERRNO.EINVAL;
+  return ERRNO.EIO;
 }

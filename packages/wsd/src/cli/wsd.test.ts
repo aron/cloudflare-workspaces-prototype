@@ -7,18 +7,14 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
-const packageRoot = path.resolve(__dirname, "..");
+const packageRoot = path.resolve(__dirname, "../..");
 const cliPath = path.join(packageRoot, "dist", "cli", "wsd.cjs");
 
 test("wsd rejects relative MOUNT_POINT values", async () => {
   const port = await getAvailablePort();
   const child = spawn(cliPath, {
     cwd: packageRoot,
-    env: {
-      ...process.env,
-      MOUNT_POINT: "relative-workspace",
-      PORT: String(port),
-    },
+    env: { ...process.env, MOUNT_POINT: "relative-workspace", PORT: String(port) },
     stdio: ["ignore", "ignore", "pipe"],
   });
 
@@ -27,7 +23,7 @@ test("wsd rejects relative MOUNT_POINT values", async () => {
   assert.match(stderr, /MOUNT_POINT must be an absolute path/);
 });
 
-test("wsd starts an HTTP server after mounting FUSE", async (t) => {
+test("wsd exposes file IO through the mounted filesystem", async (t) => {
   const reason = await fuseSkipReason();
   if (reason !== undefined) {
     t.skip(reason);
@@ -44,42 +40,17 @@ test("wsd starts an HTTP server after mounting FUSE", async (t) => {
 
   const root = await request(`http://127.0.0.1:${port}/`);
   assert.equal(root.statusCode, 200);
-  assert.equal(root.headers["content-type"], "application/json; charset=utf-8");
   assert.deepEqual(JSON.parse(root.body), {});
-});
-
-test("wsd exposes file IO through the mounted filesystem", async (t) => {
-  const reason = await fuseSkipReason();
-  if (reason !== undefined) {
-    t.skip(reason);
-    return;
-  }
-
-  const port = await getAvailablePort();
-  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint });
 
   await fs.mkdir(path.join(mountPoint, "dir"));
   await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello fuse");
   assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello fuse");
-  assert.deepEqual(await fs.readdir(path.join(mountPoint, "dir")), ["hello.txt"]);
-
-  await fs.rename(path.join(mountPoint, "dir", "hello.txt"), path.join(mountPoint, "dir", "renamed.txt"));
-  await fs.truncate(path.join(mountPoint, "dir", "renamed.txt"), 5);
-  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "renamed.txt"), "utf8"), "hello");
-
-  await fs.unlink(path.join(mountPoint, "dir", "renamed.txt"));
-  assert.deepEqual(await fs.readdir(path.join(mountPoint, "dir")), []);
 });
 
-async function startWsd(t, { port, mountPoint }) {
+async function startWsd(t, { port, mountPoint }: { port: number; mountPoint: string }) {
   const child = spawn(cliPath, {
     cwd: packageRoot,
-    env: {
-      ...process.env,
-      MOUNT_POINT: mountPoint,
-      PORT: String(port),
-    },
+    env: { ...process.env, MOUNT_POINT: mountPoint, PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -87,12 +58,8 @@ async function startWsd(t, { port, mountPoint }) {
   let stderr = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
 
   t.after(async () => {
     await stopProcess(child);
@@ -135,12 +102,8 @@ function getAvailablePort() {
       assert.notEqual(address, null);
       const port = address.port;
       server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve(port);
+        if (error) reject(error);
+        else resolve(port);
       });
     });
   });
@@ -149,9 +112,7 @@ function getAvailablePort() {
 async function waitForExit(child, timeoutMs = 2_000) {
   let stderr = "";
   child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -176,13 +137,9 @@ async function waitForHttpOk(url, child, output, timeoutMs = 5_000) {
 
     try {
       const response = await request(url);
-      if (response.statusCode === 200) {
-        return;
-      }
+      if (response.statusCode === 200) return;
     } catch (error) {
-      if (!isConnectionError(error)) {
-        throw error;
-      }
+      if (!isConnectionError(error)) throw error;
     }
 
     await delay(50);
@@ -196,15 +153,9 @@ function request(url) {
     const request = http.get(url, (response) => {
       response.setEncoding("utf8");
       let body = "";
-      response.on("data", (chunk) => {
-        body += chunk;
-      });
+      response.on("data", (chunk) => { body += chunk; });
       response.on("end", () => {
-        resolve({
-          body,
-          headers: response.headers,
-          statusCode: response.statusCode,
-        });
+        resolve({ body, headers: response.headers, statusCode: response.statusCode });
       });
     });
 

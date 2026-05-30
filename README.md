@@ -1,5 +1,5 @@
 # Cloudflare Workspaces Prototype
 
-This branch contains the initial `wsd` CLI scaffold for `@cloudflare/workspace`.
+This branch contains the `wsd` CLI/FUSE scaffold in `packages/wsd`, published as `@cloudflare/workspace-wsd`.
 
-See [`packages/workspace/README.md`](packages/workspace/README.md) for usage and build details.
+See [`packages/wsd/README.md`](packages/wsd/README.md) for usage and build details.

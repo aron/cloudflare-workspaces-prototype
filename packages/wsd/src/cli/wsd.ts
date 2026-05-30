@@ -3,7 +3,7 @@
 import { mkdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isAbsolute } from "node:path";
-import { MemoryVfs, mountFuse, type FuseMount } from "../fuse/index.js";
+import { createNodeVirtualFileSystem, mountFuse, type FuseMount } from "../fuse/index.js";
 
 const DEFAULT_PORT = 4567;
 const DEFAULT_MOUNT_POINT = "/workspace";
@@ -98,7 +98,7 @@ async function closeServer(server: Server): Promise<void> {
 async function main(): Promise<void> {
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
-  const vfs = new MemoryVfs();
+  const vfs = createNodeVirtualFileSystem();
 
   await mkdir(mountPoint, { recursive: true });
   const fuse = await mountFuse({ mountPoint, vfs });
@@ -106,9 +106,7 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
-    if (shuttingDown) {
-      return;
-    }
+    if (shuttingDown) return;
     shuttingDown = true;
 
     try {
@@ -121,12 +119,8 @@ async function main(): Promise<void> {
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
 
-  process.once("SIGINT", (signal) => {
-    void shutdown(signal);
-  });
-  process.once("SIGTERM", (signal) => {
-    void shutdown(signal);
-  });
+  process.once("SIGINT", (signal) => void shutdown(signal));
+  process.once("SIGTERM", (signal) => void shutdown(signal));
 
   await new Promise<void>((resolve) => {
     server.listen(port, HOST, () => {

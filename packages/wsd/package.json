@@ -1,7 +1,7 @@
 {
-  "name": "@cloudflare/workspace",
+  "name": "@cloudflare/workspace-wsd",
   "version": "0.1.0",
-  "description": "Workspace daemon CLI scaffold.",
+  "description": "Workspace daemon CLI and FUSE mount.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {
@@ -14,12 +14,13 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "build:bin": "node ./scripts/build-bin.mjs",
-    "test": "npm run build && node --test tests/*.test.js"
+    "test": "npm run build && node --experimental-strip-types --test \"src/**/*.test.ts\""
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
-    "fuse-native": "^2.2.6"
+    "fuse-native": "^2.2.6",
+    "node-vfs-polyfill": "github:vercel-labs/node-vfs-polyfill"
   }
 }

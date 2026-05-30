@@ -5,21 +5,22 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@cloudflare/workspace",
-    "test": "npm test --workspace=@cloudflare/workspace",
-    "build:bin": "npm run build:bin --workspace=@cloudflare/workspace"
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "build:bin": "npm run build:bin --workspaces --if-present"
   },
   "devDependencies": {
-    "@types/node": "^20.14.11",
+    "@types/node": "^22.10.7",
     "pkg": "^5.8.1",
-    "typescript": "^5.5.4"
+    "typescript": "^5.7.3"
   },
   "pkg": {
     "assets": [
       "node_modules/fuse-native/prebuilds/**/*",
       "node_modules/fuse-shared-library-darwin/**/*",
       "node_modules/fuse-shared-library-linux/**/*",
-      "node_modules/fuse-shared-library-linux-arm/**/*"
+      "node_modules/fuse-shared-library-linux-arm/**/*",
+      "node_modules/node-vfs-polyfill/**/*"
     ]
   }
 }
