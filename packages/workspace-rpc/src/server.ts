@@ -2,9 +2,7 @@
 //
 // The DO uses this to expose its sync surface to the container, and
 // the in-container workspace-server uses it to expose its mirror to
-// the DO. Same code on both ends; what differs is who calls whom
-// for which methods (the doc-level "this is DO → container" naming
-// is convention, not a runtime constraint).
+// the DO. Same code on both ends; what differs is who calls whom.
 
 import {
   applyChanges,
@@ -19,110 +17,99 @@ import {
   readWatermark,
   writeWatermark,
 } from "@cloudflare/workspace-fs";
+import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
 import type { SyncRPC } from "./interface.js";
 
 export interface ServerOptions {
-  // Path-segment ignore list applied to the wire. The container side
-  // typically passes its configured list; the DO defaults to empty
-  // (push from the DO carries everything by design).
   ignore?: string[];
-  // Override for tests; produced via SQLite scalar otherwise.
   now?: () => number;
 }
 
-// Bind a Database to the SyncRPC surface. The returned object is
-// what capnweb's newWebSocketRpcSession() consumes on the server
-// side. We don't open the WebSocket here \u2014 the carrier is the
-// caller's responsibility (see boot sequence in docs/07).
+// Internal: a class-shaped SyncRPC. Capnweb requires RpcTarget for
+// objects that travel by reference; the server object is the
+// session's localMain so it never travels as a stub, but extending
+// RpcTarget keeps the type machinery happy when methods return
+// references that do.
+class SyncRpcServer extends RpcTarget implements SyncRPC {
+  constructor(
+    private readonly db: Database,
+    private readonly options: Required<Pick<ServerOptions, "ignore">>,
+  ) {
+    super();
+  }
+
+  async push(
+    changes: ReadableStream<ChangeEntry>,
+  ): Promise<{ rev: number; appliedPushRev: number }> {
+    const entries: ChangeEntry[] = [];
+    const reader = changes.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        entries.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    await applyChanges(this.db, entries, new Map(), {
+      advanceFetchRev: currentRev(this.db),
+    });
+    return {
+      rev: currentRev(this.db),
+      appliedPushRev: readWatermark(this.db, "fetchRev"),
+    };
+  }
+
+  fetchChanges(input: { sinceRev?: number; ignore?: string[] }): ReadableStream<ChangeEntry> {
+    const sinceRev = input.sinceRev ?? 0;
+    const ignore =
+      input.ignore ?? (this.options.ignore.length > 0 ? this.options.ignore : DEFAULT_IGNORE);
+    return iterableToReadableStream(coalesceChanges(this.db, sinceRev, { ignore }));
+  }
+
+  async hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]> {
+    return hasObjects(this.db, hashes);
+  }
+
+  fetchObjects(hashes: Uint8Array[]): ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }> {
+    return iterableToReadableStream(fetchObjects(this.db, hashes));
+  }
+
+  async pushObjects(
+    objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>,
+  ): Promise<void> {
+    // Phase 5 R1 lands a stageBlob() helper that takes a hash/bytes
+    // pair and writes it into vfs_blobs + vfs_blob_bytes. Until then
+    // the sketch errors loudly so we don't silently drop bytes.
+    void objects;
+    void writeWatermark; // referenced by upcoming R-tasks
+    throw new Error("pushObjects: staging not implemented in the sketch");
+  }
+}
+
+// Construct a SyncRPC bound to `db`. The carrier (HTTP server +
+// WebSocketServer) is the caller's responsibility; this just hands
+// back the object to mount on each connection via
+// acceptWebSocketSession().
 export function createSyncServer(db: Database, options: ServerOptions = {}): SyncRPC {
-  const ignore = options.ignore ?? [];
+  return new SyncRpcServer(db, { ignore: options.ignore ?? [] });
+}
 
-  return {
-    async push(changes) {
-      // Collect chunk-byte requests as the entries flow in. The
-      // server can't pull objects out of the client mid-stream
-      // without a second round-trip \u2014 the wire shape is:
-      //
-      //   1. client streams ChangeEntry to push().
-      //   2. server inspects hashes, calls back via hasObjects.
-      //   3. client (a separate RPC) calls pushObjects() with the
-      //      missing subset.
-      //   4. push() resolves after the batch is durably applied.
-      //
-      // For this initial sketch we buffer all entries (small enough
-      // for one Capnweb frame in the common case) and rely on a
-      // separate pushObjects() call that the client makes
-      // beforehand to stage the bytes in a temporary keyed store.
-      // The Phase 5 implementation will switch to inline streaming
-      // once capnweb's stream-receive-while-stream-send pattern is
-      // wired up.
-      const entries: ChangeEntry[] = [];
-      const reader = changes.getReader();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          entries.push(value);
-        }
-      } finally {
-        reader.releaseLock();
-      }
-      // The client is expected to have staged any missing bytes
-      // already via a prior pushObjects() call; pull them out of
-      // vfs_blob_bytes during apply.
-      const objects = new Map<string, Uint8Array>();
-      // applyChanges only consults the map when a file entry's
-      // chunks aren't already in vfs_blob_bytes; for the staged
-      // path the local hasObjects probe filled them in.
-      await applyChanges(db, entries, objects, {
-        advanceFetchRev: currentRev(db),
-      });
-      const rev = currentRev(db);
-      const appliedPushRev = readWatermark(db, "fetchRev");
-      return { rev, appliedPushRev };
-    },
-
-    fetchChanges({ sinceRev = 0, ignore: callerIgnore }) {
-      const effective = callerIgnore ?? (ignore.length > 0 ? ignore : DEFAULT_IGNORE);
-      const iter = coalesceChanges(db, sinceRev, { ignore: effective });
-      return iterableToReadableStream(iter);
-    },
-
-    async hasObjects(hashes) {
-      return hasObjects(db, hashes);
-    },
-
-    fetchObjects(hashes) {
-      return iterableToReadableStream(fetchObjects(db, hashes));
-    },
-
-    async pushObjects(objects) {
-      // Stage the bytes locally. writeFile would build a manifest
-      // and a vfs_node we don't want yet; what we actually want is
-      // to land the raw chunk in vfs_blob_bytes so a subsequent
-      // push() apply pass can find it by hash. Phase 5 wires the
-      // helper that does that without going through writeFile.
-      const reader = objects.getReader();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          // TODO(Phase 5): land { hash, bytes } directly into
-          // vfs_blobs + vfs_blob_bytes. For now the sketch
-          // throws so we don't silently drop bytes.
-          void value;
-          throw new Error("pushObjects: staging not implemented in the sketch");
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    },
-  };
-
-  // Suppress unused-import warning while writeWatermark is only
-  // referenced by future code paths. Phase 5 deletes this.
-  void writeWatermark;
+// Attach a capnweb RPC session to a WHATWG-shaped WebSocket. The
+// node `ws` package's server-side sockets implement the WHATWG
+// surface (addEventListener / send / close), so this works for
+// both browser-style sockets and ws-package sockets.
+//
+// The session is held alive by capnweb's internal event listeners
+// until the socket closes; the caller can drop the return value.
+export function acceptWebSocketSession(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ws: any,
+  rpc: SyncRPC,
+): void {
+  newWebSocketRpcSession(ws, rpc as unknown as RpcTarget);
 }
 
 function iterableToReadableStream<T>(it: AsyncIterable<T>): ReadableStream<T> {
