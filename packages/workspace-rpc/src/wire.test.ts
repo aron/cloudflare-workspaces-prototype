@@ -278,3 +278,30 @@ describe("cross-side invariant", () => {
     }
   });
 });
+
+import type { RpcEvent } from "./client.js";
+
+describe("onRpcEvent observability", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("fires once per RPC with ok=true on success", async () => {
+    harness = await startHarness();
+    const events: RpcEvent[] = [];
+    const client = createSyncClient({
+      url: harness.url,
+      onRpcEvent: (e) => events.push(e),
+    });
+    try {
+      await client.hasObjects([]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ rpc: "hasObjects", ok: true });
+      expect(events[0].durationMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      await client.close();
+    }
+  });
+});
