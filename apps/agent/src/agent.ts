@@ -1153,84 +1153,170 @@ export class Agent extends Think<Env> {
   private _execStreamingTool(ws: any) {
     const self = this;
     const FLUSH_MS = 100;
+    // The tool returned to the AI SDK is an async generator: the SDK
+    // pulls snapshots out of it as the underlying process emits log
+    // events. The Workers `tracing.enterSpan(name, cb)` API ends the
+    // span when `cb`'s returned promise settles, which means we can't
+    // `yield` from inside the trace callback — generators and
+    // callback-style tracing don't compose directly.
+    //
+    // Solution: a queue bridge. The trace callback runs the original
+    // generator body and pushes each snapshot into a queue; the outer
+    // generator returned to the SDK drains the queue with a wake-up
+    // semaphore. The span lives for the inner-body promise's lifetime,
+    // which is exactly what we want for the tool span's duration.
+    // Workspace-level spans (startProcess, streamProcessLogs,
+    // pullDirty) nest naturally inside that lifetime.
     return async function* (
       { command, cwd }: { command: string; cwd?: string },
       opts: { toolCallId: string; abortSignal?: AbortSignal },
     ) {
-      const buf = new ExecOutputBuffer();
-      const startedAt = Date.now();
-      const inflight = self._inflight();
+      const queue: ReturnType<ExecOutputBuffer["snapshot"]>[] = [];
+      let wake: (() => void) | null = null;
+      let done = false;
+      let finalError: unknown = null;
+      const wakeup = () => { const w = wake; wake = null; w?.(); };
 
-      // 1. Start the process. A failure here is a tool-level error;
-      //    yield once and exit.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let proc: any;
-      try {
-        proc = await ws.startProcess(command, { cwd: cwd ?? "/tmp" });
-      } catch (err) {
-        const details = err instanceof Error ? err.message : String(err);
-        yield buf.snapshot("", { error: { details }, exitCode: -1, durationMs: Date.now() - startedAt });
-        return;
-      }
+      const work = trace("tool.exec", {
+        "hackspace.thread_id": self.name,
+        "hackspace.tool_call_id": opts.toolCallId,
+        "hackspace.cwd": cwd ?? "/tmp",
+      }, async (span) => {
+        span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
 
-      // 2. Record so onStart can recover us if the DO is evicted mid-run.
-      inflight.record(opts.toolCallId, proc.id);
+        const buf = new ExecOutputBuffer();
+        const startedAt = Date.now();
+        const inflight = self._inflight();
 
-      // 3. Stream logs. Yield an initial running snapshot so the UI
-      //    transitions to the live view immediately.
-      yield buf.snapshot(proc.id);
-      let lastFlush = Date.now();
-
-      // Wire turn-level abort to SIGTERM. We don't await the kill — the
-      // stream's exit/error event will close the loop naturally.
-      const onAbort = () => {
-        try { proc.kill("SIGTERM"); } catch { /* best effort */ }
-      };
-      if (opts.abortSignal) {
-        if (opts.abortSignal.aborted) onAbort();
-        else opts.abortSignal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      try {
-        const stream = await ws.streamProcessLogs(proc.id, { signal: opts.abortSignal });
-        for await (const event of stream as AsyncIterable<LogEvent>) {
-          buf.apply(event);
-          const now = Date.now();
-          const terminal = event.type === "exit" || event.type === "error";
-          if (terminal || now - lastFlush >= FLUSH_MS) {
-            lastFlush = now;
-            yield buf.snapshot(proc.id, { durationMs: now - startedAt });
-          }
-          if (terminal) break;
-        }
-      } catch (err) {
-        if (opts.abortSignal?.aborted) {
-          yield buf.snapshot(proc.id, {
-            error: { details: "aborted" },
-            exitCode: 143,
-            durationMs: Date.now() - startedAt,
-          });
-        } else {
+        // 1. Start the process. A failure here is a tool-level error;
+        //    push one snapshot and exit.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let proc: any;
+        try {
+          proc = await ws.startProcess(command, { cwd: cwd ?? "/tmp" });
+        } catch (err) {
+          span.set("hackspace.terminated_by", () => "start-failed");
+          span.setError(err);
           const details = err instanceof Error ? err.message : String(err);
-          yield buf.snapshot(proc.id, {
-            error: { details },
-            durationMs: Date.now() - startedAt,
-          });
+          queue.push(buf.snapshot("", { error: { details }, exitCode: -1, durationMs: Date.now() - startedAt }));
+          wakeup();
+          return;
+        }
+        span.set("hackspace.process_id", () => proc.id);
+
+        // 2. Record so onStart can recover us if the DO is evicted mid-run.
+        inflight.record(opts.toolCallId, proc.id);
+
+        // 3. Stream logs. Push an initial running snapshot so the UI
+        //    transitions to the live view immediately.
+        queue.push(buf.snapshot(proc.id));
+        wakeup();
+        let lastFlush = Date.now();
+
+        // Wire turn-level abort to SIGTERM. We don't await the kill — the
+        // stream's exit/error event will close the loop naturally.
+        const onAbort = () => {
+          try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+        };
+        if (opts.abortSignal) {
+          if (opts.abortSignal.aborted) onAbort();
+          else opts.abortSignal.addEventListener("abort", onAbort, { once: true });
+        }
+
+        // `terminated_by` defaults to "stream-closed" if neither the
+        // exit/error branch nor the abort branch fires — e.g. the stream
+        // disconnected mid-flight. Overwritten below in the normal paths.
+        let terminatedBy: "exit" | "error" | "abort" | "stream-error" | "stream-closed" = "stream-closed";
+        let exitCode: number | undefined;
+        try {
+          const stream = await ws.streamProcessLogs(proc.id, { signal: opts.abortSignal });
+          for await (const event of stream as AsyncIterable<LogEvent>) {
+            buf.apply(event);
+            const now = Date.now();
+            const terminal = event.type === "exit" || event.type === "error";
+            if (terminal || now - lastFlush >= FLUSH_MS) {
+              lastFlush = now;
+              queue.push(buf.snapshot(proc.id, { durationMs: now - startedAt }));
+              wakeup();
+            }
+            if (terminal) {
+              terminatedBy = event.type === "exit" ? "exit" : "error";
+              if (event.type === "exit") exitCode = event.exitCode;
+              break;
+            }
+          }
+        } catch (err) {
+          if (opts.abortSignal?.aborted) {
+            terminatedBy = "abort";
+            exitCode = 143;
+            queue.push(buf.snapshot(proc.id, {
+              error: { details: "aborted" },
+              exitCode: 143,
+              durationMs: Date.now() - startedAt,
+            }));
+          } else {
+            terminatedBy = "stream-error";
+            span.setError(err);
+            const details = err instanceof Error ? err.message : String(err);
+            queue.push(buf.snapshot(proc.id, {
+              error: { details },
+              durationMs: Date.now() - startedAt,
+            }));
+          }
+          wakeup();
+        } finally {
+          if (opts.abortSignal) {
+            opts.abortSignal.removeEventListener("abort", onAbort);
+          }
+          inflight.clear(opts.toolCallId);
+          span.set("hackspace.terminated_by", () => terminatedBy);
+          span.set("hackspace.exit_code", () => exitCode);
+          // Buffer's snapshot exposes accumulated bytes; record both so
+          // a dashboard can spot commands that produce massive stdout
+          // (the buffer caps at 2 MiB/side anyway, but the truncation
+          // flag is worth surfacing too).
+          const snap = buf.snapshot(proc.id);
+          span.set("hackspace.stdout_bytes", () => snap.stdout.length);
+          span.set("hackspace.stderr_bytes", () => snap.stderr.length);
+          // Pull files the container wrote back into the VFS. Errors leave the
+          // VFS out of sync with the container until the next exec — log them
+          // at warn so the asymmetry is visible instead of silently degrading.
+          const pullStart = Date.now();
+          try {
+            await ws.pullDirtyAfter();
+            span.set("hackspace.pull_duration_ms", () => Date.now() - pullStart);
+          } catch (err) {
+            span.set("hackspace.pull_duration_ms", () => Date.now() - pullStart);
+            span.set("hackspace.pull_failed", () => true);
+            console.warn("[Agent] pullDirtyAfter failed after exec:", err);
+          }
+        }
+      }).catch((err) => {
+        // Errors that escape the trace callback are unexpected (the
+        // body catches everything). Surface them as the generator's
+        // final throw so the SDK sees a real error rather than a
+        // silent truncation.
+        finalError = err;
+      }).finally(() => {
+        done = true;
+        wakeup();
+      });
+
+      // Drain loop: yield queued snapshots, sleep on the wake semaphore
+      // when the queue empties. Done when the inner work resolves.
+      try {
+        while (true) {
+          while (queue.length) yield queue.shift()!;
+          if (done) break;
+          await new Promise<void>((r) => { wake = r; });
         }
       } finally {
-        if (opts.abortSignal) {
-          opts.abortSignal.removeEventListener("abort", onAbort);
-        }
-        inflight.clear(opts.toolCallId);
-        // Pull files the container wrote back into the VFS. Errors leave the
-        // VFS out of sync with the container until the next exec — log them
-        // at warn so the asymmetry is visible instead of silently degrading.
-        try {
-          await ws.pullDirtyAfter();
-        } catch (err) {
-          console.warn("[Agent] pullDirtyAfter failed after exec:", err);
-        }
+        // Always wait for the inner work to finish so the span ends
+        // before the generator returns to the SDK, even if the SDK
+        // aborts iteration early.
+        await work;
       }
+      if (finalError) throw finalError;
     };
   }
 
