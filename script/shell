@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Launch a debian-slim container with the linux wsd binary mounted as /usr/local/bin/wsd.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+binary="${repo_root}/artifacts/wsd/wsd-linux-x64"
+
+if [[ ! -x "${binary}" ]]; then
+  echo "missing or non-executable binary: ${binary}" >&2
+  exit 1
+fi
+
+exec docker run --rm -it \
+  --platform linux/amd64 \
+  --privileged \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --cap-add MKNOD \
+  --security-opt apparmor=unconfined \
+  --security-opt seccomp=unconfined \
+  -v "${binary}:/usr/local/bin/wsd:ro" \
+  -v "${repo_root}/script/fs-tests.sh:/usr/local/bin/fs-tests:ro" \
+  -v "${repo_root}/script/fs-bench.sh:/usr/local/bin/fs-bench:ro" \
+  -w /root \
+  debian:stable-slim \
+  bash -c 'apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends fuse3 libfuse2t64 attr util-linux coreutils findutils git ca-certificates >/dev/null 2>&1; exec bash'
