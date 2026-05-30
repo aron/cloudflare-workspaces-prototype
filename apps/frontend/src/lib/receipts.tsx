@@ -26,13 +26,75 @@ import {
 
 import type { ReceiptScope, ReadReceipt, ActivityTip } from "@app/shared";
 import { fetchReceipts, openAppSocket, putReceipt } from "./api";
-import { useRoute } from "./nav";
+import { navigate, useRoute } from "./nav";
+import type { Route } from "./route";
 import { ReceiptsBuffer } from "./receipts-buffer";
 
 // ---- internal state ----
 
 type Key = `${ReceiptScope}:${string}`;
 const k = (scope: ReceiptScope, scopeId: string): Key => `${scope}:${scopeId}`;
+
+// ---- in-page mention notifications ----
+
+/**
+ * Shape of the `mention` frame the App DO emits during the drain pass for
+ * users opted into in-page browser notifications.
+ */
+interface MentionFrame {
+  type:        "mention";
+  roomId:      string;
+  threadId?:   string;
+  messageId:   string;
+  roomName:    string;
+  authorName:  string;
+  snippet:     string;
+  count:       number;
+  createdAt:   number;
+  roomUrl?:    string;
+}
+
+/**
+ * Render a Notification for an inbound mention frame. Three suppression
+ * rules apply:
+ *   1. Permission must be "granted". We don't auto-prompt here — the
+ *      settings dialog owns that flow.
+ *   2. Skip when the current route already points at this mention's scope
+ *      *and* the document is visible. The user is looking at the message;
+ *      no point pinging.
+ *   3. The Notification API itself is unavailable (older browsers, SSR).
+ *
+ * `tag: messageId` collapses duplicates across multiple tabs of the same
+ * window/session — only one notification surfaces per mention.
+ */
+function showMentionNotification(frame: MentionFrame, route: Route): void {
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+
+  const onSameScope =
+    (route.kind === "thread" && frame.threadId && route.threadId === frame.threadId) ||
+    (route.kind === "room"   && !frame.threadId && route.roomId   === frame.roomId);
+  const visible = typeof document !== "undefined" && document.visibilityState === "visible";
+  if (onSameScope && visible) return;
+
+  const title = frame.count > 1
+    ? `${frame.authorName} — ${frame.count} new mentions in ${frame.roomName}`
+    : `${frame.authorName} mentioned you in ${frame.roomName}`;
+  const notification = new Notification(title, {
+    body: frame.snippet,
+    tag:  frame.messageId,
+    data: { roomId: frame.roomId, threadId: frame.threadId },
+  });
+  notification.onclick = () => {
+    window.focus();
+    if (frame.threadId) {
+      navigate({ kind: "thread", roomId: frame.roomId, threadId: frame.threadId });
+    } else {
+      navigate({ kind: "room", roomId: frame.roomId });
+    }
+    notification.close();
+  };
+}
 
 interface ReceiptsState {
   /** `lastRead` per scope, for the signed-in user. */
@@ -71,6 +133,11 @@ interface ProviderProps {
 
 export function ReceiptsProvider({ userId, children }: ProviderProps): React.ReactElement {
   const route = useRoute();
+  // Mirror the current route into a ref so the WS frame handler (which is
+  // closed over the initial route) can read the latest value without us
+  // tearing down and rebuilding the socket on every navigation.
+  const routeRef = useRef(route);
+  routeRef.current = route;
   const [receipts, setReceipts] = useState<Map<Key, number>>(() => new Map());
   const [tips,     setTips]     = useState<Map<Key, number>>(() => new Map());
   const [ready,    setReady]    = useState(false);
@@ -131,6 +198,14 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
         lastActivity?: number;
         lastRead?: number;
         userId?: string;
+        // mention frame
+        roomId?:    string;
+        threadId?:  string;
+        messageId?: string;
+        roomName?:  string;
+        authorName?: string;
+        snippet?:    string;
+        count?:      number;
       };
       if (f.type === "tip" && f.scope && f.scopeId && typeof f.lastActivity === "number") {
         const key = k(f.scope, f.scopeId);
@@ -154,6 +229,10 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
           out.set(key, next);
           return out;
         });
+        return;
+      }
+      if (f.type === "mention" && f.roomId && f.messageId) {
+        showMentionNotification(f as MentionFrame, routeRef.current);
         return;
       }
     };

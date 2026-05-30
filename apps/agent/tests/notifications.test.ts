@@ -282,3 +282,129 @@ describe("App /notifications/drain — pre-debounce holdback", () => {
     }
   });
 });
+
+// ---- in-page (Phase A) ----------------------------------------------------
+
+async function setBrowserNotifications(user: typeof VENKMAN, mode: "off" | "in-page") {
+  await appStub().fetch(asUser("https://app/me/settings", user, {
+    method:  "PUT",
+    headers: { "content-type": "application/json" },
+    body:    JSON.stringify({ browserNotifications: mode }),
+  }));
+}
+
+async function openWS(user: typeof VENKMAN): Promise<WebSocket> {
+  const res = await appStub().fetch(asUser("https://app/ws", user, {
+    headers: { upgrade: "websocket" },
+  }));
+  expect(res.status).toBe(101);
+  const ws = res.webSocket!;
+  ws.accept();
+  return ws;
+}
+
+function collectFrames<T = unknown>(ws: WebSocket, predicate: (f: T) => boolean, ms = 80): Promise<T[]> {
+  const out: T[] = [];
+  ws.addEventListener("message", (e) => {
+    if (typeof e.data !== "string") return;
+    const f = JSON.parse(e.data) as T;
+    if (predicate(f)) out.push(f);
+  });
+  return new Promise(resolve => setTimeout(() => resolve(out), ms));
+}
+
+describe("App drain — in-page mention frames", () => {
+  it("emits a mention frame to a connected, opted-in recipient", async () => {
+    await touch(VENKMAN);
+    await setBrowserNotifications(VENKMAN, "in-page");
+    await setGChatId(VENKMAN, "123456789");
+    const ws = await openWS(VENKMAN);
+    const frames = collectFrames<{ type: string; snippet?: string; count?: number }>(ws, f => f.type === "mention");
+
+    await enqueue([
+      { userId: VENKMAN.userId, roomId: "r-inpage", messageId: `m-${crypto.randomUUID()}`,
+        snippet: "hello", authorName: "Stantz", roomName: "Hackspace", createdAt: 1000 },
+    ]);
+    const spy = spyWebhook();
+    try {
+      const r = await drain();
+      expect(r.sent).toBe(1);
+      const got = await frames;
+      expect(got).toHaveLength(1);
+      expect(got[0]!.snippet).toContain("hello");
+      // In-page delivered → Google Chat suppressed.
+      expect(spy.calls).toHaveLength(0);
+    } finally {
+      spy.restore();
+      ws.close();
+    }
+  });
+
+  it("falls back to Google Chat when the recipient has no open WS", async () => {
+    await touch(VENKMAN);
+    await setBrowserNotifications(VENKMAN, "in-page");
+    await setGChatId(VENKMAN, "987654321");
+    // No WS opened.
+    await enqueue([
+      { userId: VENKMAN.userId, roomId: "r-fallback", messageId: `m-${crypto.randomUUID()}`,
+        snippet: "offline", authorName: "Stantz", roomName: "Hackspace", createdAt: 1000 },
+    ]);
+    const spy = spyWebhook();
+    try {
+      const r = await drain();
+      expect(r.sent).toBe(1);
+      expect(spy.calls).toHaveLength(1);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("only sends the frame to the matching user's connections", async () => {
+    await touch(VENKMAN); await touch(STANTZ);
+    await setBrowserNotifications(VENKMAN, "in-page");
+    await setBrowserNotifications(STANTZ,  "off");
+    await setGChatId(VENKMAN, "111");
+    await setGChatId(STANTZ,  "222");
+    const v = await openWS(VENKMAN);
+    const s = await openWS(STANTZ);
+    const vFrames = collectFrames<{ type: string }>(v, f => f.type === "mention");
+    const sFrames = collectFrames<{ type: string }>(s, f => f.type === "mention");
+
+    await enqueue([
+      { userId: VENKMAN.userId, roomId: "r-iso", messageId: `m-${crypto.randomUUID()}`,
+        snippet: "for v", authorName: "Stantz", roomName: "Hackspace", createdAt: 1000 },
+    ]);
+    const spy = spyWebhook();
+    try {
+      await drain();
+      expect(await vFrames).toHaveLength(1);
+      expect(await sFrames).toHaveLength(0);
+    } finally {
+      spy.restore();
+      v.close(); s.close();
+    }
+  });
+
+  it("users opted out get the Google Chat path even with an open WS", async () => {
+    await touch(VENKMAN);
+    await setBrowserNotifications(VENKMAN, "off");
+    await setGChatId(VENKMAN, "555");
+    const ws = await openWS(VENKMAN);
+    const frames = collectFrames<{ type: string }>(ws, f => f.type === "mention");
+
+    await enqueue([
+      { userId: VENKMAN.userId, roomId: "r-optout", messageId: `m-${crypto.randomUUID()}`,
+        snippet: "x", authorName: "Stantz", roomName: "Hackspace", createdAt: 1000 },
+    ]);
+    const spy = spyWebhook();
+    try {
+      const r = await drain();
+      expect(r.sent).toBe(1);
+      expect(spy.calls).toHaveLength(1);
+      expect(await frames).toHaveLength(0);
+    } finally {
+      spy.restore();
+      ws.close();
+    }
+  });
+});

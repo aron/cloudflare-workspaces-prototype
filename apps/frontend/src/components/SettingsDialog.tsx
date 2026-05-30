@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { fetchMySettings, updateMySettings, type Me } from "@/lib/api";
+import type { BrowserNotificationMode } from "@app/shared";
 
 export function SettingsDialog({
   open,
@@ -20,6 +21,10 @@ export function SettingsDialog({
   onClose: () => void;
 }) {
   const [value, setValue]       = useState("");
+  const [browser, setBrowser]   = useState<BrowserNotificationMode>("off");
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
+    () => (typeof Notification === "undefined" ? "unsupported" : Notification.permission),
+  );
   const [loading, setLoading]   = useState(false);
   const [saving, setSaving]     = useState(false);
   const [error, setError]       = useState<string | null>(null);
@@ -32,7 +37,10 @@ export function SettingsDialog({
     setError(null);
     setLoading(true);
     fetchMySettings()
-      .then(s => setValue(s.googleChatUserId ?? ""))
+      .then(s => {
+        setValue(s.googleChatUserId ?? "");
+        setBrowser(s.browserNotifications);
+      })
       .catch(e => setError((e as Error).message))
       .finally(() => setLoading(false));
   }, [open]);
@@ -62,18 +70,45 @@ export function SettingsDialog({
   // formatter or a JSON viewer that rendered the id as a number.
   const looksTruncated = /^[0-9]{17,}0{4,}$/.test(trimmed);
 
+  /**
+   * Save both fields in one request. The PUT handler is happy to ignore
+   * either if unchanged — we always send both so the user's intent on the
+   * dialog is exactly what's persisted, even if nothing edited.
+   */
   async function onSave() {
     setSaving(true);
     setError(null);
     try {
-      const next = trimmed === "" ? null : trimmed;
-      const saved = await updateMySettings(next);
+      const saved = await updateMySettings({
+        googleChatUserId:     trimmed === "" ? null : trimmed,
+        browserNotifications: browser,
+      });
       setValue(saved.googleChatUserId ?? "");
+      setBrowser(saved.browserNotifications);
       onClose();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Pick a browser-notifications mode. Switching *to* "in-page" triggers
+   * the permission prompt immediately so the user sees a single browser
+   * dialog at the moment of intent — not later when the first mention
+   * tries to fire. We keep their selection locally even if they deny, so
+   * the chooser reflects what they last picked.
+   */
+  async function onBrowserChange(next: BrowserNotificationMode) {
+    setBrowser(next);
+    if (next === "in-page" && typeof Notification !== "undefined" && Notification.permission === "default") {
+      try {
+        const result = await Notification.requestPermission();
+        setPermission(result);
+      } catch {
+        /* Older browsers reject the promise form; harmless. */
+      }
     }
   }
 
@@ -146,6 +181,38 @@ export function SettingsDialog({
 
           {error && (
             <p className="mt-2 text-xs text-red-400">{error}</p>
+          )}
+        </div>
+
+        <div className="mt-5 border-t border-kumo-line pt-5">
+          <label className="block text-sm font-medium text-kumo-default" htmlFor="browser-notif">
+            Browser notifications
+          </label>
+          <p className="mt-1 text-xs leading-5 text-kumo-inactive">
+            Show a desktop notification when you&apos;re @mentioned and the Hackspace tab
+            isn&apos;t focused on the message. Active tabs only — close the browser and
+            you&apos;ll still get the Google Chat ping above.
+          </p>
+          <select
+            id="browser-notif"
+            value={browser}
+            disabled={loading || saving || permission === "unsupported"}
+            onChange={e => onBrowserChange(e.target.value as BrowserNotificationMode)}
+            className="mt-3 block w-full rounded-md border border-kumo-line bg-kumo-elevated px-3 py-2 text-sm text-kumo-default outline-none focus:border-kumo-brand"
+          >
+            <option value="off">Off</option>
+            <option value="in-page">On (this browser)</option>
+          </select>
+          {permission === "unsupported" && (
+            <p className="mt-1 text-xs text-kumo-inactive">
+              This browser doesn&apos;t support notifications.
+            </p>
+          )}
+          {browser === "in-page" && permission === "denied" && (
+            <p className="mt-1 text-xs text-amber-400">
+              Notifications are blocked for this site. Enable them in your browser&apos;s
+              site settings, then reload.
+            </p>
           )}
         </div>
 

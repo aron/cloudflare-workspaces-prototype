@@ -41,13 +41,20 @@ export async function fetchMySettings(): Promise<UserSettings> {
   return jsonOrThrow(await fetch("/api/app/me/settings", OPTS), "GET /api/app/me/settings");
 }
 
-export async function updateMySettings(googleChatUserId: string | null): Promise<UserSettings> {
+/**
+ * Patch one or more settings fields. Omit a key to leave it unchanged.
+ * Pass `googleChatUserId: null` to clear the stored value.
+ */
+export async function updateMySettings(patch: Partial<{
+  googleChatUserId:     string | null;
+  browserNotifications: "off" | "in-page";
+}>): Promise<UserSettings> {
   return jsonOrThrow(
     await fetch("/api/app/me/settings", {
       ...OPTS,
       method:  "PUT",
       headers: { "content-type": "application/json" },
-      body:    JSON.stringify({ googleChatUserId }),
+      body:    JSON.stringify(patch),
     }),
     "PUT /api/app/me/settings",
   );

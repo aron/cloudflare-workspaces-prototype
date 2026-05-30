@@ -46,10 +46,18 @@ export interface UserSummary {
   lastSeen:  number;
 }
 
+/** In-browser notification preference. */
+export type BrowserNotificationMode = "off" | "in-page";
+
 /** Per-user settings owned by the signed-in user. */
 export interface UserSettings {
   /** Numeric Google Workspace user ID (digits only), or null when unset. */
   googleChatUserId: string | null;
+  /**
+   * Browser notification preference. "in-page" fires `new Notification(...)`
+   * for connected tabs; "off" is the default. Web Push is a future addition.
+   */
+  browserNotifications: BrowserNotificationMode;
 }
 
 // ---- messages / rooms / threads ----

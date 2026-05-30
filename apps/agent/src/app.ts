@@ -16,12 +16,12 @@ import { readIdentity, requireIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { currentModelLabel } from "./model.js";
 import { buildSnippet, log, pickRoomUrl, sendGChatMention } from "./notify.js";
-import type { ActivityTip, ReadReceipt, ReceiptScope, RoomSummary, UserSummary, UserSettings } from "@app/shared";
+import type { ActivityTip, BrowserNotificationMode, ReadReceipt, ReceiptScope, RoomSummary, UserSummary, UserSettings } from "@app/shared";
 
 /** Stable singleton id used by the worker to address this DO. */
 export const APP_DO_NAME = "app";
 
-export type { ActivityTip, ReadReceipt, ReceiptScope, RoomSummary, UserSummary, UserSettings } from "@app/shared";
+export type { ActivityTip, BrowserNotificationMode, ReadReceipt, ReceiptScope, RoomSummary, UserSummary, UserSettings } from "@app/shared";
 
 
 export class App extends Server<Env> {
@@ -52,6 +52,11 @@ export class App extends Server<Env> {
     const userCols = [...this.db.exec<{ name: string }>(`PRAGMA table_info(users)`)];
     if (!userCols.some(c => c.name === "google_chat_user_id")) {
       this.db.exec(`ALTER TABLE users ADD COLUMN google_chat_user_id TEXT`);
+    }
+    // Idempotent migration: browser_notifications stores "off" | "in-page".
+    // NULL is treated as "off" so pre-existing users default to the quiet path.
+    if (!userCols.some(c => c.name === "browser_notifications")) {
+      this.db.exec(`ALTER TABLE users ADD COLUMN browser_notifications TEXT`);
     }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS rooms (
@@ -185,19 +190,35 @@ export class App extends Server<Env> {
       return Response.json(this.loadSettings(identity.userId));
     }
 
-    // PUT /me/settings { googleChatUserId } — owner-only write.
+    // PUT /me/settings { googleChatUserId?, browserNotifications? } — owner-only.
+    // Both fields are independently optional; omitting a key leaves the stored
+    // value untouched.
     if (request.method === "PUT" && url.pathname.endsWith("/me/settings")) {
-      const body = await request.json().catch(() => ({})) as { googleChatUserId?: unknown };
-      const raw = body.googleChatUserId;
-      let gid: string | null;
-      if (raw === null || raw === undefined || raw === "") {
-        gid = null;
-      } else if (typeof raw === "string" && /^[0-9]{5,30}$/.test(raw.trim())) {
-        gid = raw.trim();
-      } else {
-        return Response.json({ error: "googleChatUserId must be 5–30 digits or null" }, { status: 400 });
+      const body = await request.json().catch(() => ({})) as {
+        googleChatUserId?: unknown; browserNotifications?: unknown;
+      };
+
+      if ("googleChatUserId" in body) {
+        const raw = body.googleChatUserId;
+        let gid: string | null;
+        if (raw === null || raw === undefined || raw === "") {
+          gid = null;
+        } else if (typeof raw === "string" && /^[0-9]{5,30}$/.test(raw.trim())) {
+          gid = raw.trim();
+        } else {
+          return Response.json({ error: "googleChatUserId must be 5–30 digits or null" }, { status: 400 });
+        }
+        this.db.exec(`UPDATE users SET google_chat_user_id = ? WHERE id = ?`, gid, identity.userId);
       }
-      this.db.exec(`UPDATE users SET google_chat_user_id = ? WHERE id = ?`, gid, identity.userId);
+
+      if ("browserNotifications" in body) {
+        const raw = body.browserNotifications;
+        if (raw !== "off" && raw !== "in-page") {
+          return Response.json({ error: "browserNotifications must be 'off' or 'in-page'" }, { status: 400 });
+        }
+        this.db.exec(`UPDATE users SET browser_notifications = ? WHERE id = ?`, raw, identity.userId);
+      }
+
       return Response.json(this.loadSettings(identity.userId));
     }
 
@@ -290,10 +311,17 @@ export class App extends Server<Env> {
   }
 
   private loadSettings(userId: string): UserSettings {
-    const rows = [...this.db.exec<{ google_chat_user_id: string | null }>(
-      `SELECT google_chat_user_id FROM users WHERE id = ?`, userId,
+    const rows = [...this.db.exec<{
+      google_chat_user_id:   string | null;
+      browser_notifications: string | null;
+    }>(
+      `SELECT google_chat_user_id, browser_notifications FROM users WHERE id = ?`, userId,
     )];
-    return { googleChatUserId: rows[0]?.google_chat_user_id ?? null };
+    const r = rows[0];
+    return {
+      googleChatUserId:     r?.google_chat_user_id ?? null,
+      browserNotifications: r?.browser_notifications === "in-page" ? "in-page" : "off",
+    };
   }
 
   private listRooms(): RoomSummary[] {
@@ -609,34 +637,71 @@ export class App extends Server<Env> {
         continue;
       }
 
-      // Look up Google Chat ID for the recipient. No webhook configured
-      // (or no ID on file) → drop with reason "unconfigured" so we don't
-      // hammer the queue forever on rows we can never deliver.
-      const user = [...this.db.exec<{ google_chat_user_id: string | null }>(
-        `SELECT google_chat_user_id FROM users WHERE id = ?`, g.userId,
+      // Look up the recipient's notification preferences. We need both the
+      // Google Chat ID (webhook fallback) and the browser-notifications
+      // mode (in-page WS frame). Either being absent narrows the channels
+      // we can use; if *none* are usable we drop with a reason so the queue
+      // doesn't churn on rows we can never deliver.
+      const user = [...this.db.exec<{
+        google_chat_user_id:   string | null;
+        browser_notifications: string | null;
+      }>(
+        `SELECT google_chat_user_id, browser_notifications FROM users WHERE id = ?`,
+        g.userId,
       )][0];
       const gid = user?.google_chat_user_id ?? null;
+      const browserMode: BrowserNotificationMode =
+        user?.browser_notifications === "in-page" ? "in-page" : "off";
+
+      // Build the summary once — used by both channels for consistent copy.
+      const count = g.rows.length;
+      const snippet = count > 1
+        ? `${count} new mentions — latest: ${g.latestSnippet}`
+        : g.latestSnippet;
+      const lastMessageId = g.rows[g.rows.length - 1]?.message_id ?? "";
+      const roomUrl = pickRoomUrl({
+        baseUrl:   baseUrl ?? undefined,
+        roomId:    g.roomId,
+        threadId:  g.threadId ?? undefined,
+        messageId: lastMessageId,
+      });
+
+      // Channel 1: in-page WS frame. Fires only when the recipient has at
+      // least one open connection *and* has opted into browser
+      // notifications. A successful in-page delivery suppresses Google
+      // Chat — the user is clearly at their desk and we don't want them
+      // pinged twice. (If they're focused on the scope the receipt check
+      // above already dropped the group.)
+      let inPageDelivered = false;
+      if (browserMode === "in-page") {
+        inPageDelivered = this.deliverMentionFrame(g.userId, {
+          roomId:     g.roomId,
+          threadId:   g.threadId ?? undefined,
+          messageId:  lastMessageId,
+          roomName:   g.roomName || "room",
+          authorName: g.latestSnippet ? [...g.authors].join(", ") : "someone",
+          snippet:    buildSnippet(snippet),
+          count,
+          createdAt:  g.latestCreatedAt,
+          roomUrl,
+        });
+      }
+
+      // Channel 2: Google Chat webhook. Used when in-page wasn't delivered
+      // (no open WS, or feature disabled) — the fallback for users who
+      // aren't currently at their desk.
+      if (inPageDelivered) {
+        const ids = g.rows.map(r => r.id);
+        this.markSent(ids, now);
+        sent += ids.length;
+        continue;
+      }
       if (!webhookUrl || !gid) {
         const ids = g.rows.map(r => r.id);
         this.markDropped(ids, now, !webhookUrl ? "no-webhook" : "no-gchat-id");
         dropped += ids.length;
         continue;
       }
-
-      // Build the summary. One ping covers every queued mention; we
-      // include a count when there's more than one so the recipient knows
-      // they missed a burst.
-      const count = g.rows.length;
-      const snippet = count > 1
-        ? `${count} new mentions — latest: ${g.latestSnippet}`
-        : g.latestSnippet;
-      const roomUrl = pickRoomUrl({
-        baseUrl:   baseUrl ?? undefined,
-        roomId:    g.roomId,
-        threadId:  g.threadId ?? undefined,
-        messageId: g.rows[g.rows.length - 1]?.message_id,
-      });
-
       const ok = await sendGChatMention({
         webhookUrl,
         googleChatUserId: gid,
@@ -768,6 +833,39 @@ export class App extends Server<Env> {
    * path as PUT /me/receipts). Broadcasts a `receipt` frame per user so
    * their other tabs see the update.
    */
+  /**
+   * Fan a `mention` frame out to every connection tagged with `userId`.
+   * Returns true when at least one frame was sent — lets the drain pass
+   * suppress the Google Chat fallback for users we already reached.
+   *
+   * The frame shape mirrors the queue row's grouped summary so the client
+   * can render a Notification (or DOM toast) directly without round-tripping.
+   */
+  private deliverMentionFrame(userId: string, payload: {
+    roomId:     string;
+    threadId?:  string;
+    messageId:  string;
+    roomName:   string;
+    authorName: string;
+    snippet:    string;
+    count:      number;
+    createdAt:  number;
+    roomUrl?:   string;
+  }): boolean {
+    const frame = JSON.stringify({ type: "mention", ...payload });
+    let delivered = false;
+    for (const conn of this.getConnections<{ userId?: string }>()) {
+      if (conn.state?.userId !== userId) continue;
+      try {
+        conn.send(frame);
+        delivered = true;
+      } catch {
+        // Connection in a bad state; ignore — the WS layer will close it.
+      }
+    }
+    return delivered;
+  }
+
   private autoAdvanceFocusedReceipts(scope: ReceiptScope, scopeId: string, lastActivity: number): void {
     const cutoff = Date.now() - App.PRESENCE_TTL_MS;
     const targets: string[] = [];

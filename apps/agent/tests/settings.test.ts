@@ -20,7 +20,7 @@ describe("App /me/settings", () => {
     await touch(VENKMAN);
     const res = await appStub().fetch(asUser("https://app/me/settings", VENKMAN));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ googleChatUserId: null });
+    expect(await res.json()).toMatchObject({ googleChatUserId: null });
   });
 
   it("persists a valid Google Chat user ID and reads it back", async () => {
@@ -31,10 +31,10 @@ describe("App /me/settings", () => {
       body:    JSON.stringify({ googleChatUserId: "115736912860088353887" }),
     }));
     expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ googleChatUserId: "115736912860088353887" });
+    expect(await put.json()).toMatchObject({ googleChatUserId: "115736912860088353887" });
 
     const get = await appStub().fetch(asUser("https://app/me/settings", VENKMAN));
-    expect(await get.json()).toEqual({ googleChatUserId: "115736912860088353887" });
+    expect(await get.json()).toMatchObject({ googleChatUserId: "115736912860088353887" });
   });
 
   it("rejects non-numeric IDs", async () => {
@@ -59,7 +59,7 @@ describe("App /me/settings", () => {
       headers: { "content-type": "application/json" },
       body:    JSON.stringify({ googleChatUserId: null }),
     }));
-    expect(await put.json()).toEqual({ googleChatUserId: null });
+    expect(await put.json()).toMatchObject({ googleChatUserId: null });
   });
 
   it("scopes per-user — STANTZ can't see VENKMAN's setting", async () => {
@@ -71,6 +71,6 @@ describe("App /me/settings", () => {
       body:    JSON.stringify({ googleChatUserId: "999999999" }),
     }));
     const res = await appStub().fetch(asUser("https://app/me/settings", STANTZ));
-    expect(await res.json()).toEqual({ googleChatUserId: null });
+    expect(await res.json()).toMatchObject({ googleChatUserId: null });
   });
 });
