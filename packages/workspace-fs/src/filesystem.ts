@@ -1,6 +1,6 @@
 import { createWorkspaceError } from "./errors.js";
 import { canonicalizePath } from "./path.js";
-import { initializeSchema } from "./schema.js";
+import { initializeSchema } from "./schema/index.js";
 import { Database } from "./storage.js";
 import type {
   DurableObjectStorageLike,

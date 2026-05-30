@@ -32,9 +32,11 @@ with two naming decisions applied:
 - `findFiles` is exposed as `find`.
 - `listFilesUnder` is exposed as `ls`.
 
-Initial implementation status:
+Implementation status:
 
-- Package scaffold and public types are in place.
-- Durable Object SQL storage adapter is started.
-- Schema initialization for the documented `cf_vfs_*` tables is started.
-- Filesystem behavior beyond initialization is not implemented yet.
+- Package scaffold and public types in place.
+- Durable Object SQL storage adapter (`Database` wrapper) implemented.
+- Schema initialization for the documented `cf_vfs_*` tables (FS and sync) implemented and split into `schema/core.ts` + `schema/sync.ts`.
+- `incrementRev()` shared sequencer in place; FS writes will stamp the returned value into `cf_vfs_nodes.rev` and pass it to `sync/changes.ts` for tombstones.
+- `SqliteTestStorage` (backed by `node:sqlite`) available from `./testing` for unit tests against a real in-memory database.
+- Filesystem methods (`readFile`, `writeFile`, `rm`, `mkdir`, `readdir`, `stat`, `find`, `ls`, `grep`) are scaffolded but not yet implemented — see [`../../PLAN.md`](../../PLAN.md) for the implementation roadmap.
