@@ -247,3 +247,34 @@ describe("WireError propagation", () => {
     expect((caught as Error).message).toMatch(/no such file/);
   });
 });
+
+import { assertAppliedPushRev } from "@cloudflare/workspace-fs";
+
+describe("cross-side invariant", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("push returns a {rev, appliedPushRev} that satisfies appliedPushRev >= 0", async () => {
+    harness = await startHarness();
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const empty = new ReadableStream<ChangeEntry>({
+        start(c) {
+          c.close();
+        },
+      });
+      const result = await client.push(empty);
+      expect(result.appliedPushRev).toBeGreaterThanOrEqual(0);
+      // The DO would pass result.appliedPushRev as `applied`
+      // and its own pushRev counter as `pushed`. With the
+      // container reporting >= 0 and the DO holding 0 at this
+      // point, the invariant holds.
+      expect(() => assertAppliedPushRev(result.appliedPushRev, 0)).not.toThrow();
+    } finally {
+      await client.close();
+    }
+  });
+});
