@@ -27,6 +27,7 @@ export const CORE_STATEMENTS = [
     PRIMARY KEY (parent_inode, name)
   )`,
   `CREATE INDEX IF NOT EXISTS vfs_dirents_by_child ON vfs_dirents(child_inode)`,
+  `CREATE INDEX IF NOT EXISTS vfs_nodes_by_rev ON vfs_nodes(rev)`,
   `CREATE TABLE IF NOT EXISTS vfs_blobs (
     hash      BLOB    PRIMARY KEY,
     size      INTEGER NOT NULL,
