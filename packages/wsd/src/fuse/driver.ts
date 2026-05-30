@@ -10,11 +10,12 @@ const ERRNO = {
   EINVAL: -22,
   ENOTEMPTY: -39,
   ENODATA: -61,
+  ENOSYS: -38,
 } as const;
 
 type StatusCallback = (errnoOrBytes: number) => void;
 type ResultCallback<T> = (errno: number, result: T) => void;
-type NotImplementedOperation = (...args: unknown[]) => never;
+type NotImplementedOperation = (...args: unknown[]) => void;
 
 export class NotImplementedError extends Error {
   constructor(readonly operation: string) {
@@ -49,15 +50,15 @@ export interface FuseOps {
   chown(path: string, uid: number, gid: number, cb: StatusCallback): void;
   fsync(path: string, fh: number, datasync: number, cb: StatusCallback): void;
   fsyncdir(path: string, fh: number, datasync: number, cb: StatusCallback): void;
-  utimens: NotImplementedOperation;
-  readlink: NotImplementedOperation;
+  utimens(path: string, atime: number, mtime: number, cb: StatusCallback): void;
+  readlink(path: string, cb: ResultCallback<string>): void;
   mknod: NotImplementedOperation;
   setxattr(path: string, name: string, value: Buffer, position: number, flags: number, cb: StatusCallback): void;
   getxattr(path: string, name: string, position: number, cb: StatusCallback): void;
   listxattr(path: string, cb: ResultCallback<Buffer>): void;
   removexattr(path: string, name: string, cb: StatusCallback): void;
   link: NotImplementedOperation;
-  symlink: NotImplementedOperation;
+  symlink(target: string, path: string, cb: StatusCallback): void;
 }
 
 export interface FuseStat {
@@ -85,6 +86,20 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     return handle;
   };
 
+  // Sidecar metadata. platformatic VFS has no chmod/chown/utimes, so we store
+  // overrides here and merge them into getattr.
+  interface MetaOverride {
+    mode?: number;
+    uid?: number;
+    gid?: number;
+    atime?: Date;
+    mtime?: Date;
+  }
+  const meta = new Map<string, MetaOverride>();
+  const updateMeta = (path: string, patch: MetaOverride): void => {
+    meta.set(path, { ...meta.get(path), ...patch });
+  };
+
   return {
     init(cb) {
       cb?.(0);
@@ -102,7 +117,19 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     getattr(path, cb) {
       try {
-        cb(0, statNode(vfs.statSync(path)));
+        const stat = statNode(vfs.lstatSync(path));
+        const override = meta.get(path);
+        if (override) {
+          if (override.mode !== undefined) {
+            // Preserve file-type bits (S_IFMT) from the VFS, override perm bits.
+            stat.mode = (stat.mode & 0o170000) | (override.mode & 0o7777);
+          }
+          if (override.uid !== undefined) stat.uid = override.uid;
+          if (override.gid !== undefined) stat.gid = override.gid;
+          if (override.atime) stat.atime = override.atime;
+          if (override.mtime) stat.mtime = override.mtime;
+        }
+        cb(0, stat);
       } catch (error) {
         cb(toErrno(error), null);
       }
@@ -214,6 +241,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     unlink(path, cb) {
       try {
         vfs.unlinkSync(path);
+        meta.delete(path);
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -241,6 +269,11 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     rename(source, destination, cb) {
       try {
         vfs.renameSync(source, destination);
+        const m = meta.get(source);
+        if (m !== undefined) {
+          meta.delete(source);
+          meta.set(destination, m);
+        }
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -272,11 +305,21 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
       });
     },
 
-    chmod(_path, _mode, cb) {
+    chmod(path, mode, cb) {
+      if (!vfs.existsSync(path)) {
+        cb(ERRNO.ENOENT);
+        return;
+      }
+      updateMeta(path, { mode });
       cb(0);
     },
 
-    chown(_path, _uid, _gid, cb) {
+    chown(path, uid, gid, cb) {
+      if (!vfs.existsSync(path)) {
+        cb(ERRNO.ENOENT);
+        return;
+      }
+      updateMeta(path, { uid, gid });
       cb(0);
     },
 
@@ -288,8 +331,24 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
       cb(0);
     },
 
-    utimens: notImplemented("utimens"),
-    readlink: notImplemented("readlink"),
+    utimens(path, atime, mtime, cb) {
+      if (!vfs.existsSync(path)) {
+        cb(ERRNO.ENOENT);
+        return;
+      }
+      // Note: with libfuse2/fuse-native, touch -a / touch -m alone do not
+      // reach this op — the kernel/libfuse short-circuits when only one of
+      // atime/mtime is provided (UTIME_OMIT). touch with both set works.
+      updateMeta(path, { atime: new Date(atime), mtime: new Date(mtime) });
+      cb(0);
+    },
+    readlink(path, cb) {
+      try {
+        cb(0, vfs.readlinkSync(path));
+      } catch (error) {
+        cb(toErrno(error), "");
+      }
+    },
     mknod: notImplemented("mknod"),
 
     setxattr(path, _name, _value, _position, _flags, cb) {
@@ -309,7 +368,14 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     link: notImplemented("link"),
-    symlink: notImplemented("symlink"),
+    symlink(target, path, cb) {
+      try {
+        vfs.symlinkSync(target, path);
+        cb(0);
+      } catch (error) {
+        cb(toErrno(error));
+      }
+    },
   };
 }
 
@@ -324,7 +390,19 @@ export async function mountFuse(options: {
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
     debug: false,
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
+
+  // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read
+  // through opts, so monkey-patch _fuseOptions() to append them. big_writes
+  // lets the kernel batch up to max_write bytes per FUSE op instead of the
+  // default 4 KiB, cutting per-op round-trips ~32x on large sequential I/O.
+  const origFuseOptions = fuse._fuseOptions.bind(fuse);
+  fuse._fuseOptions = (): string => {
+    const base = origFuseOptions();
+    const extra = "big_writes,max_write=131072,max_read=131072";
+    return base ? `${base},${extra}` : `-o${extra}`;
+  };
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("FUSE mount timed out after 5s")), 5_000);
@@ -383,9 +461,17 @@ function truncate(vfs: NodeVirtualFileSystem, path: string, size: number): void 
   vfs.writeFileSync(path, next);
 }
 
+const warnedOperations = new Set<string>();
 function notImplemented(operation: string): NotImplementedOperation {
-  return () => {
-    throw new NotImplementedError(operation);
+  return (...args: unknown[]) => {
+    if (!warnedOperations.has(operation)) {
+      warnedOperations.add(operation);
+      console.warn(`wsd: FUSE op ${operation} not implemented; returning ENOSYS`);
+    }
+    const cb = args[args.length - 1];
+    if (typeof cb === "function") {
+      (cb as (errno: number, ...rest: unknown[]) => void)(ERRNO.ENOSYS);
+    }
   };
 }
 

@@ -19,7 +19,7 @@ const fuseNativeOperationNames = [
   "release", "releasedir", "create", "unlink", "rename", "link", "symlink", "mkdir", "rmdir",
 ];
 
-const notImplementedOperationNames = ["error", "utimens", "readlink", "mknod", "link", "symlink"];
+const notImplementedOperationNames = ["error", "mknod", "link"];
 
 test("FUSE ops expose the complete fuse-native operation surface", () => {
   const ops = makeFUSEOps(createNodeVirtualFileSystem());
@@ -29,15 +29,17 @@ test("FUSE ops expose the complete fuse-native operation surface", () => {
   }
 });
 
-test("not-yet-implemented FUSE ops raise NotImplementedError", () => {
+test("not-yet-implemented FUSE ops invoke their callback with ENOSYS", async () => {
   const ops = makeFUSEOps(createNodeVirtualFileSystem());
+  const ENOSYS = -38;
 
   for (const name of notImplementedOperationNames) {
-    assert.throws(
-      () => ops[name](),
-      (error: unknown) => error instanceof NotImplementedError && error.operation === name,
-      `${name} should raise NotImplementedError`,
-    );
+    if (name === "error") continue; // error has no callback arg
+    const errno = await new Promise<number>((resolve) => {
+      // Call with a single argument: the callback.
+      (ops as Record<string, (...args: unknown[]) => void>)[name](resolve);
+    });
+    assert.equal(errno, ENOSYS, `${name} should return ENOSYS`);
   }
 });
 
@@ -101,6 +103,8 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
   assert.equal(Buffer.isBuffer(xattrs.result), true);
   assert.equal((xattrs.result as Buffer).length, 0);
   assert.equal(await status((cb) => ops.removexattr("/dir/file.txt", "user.test", cb)), -61);
+  assert.equal(await status((cb) => ops.utimens("/dir/file.txt", Date.now(), Date.now(), cb)), 0);
+  assert.equal(await status((cb) => ops.utimens("/missing", Date.now(), Date.now(), cb)), -2);
 
   assert.equal(await status((cb) => ops.rename("/dir/file.txt", "/dir/renamed.txt", cb)), 0);
   assert.equal(vfs.readFileSync("/dir/renamed.txt").toString(), "hello fuse");
