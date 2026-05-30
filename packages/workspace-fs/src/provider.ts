@@ -1,4 +1,4 @@
-// SqliteWorkspaceProvider — a @platformatic/vfs VirtualProvider backed
+// SQLiteWorkspaceProvider — a @platformatic/vfs VirtualProvider backed
 // by the workspace-fs SQLite store.
 //
 // Every method on VirtualProvider is declared. Methods we already have
@@ -18,7 +18,7 @@ import { writeFileSync as writeFileSyncImpl } from "./fs/writeFile.js";
 import { canonicalizePath } from "./path.js";
 import type { Database } from "./storage.js";
 
-export interface SqliteWorkspaceProviderOptions {
+export interface SQLiteWorkspaceProviderOptions {
   // Wall-clock source. Defaults to Date.now so production callers
   // don't need to thread one through; tests pin it.
   now?: () => number;
@@ -65,7 +65,17 @@ interface VirtualDirentLike {
   isSocket(): boolean;
 }
 
-export class SqliteWorkspaceProvider {
+interface FdState {
+  path: string;
+  position: number;
+  readable: boolean;
+  writable: boolean;
+  // append mode pins every writeSync to current EOF rather than
+  // honouring an explicit position argument.
+  append: boolean;
+}
+
+export class SQLiteWorkspaceProvider {
   readonly db: Database;
   readonly now: () => number;
 
@@ -74,19 +84,54 @@ export class SqliteWorkspaceProvider {
   readonly supportsSymlinks = false;
   readonly supportsWatch = false;
 
-  constructor(db: Database, options: SqliteWorkspaceProviderOptions = {}) {
+  // Fd table. Start at 3 — 0/1/2 are reserved by convention even
+  // though we don't expose them — so consumers that pass them around
+  // can't accidentally collide with stdio mental models.
+  #fds = new Map<number, FdState>();
+  #nextFd = 3;
+
+  constructor(db: Database, options: SQLiteWorkspaceProviderOptions = {}) {
     this.db = db;
     this.now = options.now ?? Date.now;
   }
 
   // -- Essential primitives ------------------------------------------
 
-  open(_path: string, _flags?: string, _mode?: number): Promise<unknown> {
-    return Promise.reject(notImplemented("open"));
+  open(path: string, flags?: string, mode?: number): Promise<number> {
+    return Promise.resolve(this.openSync(path, flags, mode));
   }
 
-  openSync(_path: string, _flags?: string, _mode?: number): unknown {
-    throw notImplemented("openSync");
+  openSync(path: string, flags: string = "r", _mode?: number): number {
+    const { read, write, truncate, append, create, exclusive } = parseFlags(flags);
+    const existing = resolveInode(this.db, path);
+
+    if (existing === null) {
+      if (!create) {
+        throw createWorkspaceError("ENOENT", `no such file: ${path}`, path);
+      }
+      writeFileSyncImpl(this.db, path, new Uint8Array(), {}, this.now);
+    } else {
+      if (existing.type !== "file") {
+        throw createWorkspaceError("EISDIR", `path is a directory: ${path}`, path);
+      }
+      if (exclusive) {
+        throw createWorkspaceError("EEXIST", `path exists: ${path}`, path);
+      }
+      if (truncate) {
+        writeFileSyncImpl(this.db, path, new Uint8Array(), {}, this.now);
+      }
+    }
+
+    const stat = statImpl(this.db, path);
+    const fd = this.#nextFd++;
+    this.#fds.set(fd, {
+      path,
+      position: append ? stat.size : 0,
+      readable: read,
+      writable: write,
+      append,
+    });
+    return fd;
   }
 
   stat(path: string, options?: { bigint?: boolean }): Promise<VirtualStatsLike> {
@@ -330,44 +375,102 @@ export class SqliteWorkspaceProvider {
     }
   }
 
-  // -- File descriptors (stubbed) ------------------------------------
-  // Implemented in a follow-up commit. The provider scaffold declares
-  // them all so missing surface is visible.
+  // -- File descriptors ----------------------------------------------
 
-  closeSync(_fd: number): void {
-    throw notImplemented("closeSync");
+  closeSync(fd: number): void {
+    if (!this.#fds.delete(fd)) {
+      throw createWorkspaceError("EBADF", `unknown fd ${fd}`);
+    }
   }
 
   readSync(
-    _fd: number,
-    _buffer: Buffer | Uint8Array,
-    _offset: number,
-    _length: number,
-    _position: number | null,
+    fd: number,
+    buffer: Buffer | Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
   ): number {
-    throw notImplemented("readSync");
+    const state = this.#fdOrThrow(fd);
+    if (!state.readable) {
+      throw createWorkspaceError("EBADF", `fd ${fd} is not readable`);
+    }
+    const startAt = position ?? state.position;
+    const bytes = readFileBytesSync(this.db, state.path);
+    if (startAt >= bytes.byteLength) {
+      return 0;
+    }
+    const end = Math.min(startAt + length, bytes.byteLength);
+    const n = end - startAt;
+    const view =
+      buffer instanceof Buffer
+        ? buffer
+        : Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    view.set(bytes.subarray(startAt, end), offset);
+    if (position === null || position === undefined) {
+      state.position += n;
+    }
+    return n;
   }
 
   writeSync(
-    _fd: number,
-    _buffer: Buffer | Uint8Array,
-    _offset?: number,
-    _length?: number,
-    _position?: number | null,
+    fd: number,
+    buffer: Buffer | Uint8Array,
+    offset: number = 0,
+    length: number = buffer.byteLength - offset,
+    position: number | null = null,
   ): number {
-    throw notImplemented("writeSync");
+    const state = this.#fdOrThrow(fd);
+    if (!state.writable) {
+      throw createWorkspaceError("EBADF", `fd ${fd} is not writable`);
+    }
+    const existing = readFileBytesSync(this.db, state.path);
+    const startAt = state.append ? existing.byteLength : (position ?? state.position);
+    const next = spliceBytes(existing, startAt, buffer, offset, length);
+    writeFileSyncImpl(this.db, state.path, next, {}, this.now);
+    if (position === null || position === undefined) {
+      state.position = startAt + length;
+    }
+    return length;
   }
 
-  fstatSync(_fd: number, _options?: { bigint?: boolean }): VirtualStatsLike {
-    throw notImplemented("fstatSync");
+  fstatSync(fd: number, _options?: { bigint?: boolean }): VirtualStatsLike {
+    const state = this.#fdOrThrow(fd);
+    return this.statSync(state.path);
   }
 
-  truncateSync(_path: string, _len: number): void {
-    throw notImplemented("truncateSync");
+  truncateSync(path: string, len: number): void {
+    const node = resolveInode(this.db, path);
+    if (node === null) {
+      throw createWorkspaceError("ENOENT", `no such path: ${path}`, path);
+    }
+    if (node.type !== "file") {
+      throw createWorkspaceError("EISDIR", `path is a directory: ${path}`, path);
+    }
+    const existing = readFileBytesSync(this.db, path);
+    if (existing.byteLength === len) {
+      return;
+    }
+    let next: Uint8Array;
+    if (len < existing.byteLength) {
+      next = existing.subarray(0, len);
+    } else {
+      next = new Uint8Array(len);
+      next.set(existing, 0);
+    }
+    writeFileSyncImpl(this.db, path, next, {}, this.now);
   }
 
-  ftruncateSync(_fd: number, _len: number): void {
-    throw notImplemented("ftruncateSync");
+  ftruncateSync(fd: number, len: number): void {
+    const state = this.#fdOrThrow(fd);
+    this.truncateSync(state.path, len);
+  }
+
+  #fdOrThrow(fd: number): FdState {
+    const state = this.#fds.get(fd);
+    if (state === undefined) {
+      throw createWorkspaceError("EBADF", `unknown fd ${fd}`);
+    }
+    return state;
   }
 
   // -- Symlinks (stubbed) --------------------------------------------
@@ -415,7 +518,7 @@ export class SqliteWorkspaceProvider {
 }
 
 function notImplemented(method: string) {
-  return createWorkspaceError("ENOSYS", `SqliteWorkspaceProvider.${method} is not implemented yet`);
+  return createWorkspaceError("ENOSYS", `SQLiteWorkspaceProvider.${method} is not implemented yet`);
 }
 
 // -- VirtualStats / VirtualDirent shim ------------------------------
@@ -488,4 +591,169 @@ function wrapDirent(input: DirentInput): VirtualDirentLike {
     isFIFO: () => false,
     isSocket: () => false,
   };
+}
+
+interface ParsedFlags {
+  read: boolean;
+  write: boolean;
+  create: boolean;
+  truncate: boolean;
+  append: boolean;
+  exclusive: boolean;
+}
+
+// Translate Node's fs flag strings into the boolean flag set the fd
+// table uses. Mirrors the documented behaviour of fs.open(flags) at
+// https://nodejs.org/api/fs.html#file-system-flags.
+function parseFlags(flags: string): ParsedFlags {
+  switch (flags) {
+    case "r":
+      return {
+        read: true,
+        write: false,
+        create: false,
+        truncate: false,
+        append: false,
+        exclusive: false,
+      };
+    case "r+":
+      return {
+        read: true,
+        write: true,
+        create: false,
+        truncate: false,
+        append: false,
+        exclusive: false,
+      };
+    case "w":
+      return {
+        read: false,
+        write: true,
+        create: true,
+        truncate: true,
+        append: false,
+        exclusive: false,
+      };
+    case "w+":
+      return {
+        read: true,
+        write: true,
+        create: true,
+        truncate: true,
+        append: false,
+        exclusive: false,
+      };
+    case "wx":
+      return {
+        read: false,
+        write: true,
+        create: true,
+        truncate: false,
+        append: false,
+        exclusive: true,
+      };
+    case "wx+":
+      return {
+        read: true,
+        write: true,
+        create: true,
+        truncate: false,
+        append: false,
+        exclusive: true,
+      };
+    case "a":
+      return {
+        read: false,
+        write: true,
+        create: true,
+        truncate: false,
+        append: true,
+        exclusive: false,
+      };
+    case "a+":
+      return {
+        read: true,
+        write: true,
+        create: true,
+        truncate: false,
+        append: true,
+        exclusive: false,
+      };
+    case "ax":
+      return {
+        read: false,
+        write: true,
+        create: true,
+        truncate: false,
+        append: true,
+        exclusive: true,
+      };
+    case "ax+":
+      return {
+        read: true,
+        write: true,
+        create: true,
+        truncate: false,
+        append: true,
+        exclusive: true,
+      };
+    default:
+      throw createWorkspaceError("EINVAL", `unsupported fs flag: ${flags}`);
+  }
+}
+
+// Pull a file's full content out of the chunk store into one buffer.
+// Used by the fd-positional code paths because the simplest correct
+// model for writeSync/truncate is "read whole file, splice, write
+// whole file"; the content-addressed write path keeps untouched
+// chunks deduped so this only costs the changed chunks on the wire.
+function readFileBytesSync(db: Database, path: string): Uint8Array {
+  const node = resolveInode(db, path);
+  if (node === null) {
+    throw createWorkspaceError("ENOENT", `no such file: ${path}`, path);
+  }
+  if (node.type !== "file") {
+    throw createWorkspaceError("EISDIR", `path is a directory: ${path}`, path);
+  }
+  const chunks = db.all<{ hash: Uint8Array; size: number }>(
+    "SELECT hash, size FROM vfs_chunks WHERE inode = ? ORDER BY idx",
+    node.inode,
+  );
+  let total = 0;
+  for (const c of chunks) total += c.size;
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const chunk of chunks) {
+    const row = db.one<{ bytes: Uint8Array }>(
+      "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
+      chunk.hash,
+    );
+    if (row === undefined) {
+      throw createWorkspaceError("EIO", `missing blob bytes for ${path}`, path);
+    }
+    out.set(row.bytes, pos);
+    pos += row.bytes.byteLength;
+  }
+  return out;
+}
+
+// Splice `length` bytes from `src[srcOffset..]` into a copy of `dst`
+// at `at`. The result is at least as long as max(dst.length, at + length).
+// Bytes in `[dst.length, at)` are zero-filled (writing past EOF).
+function spliceBytes(
+  dst: Uint8Array,
+  at: number,
+  src: Uint8Array | Buffer,
+  srcOffset: number,
+  length: number,
+): Uint8Array {
+  const newLength = Math.max(dst.byteLength, at + length);
+  const out = new Uint8Array(newLength);
+  out.set(dst, 0);
+  const srcView =
+    src instanceof Uint8Array
+      ? src.subarray(srcOffset, srcOffset + length)
+      : new Uint8Array(src.buffer, src.byteOffset + srcOffset, length);
+  out.set(srcView, at);
+  return out;
 }

@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { SqliteWorkspaceProvider } from "./provider.js";
+import { SQLiteWorkspaceProvider } from "./provider.js";
 import { initializeSchema } from "./schema/index.js";
 import { Database } from "./storage.js";
-import { SqliteTestStorage } from "./testing.js";
+import { SQLiteTestStorage } from "./testing.js";
 
-// The provider tests use SqliteTestStorage directly rather than the
+// The provider tests use SQLiteTestStorage directly rather than the
 // shared withDB helper because withDB targets the FS-method API, not
 // the provider. Provider tests are deliberately node-only for now \u2014
 // once we wire the provider into wsd we will add a workers conformance
 // project too.
 function makeProvider() {
-  const storage = new SqliteTestStorage();
+  const storage = new SQLiteTestStorage();
   const db = new Database(storage);
   initializeSchema(db, () => 1000);
-  return new SqliteWorkspaceProvider(db, { now: () => 1000 });
+  return new SQLiteWorkspaceProvider(db, { now: () => 1000 });
 }
 
-describe("SqliteWorkspaceProvider — capability flags", () => {
+describe("SQLiteWorkspaceProvider — capability flags", () => {
   it("reports the supported feature set", () => {
     const p = makeProvider();
     expect(p.readonly).toBe(false);
@@ -25,7 +25,7 @@ describe("SqliteWorkspaceProvider — capability flags", () => {
   });
 });
 
-describe("SqliteWorkspaceProvider — implemented methods", () => {
+describe("SQLiteWorkspaceProvider — implemented methods", () => {
   it("mkdirSync creates a directory", () => {
     const p = makeProvider();
     p.mkdirSync("/a", { mode: 0o755 });
@@ -122,19 +122,15 @@ describe("SqliteWorkspaceProvider — implemented methods", () => {
   });
 });
 
-describe("SqliteWorkspaceProvider — unimplemented surface (stubs)", () => {
+describe("SQLiteWorkspaceProvider — unimplemented surface (stubs)", () => {
   it.each([
-    ["openSync", (p: SqliteWorkspaceProvider) => p.openSync("/x")],
-    ["closeSync", (p: SqliteWorkspaceProvider) => p.closeSync(1)],
-    ["readSync", (p: SqliteWorkspaceProvider) => p.readSync(1, Buffer.alloc(1), 0, 1, 0)],
-    ["writeSync", (p: SqliteWorkspaceProvider) => p.writeSync(1, Buffer.alloc(1), 0, 1, 0)],
-    ["fstatSync", (p: SqliteWorkspaceProvider) => p.fstatSync(1)],
-    ["truncateSync", (p: SqliteWorkspaceProvider) => p.truncateSync("/x", 0)],
-    ["ftruncateSync", (p: SqliteWorkspaceProvider) => p.ftruncateSync(1, 0)],
-    ["symlinkSync", (p: SqliteWorkspaceProvider) => p.symlinkSync("/a", "/b")],
-    ["readlinkSync", (p: SqliteWorkspaceProvider) => p.readlinkSync("/x")],
-    ["watch", (p: SqliteWorkspaceProvider) => p.watch("/x")],
-    ["watchFile", (p: SqliteWorkspaceProvider) => p.watchFile("/x")],
+    ["appendFileSync", (p: SQLiteWorkspaceProvider) => p.appendFileSync("/x", "y")],
+    ["copyFileSync", (p: SQLiteWorkspaceProvider) => p.copyFileSync("/x", "/y")],
+    ["internalModuleStat", (p: SQLiteWorkspaceProvider) => p.internalModuleStat("/x")],
+    ["symlinkSync", (p: SQLiteWorkspaceProvider) => p.symlinkSync("/a", "/b")],
+    ["readlinkSync", (p: SQLiteWorkspaceProvider) => p.readlinkSync("/x")],
+    ["watch", (p: SQLiteWorkspaceProvider) => p.watch("/x")],
+    ["watchFile", (p: SQLiteWorkspaceProvider) => p.watchFile("/x")],
   ])("%s throws ENOSYS", (_name, call) => {
     const p = makeProvider();
     expect(() => call(p)).toThrowError(expect.objectContaining({ code: "ENOSYS" }));
