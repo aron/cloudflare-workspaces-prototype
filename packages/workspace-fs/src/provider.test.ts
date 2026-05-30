@@ -39,7 +39,9 @@ describe("SQLiteWorkspaceProvider — implemented methods", () => {
     expect(s.isDirectory()).toBe(true);
     expect(s.isFile()).toBe(false);
     expect(s.isSymbolicLink()).toBe(false);
-    expect(s.mode).toBe(0o755);
+    // 0o40755 — S_IFDIR or permissions. Linux FUSE rejects a
+    // stat without the file-type bits, so we always set them.
+    expect(s.mode).toBe(0o40755);
     expect(typeof s.ino).toBe("number");
     expect(typeof s.mtimeMs).toBe("number");
     expect(s.mtime).toBeInstanceOf(Date);

@@ -255,6 +255,38 @@ export class SQLiteWorkspaceProvider {
       );
     }
     this.db.transactionSync(() => {
+      // If the destination already exists, displace it before linking
+      // the source dirent. POSIX rename(2) is atomic and overwrites a
+      // regular file or empty directory at the target. We follow the
+      // same semantics: an existing file at newPath is unlinked, and
+      // its inode (and chunks / blobs) are reaped via the existing
+      // gc() safety window.
+      const existing = this.db.one<{ child_inode: number; type: string }>(
+        `SELECT d.child_inode AS child_inode, n.type AS type
+         FROM vfs_dirents d JOIN vfs_nodes n ON n.inode = d.child_inode
+         WHERE d.parent_inode = ? AND d.name = ?`,
+        newParent.inode,
+        newName,
+      );
+      if (existing !== undefined && existing.child_inode !== node.inode) {
+        // Refuse to overwrite a non-empty directory or replace a
+        // directory with a file (Linux rename semantics).
+        if (existing.type === "dir") {
+          const childCount = this.db.scalar<number>(
+            "SELECT COUNT(*) FROM vfs_dirents WHERE parent_inode = ?",
+            existing.child_inode,
+          );
+          if ((childCount ?? 0) > 0) {
+            throw createWorkspaceError("ENOTEMPTY", `not empty: ${newCanonical}`, newCanonical);
+          }
+        }
+        // Unlink the displaced inode. vfs_chunks / vfs_blob_bytes
+        // referenced by file chunks become orphaned and gc() reaps
+        // them after the safety window.
+        this.db.run("DELETE FROM vfs_dirents WHERE child_inode = ?", existing.child_inode);
+        this.db.run("DELETE FROM vfs_chunks WHERE inode = ?", existing.child_inode);
+        this.db.run("DELETE FROM vfs_nodes WHERE inode = ?", existing.child_inode);
+      }
       this.db.run("DELETE FROM vfs_dirents WHERE child_inode = ?", node.inode);
       this.db.run(
         "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
@@ -560,11 +592,25 @@ interface StatsInputs {
   isSymbolicLink: boolean;
 }
 
+// POSIX mode-bit constants. Linux FUSE rejects a stat whose mode
+// has no S_IF* bits set with EIO — it can't decide whether
+// the inode is a regular file, a directory, or a symlink.
+const S_IFREG = 0o100000;
+const S_IFDIR = 0o040000;
+const S_IFLNK = 0o120000;
+
+function fileTypeBits(input: StatsInputs): number {
+  if (input.isDirectory) return S_IFDIR;
+  if (input.isSymbolicLink) return S_IFLNK;
+  if (input.isFile) return S_IFREG;
+  return 0;
+}
+
 function wrapStats(input: StatsInputs): VirtualStatsLike {
   const mtime = new Date(input.mtimeMs);
   return {
     dev: 0,
-    mode: input.mode,
+    mode: (input.mode & 0o7777) | fileTypeBits(input),
     nlink: 1,
     uid: 0,
     gid: 0,
