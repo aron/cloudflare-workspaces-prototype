@@ -42,6 +42,7 @@ export type { ApplyOptions } from "./sync/apply.js";
 // @cloudflare/workspace-rpc; these are the helpers that wiring binds
 // to a Database.
 export { applyChanges } from "./sync/apply.js";
+export { stageBlob } from "./sync/blobs.js";
 export type { ChangeEntry } from "./sync/changes.js";
 export { materialiseChange } from "./sync/changes.js";
 export type { CoalesceOptions } from "./sync/coalesce.js";

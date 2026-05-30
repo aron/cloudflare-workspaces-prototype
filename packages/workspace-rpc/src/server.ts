@@ -15,7 +15,7 @@ import {
   hasObjects,
   pushObjects,
   readWatermark,
-  writeWatermark,
+  stageBlob,
 } from "@cloudflare/workspace-fs";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
@@ -80,12 +80,16 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
   async pushObjects(
     objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>,
   ): Promise<void> {
-    // Phase 5 R1 lands a stageBlob() helper that takes a hash/bytes
-    // pair and writes it into vfs_blobs + vfs_blob_bytes. Until then
-    // the sketch errors loudly so we don't silently drop bytes.
-    void objects;
-    void writeWatermark; // referenced by upcoming R-tasks
-    throw new Error("pushObjects: staging not implemented in the sketch");
+    const reader = objects.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stageBlob(this.db, value.hash, value.bytes, Date.now());
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 }
 

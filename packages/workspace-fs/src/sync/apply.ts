@@ -80,12 +80,21 @@ export async function applyChanges(
       if (pathsInBatch >= maxPaths) flush();
       continue;
     }
-    // file: assemble chunk bytes from the keyed map.
+    // file: assemble chunk bytes. First check the in-memory map
+    // (the streaming hand-off); fall back to vfs_blob_bytes (the
+    // staged-via-pushObjects path).
     const parts: Uint8Array[] = [];
     let total = 0;
     for (const c of entry.chunks) {
       const k = hex(c.hash);
-      const bytes = objects.get(k);
+      let bytes = objects.get(k);
+      if (bytes === undefined) {
+        const row = db.one<{ bytes: Uint8Array }>(
+          "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
+          c.hash,
+        );
+        bytes = row?.bytes;
+      }
       if (bytes === undefined) {
         throw new Error(`applyChanges: missing object ${k} for ${entry.path}`);
       }
