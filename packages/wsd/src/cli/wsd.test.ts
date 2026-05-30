@@ -6,6 +6,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { detectFUSEBackend } = require("../../dist/fuse/index.js");
 
 const packageRoot = path.resolve(__dirname, "../..");
 const cliPath = path.join(packageRoot, "dist", "cli", "wsd.cjs");
@@ -24,9 +25,9 @@ test("wsd rejects relative MOUNT_POINT values", async () => {
 });
 
 test("wsd exposes file IO through the mounted filesystem", async (t) => {
-  const reason = await fuseSkipReason();
-  if (reason !== undefined) {
-    t.skip(reason);
+  const backend = await detectFUSEBackend();
+  if (backend.kind === "none") {
+    t.skip(backend.reason);
     return;
   }
 
@@ -41,6 +42,14 @@ test("wsd exposes file IO through the mounted filesystem", async (t) => {
   const root = await request(`http://127.0.0.1:${port}/`);
   assert.equal(root.statusCode, 200);
   assert.deepEqual(JSON.parse(root.body), {});
+
+  const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
+  assert.equal(info.statusCode, 200);
+  assert.deepEqual(JSON.parse(info.body), {
+    backend,
+    mountPoint,
+    port,
+  });
 
   await fs.mkdir(path.join(mountPoint, "dir"));
   await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello fuse");
@@ -68,28 +77,6 @@ async function startWsd(t, { port, mountPoint }: { port: number; mountPoint: str
 
   await waitForHTTPOK(`http://127.0.0.1:${port}/health`, child, () => stderr || stdout);
   return child;
-}
-
-async function fuseSkipReason() {
-  if (process.platform === "linux") {
-    try {
-      await fs.access("/dev/fuse");
-      return undefined;
-    } catch {
-      return "FUSE smoke test skipped because /dev/fuse is unavailable";
-    }
-  }
-
-  if (process.platform === "darwin") {
-    try {
-      await fs.access("/Library/Filesystems/macfuse.fs");
-      return undefined;
-    } catch {
-      return "FUSE smoke test skipped because macFUSE is unavailable";
-    }
-  }
-
-  return `FUSE smoke test skipped on unsupported platform ${process.platform}`;
 }
 
 function getAvailablePort() {

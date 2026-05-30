@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "build:bin": "node ./scripts/build-bin.mjs",
-    "test": "npm run build && node --experimental-strip-types --test \"src/**/*.test.ts\""
+    "test": "npm run build && npx -y node@22 --experimental-strip-types --test \"src/**/*.test.ts\""
   },
   "engines": {
     "node": ">=22"

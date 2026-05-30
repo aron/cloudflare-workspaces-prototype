@@ -1,3 +1,4 @@
+import type { FUSEBackend } from "./backend.js";
 import type { NodeVirtualFileSystem } from "./vfs.js";
 
 const ERRNO = {
@@ -312,7 +313,12 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
   };
 }
 
-export async function mountFuse(options: { mountPoint: string; vfs: NodeVirtualFileSystem }): Promise<FuseMount> {
+export async function mountFuse(options: {
+  backend?: FUSEBackend;
+  mountPoint: string;
+  vfs: NodeVirtualFileSystem;
+}): Promise<FuseMount> {
+  configureFUSEDylibPath(options.backend);
   const module = await import("fuse-native");
   const Fuse = module.default ?? module;
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
@@ -347,6 +353,23 @@ export async function mountFuse(options: { mountPoint: string; vfs: NodeVirtualF
       });
     },
   };
+}
+
+function configureFUSEDylibPath(backend: FUSEBackend | undefined): void {
+  if (backend?.kind !== "fuse-t") {
+    return;
+  }
+
+  process.env.DYLD_FALLBACK_LIBRARY_PATH = prependPath(
+    process.env.DYLD_FALLBACK_LIBRARY_PATH,
+    backend.dylibDir,
+  );
+  process.env.DYLD_LIBRARY_PATH = prependPath(process.env.DYLD_LIBRARY_PATH, backend.dylibDir);
+}
+
+function prependPath(value: string | undefined, entry: string): string {
+  const entries = value?.split(":").filter(Boolean) ?? [];
+  return entries.includes(entry) ? entries.join(":") : [entry, ...entries].join(":");
 }
 
 function truncate(vfs: NodeVirtualFileSystem, path: string, size: number): void {

@@ -3,7 +3,13 @@
 import { mkdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isAbsolute } from "node:path";
-import { createNodeVirtualFileSystem, mountFuse, type FuseMount } from "../fuse/index.js";
+import {
+  createNodeVirtualFileSystem,
+  detectFUSEBackend,
+  mountFuse,
+  type FUSEBackend,
+  type FuseMount,
+} from "../fuse/index.js";
 
 const DEFAULT_PORT = 45678;
 const DEFAULT_MOUNT_POINT = "/workspace";
@@ -49,7 +55,13 @@ function requestPath(request: IncomingMessage): string {
   return url.pathname;
 }
 
-function createHTTPServer(): Server {
+interface WSDInfo {
+  backend: FUSEBackend;
+  mountPoint: string;
+  port: number;
+}
+
+function createHTTPServer(info: WSDInfo): Server {
   return createServer((request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
       send(response, 405, "method not allowed\n", {
@@ -64,6 +76,14 @@ function createHTTPServer(): Server {
       const body = request.method === "HEAD" ? "" : "ok\n";
       send(response, 200, body, {
         "content-type": "text/plain; charset=utf-8",
+      });
+      return;
+    }
+
+    if (path === "/__wsd/info") {
+      const body = request.method === "HEAD" ? "" : JSON.stringify(info);
+      send(response, 200, body, {
+        "content-type": "application/json; charset=utf-8",
       });
       return;
     }
@@ -98,11 +118,17 @@ async function closeServer(server: Server): Promise<void> {
 async function main(): Promise<void> {
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
+  const backend = await detectFUSEBackend();
+  if (backend.kind === "none") {
+    throw new Error(`FUSE backend unavailable: ${backend.reason}`);
+  }
+
   const vfs = createNodeVirtualFileSystem();
+  const info: WSDInfo = { backend, mountPoint, port };
 
   await mkdir(mountPoint, { recursive: true });
-  const fuse = await mountFuse({ mountPoint, vfs });
-  const server = createHTTPServer();
+  const fuse = await mountFuse({ backend, mountPoint, vfs });
+  const server = createHTTPServer(info);
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
@@ -126,7 +152,8 @@ async function main(): Promise<void> {
     server.listen(port, HOST, () => {
       const address = server.address();
       const boundPort = typeof address === "object" && address !== null ? address.port : port;
-      console.log(`wsd listening on ${HOST}:${boundPort} mount=${mountPoint}`);
+      info.port = boundPort;
+      console.log(`wsd listening on ${HOST}:${boundPort} mount=${mountPoint} backend=${backend.kind}`);
       resolve();
     });
   });

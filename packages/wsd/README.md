@@ -6,15 +6,16 @@ Workspace daemon CLI and FUSE mount package.
 
 `wsd` starts a FUSE-backed virtual filesystem and an HTTP server. The filesystem is backed by `node-vfs-polyfill`, while the FUSE mount is provided by `fuse-native`.
 
-The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `4567`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`.
+The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `45678`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`.
 
 ```sh
-PORT=4567 MOUNT_POINT=/tmp/workspace npx -p @cloudflare/workspace-wsd wsd
+PORT=45678 MOUNT_POINT=/tmp/workspace npx -p @cloudflare/workspace-wsd wsd
 ```
 
 Current endpoints:
 
 - `GET /health` returns `200 OK` with `ok` once the FUSE mount is ready.
+- `GET /__wsd/info` returns JSON with the selected FUSE backend, mount point, and bound port.
 - `GET /` returns `200 OK` with an empty JSON object: `{}`.
 
 Current filesystem support:
@@ -26,7 +27,27 @@ Current filesystem support:
 
 ## FUSE prerequisites
 
-Linux hosts/containers need access to `/dev/fuse` and mount permissions. macOS hosts need macFUSE installed.
+Linux hosts/containers need access to `/dev/fuse` and mount permissions.
+
+### macOS: FUSE-T recommended, macFUSE supported
+
+On macOS, `wsd` auto-detects FUSE backends and prefers FUSE-T when both FUSE-T and macFUSE are installed. FUSE-T is recommended because it does not require a kernel extension.
+
+Install FUSE-T with Homebrew:
+
+```sh
+brew install macos-fuse-t/homebrew-cask/fuse-t
+```
+
+Alternatively, install macFUSE. On Apple Silicon, macFUSE may require Reduced Security / kernel extension approval.
+
+You can override backend detection for debugging:
+
+```sh
+WSD_FUSE_BACKEND=auto    # default: prefer FUSE-T, then macFUSE
+WSD_FUSE_BACKEND=fuse-t  # require FUSE-T
+WSD_FUSE_BACKEND=macfuse # require macFUSE
+```
 
 If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain directory.
 
