@@ -1,6 +1,7 @@
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 import { type ChangeEntry, materialiseChange } from "./changes.js";
+import { isIgnored } from "./ignore.js";
 
 // Walk vfs_dirents from `inode` up to ROOT_INODE, gathering the path
 // segments along the way. Returns null when the inode is unreachable
@@ -37,7 +38,18 @@ function pathOf(db: Database, inode: number): string | null {
 // Streaming, not buffering: we walk vfs_nodes by rev index and
 // vfs_changes by path, yielding as we go so callers can pipe into a
 // Capnweb stream without holding the whole delta in memory.
-export async function* coalesceChanges(db: Database, sinceRev: number): AsyncIterable<ChangeEntry> {
+export interface CoalesceOptions {
+  // Path-segment patterns to drop before yielding. The wire never
+  // carries entries under an ignored segment; see docs/02.
+  ignore?: string[];
+}
+
+export async function* coalesceChanges(
+  db: Database,
+  sinceRev: number,
+  options: CoalesceOptions = {},
+): AsyncIterable<ChangeEntry> {
+  const ignore = options.ignore ?? [];
   const emitted = new Set<string>();
 
   // Live mutations: every mkdir / writeFile / symlink bumps
@@ -49,6 +61,7 @@ export async function* coalesceChanges(db: Database, sinceRev: number): AsyncIte
   for (const { inode } of touched) {
     const path = pathOf(db, inode);
     if (path === null) continue;
+    if (isIgnored(path, ignore)) continue;
     if (emitted.has(path)) continue;
     const entry = materialiseChange(db, path);
     if (entry !== null) {
@@ -67,6 +80,7 @@ export async function* coalesceChanges(db: Database, sinceRev: number): AsyncIte
     sinceRev,
   );
   for (const { path } of tombs) {
+    if (isIgnored(path, ignore)) continue;
     if (emitted.has(path)) continue;
     const entry = materialiseChange(db, path);
     if (entry !== null) {

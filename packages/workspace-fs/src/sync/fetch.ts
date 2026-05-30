@@ -8,8 +8,12 @@ import { pushObjects } from "./push.js";
 // the container; the container calls push / pushObjects on the DO.
 // Both names exist so call sites read in their own direction.
 
-export function fetchChanges(db: Database, sinceRev: number): AsyncIterable<ChangeEntry> {
-  return coalesceChanges(db, sinceRev);
+export function fetchChanges(
+  db: Database,
+  sinceRev: number,
+  options: { ignore?: string[] } = {},
+): AsyncIterable<ChangeEntry> {
+  return coalesceChanges(db, sinceRev, options);
 }
 
 export function fetchObjects(

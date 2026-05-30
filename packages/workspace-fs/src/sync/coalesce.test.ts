@@ -82,3 +82,34 @@ describe("coalesceChanges", () => {
     });
   });
 });
+
+describe("coalesceChanges (ignore)", () => {
+  it("drops entries whose path contains an ignored segment", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/src", {}, () => 0);
+      mkdir(db, "/node_modules", {}, () => 0);
+      mkdir(db, "/node_modules/lodash", {}, () => 0);
+      mkdir(db, "/a", {}, () => 0);
+      mkdir(db, "/a/node_modules", {}, () => 0);
+      mkdir(db, "/a/node_modules/p", {}, () => 0);
+      await writeFile(db, "/src/index.ts", "x", {}, () => 1);
+      await writeFile(db, "/node_modules/lodash/index.js", "y", {}, () => 2);
+      await writeFile(db, "/a/node_modules/p/q.js", "z", {}, () => 3);
+      const entries = await drain(coalesceChanges(db, 0, { ignore: ["node_modules"] }));
+      const paths = entries.map((e) => e.path);
+      expect(paths).toContain("/src/index.ts");
+      for (const p of paths) {
+        expect(p.includes("node_modules")).toBe(false);
+      }
+    });
+  });
+
+  it("an empty ignore list is the default behaviour", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/node_modules", {}, () => 0);
+      await writeFile(db, "/node_modules/x.js", "x", {}, () => 1);
+      const entries = await drain(coalesceChanges(db, 0));
+      expect(entries.some((e) => e.path === "/node_modules/x.js")).toBe(true);
+    });
+  });
+});
