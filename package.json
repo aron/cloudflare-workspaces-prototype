@@ -24,7 +24,8 @@
       "node_modules/fuse-shared-library-darwin/**/*",
       "node_modules/fuse-shared-library-linux/**/*",
       "node_modules/fuse-shared-library-linux-arm/**/*",
-      "node_modules/@platformatic/vfs/**/*"
+      "node_modules/@platformatic/vfs/**/*",
+      "packages/workspace-fs/dist/**/*"
     ]
   }
 }

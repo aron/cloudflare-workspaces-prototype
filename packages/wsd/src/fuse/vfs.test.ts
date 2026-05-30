@@ -3,7 +3,7 @@ const { test } = require("node:test");
 
 const { createNodeVirtualFileSystem } = require("../../dist/fuse/index.js");
 
-test("createNodeVirtualFileSystem returns a node-vfs-polyfill filesystem", () => {
+test("createNodeVirtualFileSystem returns a @platformatic/vfs filesystem", () => {
   const vfs = createNodeVirtualFileSystem();
 
   vfs.mkdirSync("/project", { recursive: true });
