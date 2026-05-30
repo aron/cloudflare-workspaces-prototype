@@ -9,10 +9,12 @@ export const SYNC_STATEMENTS = [
     encoded BLOB    NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS cf_vfs_changes (
-    rev  INTEGER PRIMARY KEY,
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    rev  INTEGER NOT NULL,
     path TEXT    NOT NULL,
     op   TEXT    NOT NULL CHECK(op IN ('delete'))
   )`,
+  `CREATE INDEX IF NOT EXISTS cf_vfs_changes_by_rev ON cf_vfs_changes(rev)`,
   `CREATE TABLE IF NOT EXISTS _cf_vfs_watermark (
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL

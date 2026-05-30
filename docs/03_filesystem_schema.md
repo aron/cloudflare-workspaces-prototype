@@ -145,15 +145,18 @@ re-uploaded over the sync wire). The `manifest_hash` column on
 
 ```sql
 CREATE TABLE cf_vfs_changes (
-  rev  INTEGER PRIMARY KEY,
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  rev  INTEGER NOT NULL,
   path TEXT    NOT NULL,
   op   TEXT    NOT NULL CHECK(op IN ('delete'))
 );
+CREATE INDEX cf_vfs_changes_by_rev ON cf_vfs_changes(rev);
 ```
 
 Deletes leave no row in `cf_vfs_nodes`, so they're recorded here for
-the incremental push to tell the container "this path is gone". `rev`
-matches the bumped `rev` value at delete time.
+the incremental push to tell the container "this path is gone". A
+single mutation (e.g. `rm -r`) records one tombstone per removed
+path, all sharing the same `rev` — the bumped value at delete time.
 
 **Pruning.** Rows with `rev <= pushRev` are deleted in the same
 transaction that advances `pushRev` (see
