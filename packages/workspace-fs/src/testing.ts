@@ -73,7 +73,7 @@ export class RecordingStorage implements DurableObjectStorageLike {
 // built-in node:sqlite running an in-memory database. Workers' DO SQL
 // surface is a subset of this, so anything that works here works on the
 // real platform too.
-export class SqliteTestStorage implements DurableObjectStorageLike {
+export class SQLiteTestStorage implements DurableObjectStorageLike {
   private readonly db: DatabaseSync;
   private readonly cache = new Map<string, StatementSync>();
   readonly sql: {
@@ -93,7 +93,7 @@ export class SqliteTestStorage implements DurableObjectStorageLike {
           stmt = this.db.prepare(query);
           this.cache.set(key, stmt);
         }
-        const normalizedBindings = bindings.map(toSqliteValue);
+        const normalizedBindings = bindings.map(toSQLiteValue);
         const rows = (stmt.all(...(normalizedBindings as never[])) as Row[]) ?? [];
         return new TestCursor<Row>(rows);
       },
@@ -124,12 +124,12 @@ export class SqliteTestStorage implements DurableObjectStorageLike {
 // node:sqlite is strict about input shapes: it accepts strings, numbers,
 // bigints, null, and Uint8Array but not undefined, Buffer subclasses
 // other than Uint8Array, or booleans. Normalize.
-function toSqliteValue(value: unknown): string | number | bigint | null | Uint8Array {
+function toSQLiteValue(value: unknown): string | number | bigint | null | Uint8Array {
   if (value === undefined || value === null) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
   if (value instanceof Uint8Array) return value;
   if (typeof value === "string" || typeof value === "number" || typeof value === "bigint") {
     return value;
   }
-  throw new TypeError(`SqliteTestStorage cannot bind value of type ${typeof value}`);
+  throw new TypeError(`SQLiteTestStorage cannot bind value of type ${typeof value}`);
 }

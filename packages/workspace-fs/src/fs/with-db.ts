@@ -4,7 +4,7 @@
 
 import { initializeSchema } from "../schema/index.js";
 import { Database } from "../storage.js";
-import { SqliteTestStorage } from "../testing.js";
+import { SQLiteTestStorage } from "../testing.js";
 
 export interface WithDBOptions {
   now?: () => number;
@@ -14,7 +14,7 @@ export async function withDB<T>(
   fn: (db: Database) => T | Promise<T>,
   options: WithDBOptions = {},
 ): Promise<T> {
-  const storage = new SqliteTestStorage();
+  const storage = new SQLiteTestStorage();
   const db = new Database(storage);
   initializeSchema(db, options.now ?? (() => 1000));
   try {

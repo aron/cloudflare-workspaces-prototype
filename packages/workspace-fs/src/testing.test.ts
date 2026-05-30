@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { initializeSchema, ROOT_INODE } from "./schema/index.js";
 import { Database } from "./storage.js";
-import { SqliteTestStorage } from "./testing.js";
+import { SQLiteTestStorage } from "./testing.js";
 
-describe("SqliteTestStorage", () => {
+describe("SQLiteTestStorage", () => {
   it("backs a real in-memory database that initializeSchema can apply", () => {
-    const storage = new SqliteTestStorage();
+    const storage = new SQLiteTestStorage();
     const db = new Database(storage);
 
     initializeSchema(db, () => 1234);
@@ -19,7 +19,7 @@ describe("SqliteTestStorage", () => {
   });
 
   it("runs transactionSync atomically", () => {
-    const storage = new SqliteTestStorage();
+    const storage = new SQLiteTestStorage();
     const db = new Database(storage);
     initializeSchema(db, () => 0);
 

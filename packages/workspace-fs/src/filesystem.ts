@@ -16,7 +16,7 @@ function notImplemented(method: string): never {
   throw createWorkspaceError("EIO", `${method} is not implemented yet`);
 }
 
-export class SqliteWorkspaceFilesystem implements WorkspaceFilesystem {
+export class SQLiteWorkspaceFilesystem implements WorkspaceFilesystem {
   private readonly db: Database;
   private readonly now: () => number;
   private initialized = false;

@@ -1,4 +1,4 @@
-import { SqliteWorkspaceFilesystem } from "./filesystem.js";
+import { SQLiteWorkspaceFilesystem } from "./filesystem.js";
 import type {
   DurableObjectStorageLike,
   WorkspaceFilesystem,
@@ -29,5 +29,5 @@ export function createWorkspaceFilesystem(
   storage: DurableObjectStorageLike,
   options?: WorkspaceFilesystemOptions,
 ): WorkspaceFilesystem {
-  return new SqliteWorkspaceFilesystem(storage, options);
+  return new SQLiteWorkspaceFilesystem(storage, options);
 }
