@@ -117,16 +117,25 @@ export async function writeFile(
   options: WriteFileOptions,
   now: () => number,
 ): Promise<void> {
+  const bytes = await materialize(content);
+  writeFileSync(db, path, bytes, options, now);
+}
+
+// Synchronous entry point used by the VirtualProvider. Identical SQL
+// to the async path; differs only in that the bytes have already been
+// materialized.
+export function writeFileSync(
+  db: Database,
+  path: string,
+  bytes: Uint8Array,
+  options: WriteFileOptions,
+  now: () => number,
+): void {
   const { parts, path: canonical } = canonicalizePath(path);
   if (parts.length === 0) {
-    throw createWorkspaceError("EISDIR", `cannot write to the root directory`, canonical);
+    throw createWorkspaceError("EISDIR", "cannot write to the root directory", canonical);
   }
   const mode = (options.mode ?? 0o644) & 0o7777;
-
-  // Materialize and hash outside the transaction — both are async and
-  // can be slow for large inputs, and transactionSync wants a
-  // synchronous closure.
-  const bytes = await materialize(content);
   const chunks = chunksOf(bytes);
   const mtime = now();
 

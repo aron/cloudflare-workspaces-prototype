@@ -8,6 +8,7 @@ export type WorkspaceErrorCode =
   | "EACCES"
   | "EPERM"
   | "EROFS"
+  | "ENOSYS"
   | "EIO";
 
 export interface WorkspaceFsError extends Error {

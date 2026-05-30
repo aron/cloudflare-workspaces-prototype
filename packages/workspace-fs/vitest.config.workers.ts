@@ -23,6 +23,6 @@ export default defineConfig({
     // fixtures (SqliteTestStorage, RecordingStorage). They have no
     // meaning under workerd — the workerd runner uses real DO storage
     // via withDB instead.
-    exclude: ["src/testing.test.ts", "src/schema/index.test.ts"],
+    exclude: ["src/testing.test.ts", "src/schema/index.test.ts", "src/provider.test.ts"],
   },
 });
