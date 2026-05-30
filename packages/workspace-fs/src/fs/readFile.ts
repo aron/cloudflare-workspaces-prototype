@@ -2,41 +2,23 @@ import { createWorkspaceError } from "../errors.js";
 import type { Database } from "../storage.js";
 import { resolveInode } from "./resolve.js";
 
-export interface ReadFileOptions {
-  encoding?: "utf8";
-}
-
 interface ChunkRow {
   hash: Uint8Array;
   size: number;
 }
 
-// Overloads match docs/04_filesystem_interface.md exactly.
-export function readFile(db: Database, path: string): Promise<ReadableStream<Uint8Array>>;
-export function readFile(
-  db: Database,
-  path: string,
-  encoding: "utf8",
-  now?: () => number,
-): Promise<string>;
-export function readFile(
-  db: Database,
-  path: string,
-  options: ReadFileOptions,
-  now?: () => number,
-): Promise<string | ReadableStream<Uint8Array>>;
+// Returns the file content as a stream. A higher layer (the Workspace
+// wrapper that exposes the package-level API) is responsible for the
+// `"utf8"` overload that collapses the stream into a string; keeping
+// this layer single-shape makes the chunk/blob plumbing easier to
+// reason about.
 export async function readFile(
   db: Database,
   path: string,
-  optionsOrEncoding?: "utf8" | ReadFileOptions,
   now: () => number = Date.now,
-): Promise<string | ReadableStream<Uint8Array>> {
-  const wantString =
-    optionsOrEncoding === "utf8" ||
-    (typeof optionsOrEncoding === "object" && optionsOrEncoding?.encoding === "utf8");
-
-  // Resolve up front so we surface ENOENT/EISDIR before doing any
-  // streaming work.
+): Promise<ReadableStream<Uint8Array>> {
+  // Resolve up front so we surface ENOENT/EISDIR before any streaming
+  // work happens.
   const node = resolveInode(db, path);
   if (node === null) {
     throw createWorkspaceError("ENOENT", `no such file: ${path}`, path);
@@ -50,33 +32,8 @@ export async function readFile(
     node.inode,
   );
 
-  if (wantString) {
-    // Fast path — concatenate everything and decode once. Matches the
-    // node:fs/promises.readFile semantics for an encoding argument:
-    // memory cost = whole file.
-    const totalSize = chunks.reduce((acc, c) => acc + c.size, 0);
-    const out = new Uint8Array(totalSize);
-    let offset = 0;
-    const touched = now();
-    for (const chunk of chunks) {
-      const row = db.one<{ bytes: Uint8Array }>(
-        "SELECT bytes FROM cf_vfs_blob_bytes WHERE hash = ?",
-        chunk.hash,
-      );
-      if (row === undefined) {
-        throw createWorkspaceError("EIO", `missing blob bytes for ${path}`, path);
-      }
-      out.set(row.bytes, offset);
-      offset += row.bytes.byteLength;
-    }
-    if (chunks.length > 0) {
-      touchBlobs(db, chunks, touched);
-    }
-    return new TextDecoder().decode(out);
-  }
-
-  // Stream form. We enqueue one Uint8Array per chunk, lazily pulled.
-  // last_seen is touched per chunk on read; that's the GC clock signal
+  // Stream form. One Uint8Array per chunk, pulled lazily. last_seen
+  // is touched per chunk on read; that's the GC clock signal
   // documented in 03_filesystem_schema.md.
   let i = 0;
   return new ReadableStream<Uint8Array>({
@@ -98,25 +55,4 @@ export async function readFile(
       controller.enqueue(row.bytes);
     },
   });
-}
-
-function touchBlobs(db: Database, chunks: ChunkRow[], at: number): void {
-  // Dedupe in case the same chunk hash appears multiple times in a
-  // single file — keeps the UPDATE count low without changing semantics.
-  const seen = new Set<string>();
-  for (const chunk of chunks) {
-    const key = bufferKey(chunk.hash);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    db.run("UPDATE cf_vfs_blobs SET last_seen = ? WHERE hash = ?", at, chunk.hash);
-  }
-}
-
-function bufferKey(bytes: Uint8Array): string {
-  // crypto digests are 32 bytes; this is fine.
-  let key = "";
-  for (const byte of bytes) {
-    key += byte.toString(16).padStart(2, "0");
-  }
-  return key;
 }
