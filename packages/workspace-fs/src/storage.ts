@@ -13,7 +13,12 @@ export class Database {
 
       if (storage.transaction !== undefined) {
         const result = storage.transaction(closure);
-        if (result !== undefined && result !== null && typeof result === "object" && "then" in result) {
+        if (
+          result !== undefined &&
+          result !== null &&
+          typeof result === "object" &&
+          "then" in result
+        ) {
           throw new Error("Durable Object storage adapter requires synchronous transactions");
         }
         return result;

@@ -8,15 +8,47 @@ const {
 } = require("../../dist/fuse/index.js");
 
 const callback = (fn: (cb: (errno: number, result: unknown) => void) => void) =>
-  new Promise<{ errno: number; result: unknown }>((resolve) => fn((errno, result) => resolve({ errno, result })));
+  new Promise<{ errno: number; result: unknown }>((resolve) =>
+    fn((errno, result) => resolve({ errno, result })),
+  );
 const status = (fn: (cb: (value: number) => void) => void) =>
   new Promise<number>((resolve) => fn((value) => resolve(value)));
 
 const fuseNativeOperationNames = [
-  "init", "error", "access", "statfs", "fgetattr", "getattr", "flush", "fsync", "fsyncdir",
-  "readdir", "truncate", "ftruncate", "utimens", "readlink", "chown", "chmod", "mknod",
-  "setxattr", "getxattr", "listxattr", "removexattr", "open", "opendir", "read", "write",
-  "release", "releasedir", "create", "unlink", "rename", "link", "symlink", "mkdir", "rmdir",
+  "init",
+  "error",
+  "access",
+  "statfs",
+  "fgetattr",
+  "getattr",
+  "flush",
+  "fsync",
+  "fsyncdir",
+  "readdir",
+  "truncate",
+  "ftruncate",
+  "utimens",
+  "readlink",
+  "chown",
+  "chmod",
+  "mknod",
+  "setxattr",
+  "getxattr",
+  "listxattr",
+  "removexattr",
+  "open",
+  "opendir",
+  "read",
+  "write",
+  "release",
+  "releasedir",
+  "create",
+  "unlink",
+  "rename",
+  "link",
+  "symlink",
+  "mkdir",
+  "rmdir",
 ];
 
 const notImplementedOperationNames = ["error", "mknod", "link"];
@@ -67,10 +99,20 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
   assert.equal(typeof open.result, "number");
 
   const bytes = Buffer.from("hello fuse");
-  assert.equal(await status((cb) => ops.write("/dir/file.txt", create.result as number, bytes, bytes.length, 0, cb)), bytes.length);
+  assert.equal(
+    await status((cb) =>
+      ops.write("/dir/file.txt", create.result as number, bytes, bytes.length, 0, cb),
+    ),
+    bytes.length,
+  );
 
   const readBuffer = Buffer.alloc(bytes.length);
-  assert.equal(await status((cb) => ops.read("/dir/file.txt", create.result as number, readBuffer, readBuffer.length, 0, cb)), bytes.length);
+  assert.equal(
+    await status((cb) =>
+      ops.read("/dir/file.txt", create.result as number, readBuffer, readBuffer.length, 0, cb),
+    ),
+    bytes.length,
+  );
   assert.equal(readBuffer.toString(), "hello fuse");
 
   const dir = await callback((cb) => ops.readdir("/dir", cb));
@@ -96,7 +138,12 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
   assert.equal(await status((cb) => ops.fsync("/dir/file.txt", create.result as number, 0, cb)), 0);
   assert.equal(await status((cb) => ops.fsyncdir("/dir", rootDir.result as number, 0, cb)), 0);
 
-  assert.equal(await status((cb) => ops.setxattr("/dir/file.txt", "user.test", Buffer.from("value"), 0, 0, cb)), 0);
+  assert.equal(
+    await status((cb) =>
+      ops.setxattr("/dir/file.txt", "user.test", Buffer.from("value"), 0, 0, cb),
+    ),
+    0,
+  );
   assert.equal(await status((cb) => ops.getxattr("/dir/file.txt", "user.test", 0, cb)), -61);
   const xattrs = await callback((cb) => ops.listxattr("/dir/file.txt", cb));
   assert.equal(xattrs.errno, 0);
@@ -108,20 +155,35 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
 
   assert.equal(await status((cb) => ops.rename("/dir/file.txt", "/dir/renamed.txt", cb)), 0);
   const renamedBuf = Buffer.alloc(64);
-  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, renamedBuf, renamedBuf.length, 0, cb)), bytes.length);
+  assert.equal(
+    await status((cb) => ops.read("/dir/renamed.txt", 0, renamedBuf, renamedBuf.length, 0, cb)),
+    bytes.length,
+  );
   assert.equal(renamedBuf.subarray(0, bytes.length).toString(), "hello fuse");
 
   assert.equal(await status((cb) => ops.truncate("/dir/renamed.txt", 5, cb)), 0);
   const truncBuf = Buffer.alloc(64);
-  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, truncBuf, truncBuf.length, 0, cb)), 5);
+  assert.equal(
+    await status((cb) => ops.read("/dir/renamed.txt", 0, truncBuf, truncBuf.length, 0, cb)),
+    5,
+  );
   assert.equal(truncBuf.subarray(0, 5).toString(), "hello");
 
-  assert.equal(await status((cb) => ops.ftruncate("/dir/renamed.txt", create.result as number, 2, cb)), 0);
+  assert.equal(
+    await status((cb) => ops.ftruncate("/dir/renamed.txt", create.result as number, 2, cb)),
+    0,
+  );
   const ftruncBuf = Buffer.alloc(64);
-  assert.equal(await status((cb) => ops.read("/dir/renamed.txt", 0, ftruncBuf, ftruncBuf.length, 0, cb)), 2);
+  assert.equal(
+    await status((cb) => ops.read("/dir/renamed.txt", 0, ftruncBuf, ftruncBuf.length, 0, cb)),
+    2,
+  );
   assert.equal(ftruncBuf.subarray(0, 2).toString(), "he");
 
-  assert.equal(await status((cb) => ops.release("/dir/renamed.txt", create.result as number, cb)), 0);
+  assert.equal(
+    await status((cb) => ops.release("/dir/renamed.txt", create.result as number, cb)),
+    0,
+  );
   assert.equal(await status((cb) => ops.release("/dir/renamed.txt", open.result as number, cb)), 0);
   assert.equal(await status((cb) => ops.unlink("/dir/renamed.txt", cb)), 0);
   assert.deepEqual(vfs.readdirSync("/dir"), []);

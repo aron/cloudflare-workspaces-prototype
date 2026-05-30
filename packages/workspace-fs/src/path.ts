@@ -40,11 +40,8 @@ export function canonicalizePath(path: string): CanonicalPath {
   const canonical = parts.length === 0 ? "/" : `/${parts.join("/")}`;
   const name = parts.length === 0 ? "" : parts[parts.length - 1];
   const parentParts = parts.slice(0, -1);
-  const parentPath = parts.length === 0
-    ? undefined
-    : parentParts.length === 0
-      ? "/"
-      : `/${parentParts.join("/")}`;
+  const parentPath =
+    parts.length === 0 ? undefined : parentParts.length === 0 ? "/" : `/${parentParts.join("/")}`;
 
   return {
     path: canonical,

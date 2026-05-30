@@ -33,8 +33,22 @@ export interface FuseOps {
   open(path: string, flags: number, cb: ResultCallback<number>): void;
   opendir(path: string, flags: number, cb: ResultCallback<number>): void;
   create(path: string, mode: number, cb: ResultCallback<number>): void;
-  read(path: string, fh: number, buffer: Buffer, length: number, position: number, cb: StatusCallback): void;
-  write(path: string, fh: number, buffer: Buffer, length: number, position: number, cb: StatusCallback): void;
+  read(
+    path: string,
+    fh: number,
+    buffer: Buffer,
+    length: number,
+    position: number,
+    cb: StatusCallback,
+  ): void;
+  write(
+    path: string,
+    fh: number,
+    buffer: Buffer,
+    length: number,
+    position: number,
+    cb: StatusCallback,
+  ): void;
   release(path: string, fh: number, cb: StatusCallback): void;
   releasedir(path: string, fh: number, cb: StatusCallback): void;
   flush(path: string, fh: number, cb: StatusCallback): void;
@@ -53,7 +67,14 @@ export interface FuseOps {
   utimens(path: string, atime: number, mtime: number, cb: StatusCallback): void;
   readlink(path: string, cb: ResultCallback<string>): void;
   mknod: NotImplementedOperation;
-  setxattr(path: string, name: string, value: Buffer, position: number, flags: number, cb: StatusCallback): void;
+  setxattr(
+    path: string,
+    name: string,
+    value: Buffer,
+    position: number,
+    flags: number,
+    cb: StatusCallback,
+  ): void;
   getxattr(path: string, name: string, position: number, cb: StatusCallback): void;
   listxattr(path: string, cb: ResultCallback<Buffer>): void;
   removexattr(path: string, name: string, cb: StatusCallback): void;
@@ -105,8 +126,8 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
   // sequential writes. We keep an in-memory Buffer per regular file with
   // amortized doubling on growth.
   interface FileEntry {
-    buf: Buffer;     // capacity buffer (may be larger than size)
-    size: number;    // logical end-of-file
+    buf: Buffer; // capacity buffer (may be larger than size)
+    size: number; // logical end-of-file
   }
   const files = new Map<string, FileEntry>();
   const ensureCapacity = (entry: FileEntry, needed: number): void => {
@@ -437,7 +458,7 @@ export async function mountFuse(options: {
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
     debug: false,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any;
 
   // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read
@@ -511,7 +532,14 @@ function notImplemented(operation: string): NotImplementedOperation {
   };
 }
 
-function statNode(stat: { mtime: Date; atime: Date; ctime: Date; size: number; mode: number; isDirectory(): boolean }): FuseStat {
+function statNode(stat: {
+  mtime: Date;
+  atime: Date;
+  ctime: Date;
+  size: number;
+  mode: number;
+  isDirectory(): boolean;
+}): FuseStat {
   return {
     mtime: stat.mtime,
     atime: stat.atime,
@@ -525,7 +553,8 @@ function statNode(stat: { mtime: Date; atime: Date; ctime: Date; size: number; m
 }
 
 function toErrno(error: unknown): number {
-  const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+  const code =
+    typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
   if (code === "ENOENT") return ERRNO.ENOENT;
   if (code === "EEXIST") return ERRNO.EEXIST;
   if (code === "ENOTDIR") return ERRNO.ENOTDIR;

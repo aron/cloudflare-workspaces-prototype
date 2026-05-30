@@ -153,7 +153,9 @@ async function main(): Promise<void> {
       const address = server.address();
       const boundPort = typeof address === "object" && address !== null ? address.port : port;
       info.port = boundPort;
-      console.log(`wsd listening on ${HOST}:${boundPort} mount=${mountPoint} backend=${backend.kind}`);
+      console.log(
+        `wsd listening on ${HOST}:${boundPort} mount=${mountPoint} backend=${backend.kind}`,
+      );
       resolve();
     });
   });

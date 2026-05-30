@@ -67,8 +67,12 @@ async function startWsd(t, { port, mountPoint }: { port: number; mountPoint: str
   let stderr = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => { stdout += chunk; });
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
 
   t.after(async () => {
     await stopProcess(child);
@@ -99,7 +103,9 @@ function getAvailablePort() {
 async function waitForExit(child, timeoutMs = 2_000) {
   let stderr = "";
   child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -140,7 +146,9 @@ function request(url) {
     const request = http.get(url, (response) => {
       response.setEncoding("utf8");
       let body = "";
-      response.on("data", (chunk) => { body += chunk; });
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
       response.on("end", () => {
         resolve({ body, headers: response.headers, statusCode: response.statusCode });
       });

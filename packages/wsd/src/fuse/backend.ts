@@ -20,7 +20,9 @@ const MACFUSE_FILESYSTEM = "/Library/Filesystems/macfuse.fs";
 const HOMEBREW_ARM64_LIB = "/opt/homebrew/lib";
 const HOMEBREW_INTEL_LIB = "/usr/local/lib";
 
-export async function detectFUSEBackend(options: DetectFUSEBackendOptions = {}): Promise<FUSEBackend> {
+export async function detectFUSEBackend(
+  options: DetectFUSEBackendOptions = {},
+): Promise<FUSEBackend> {
   const access = options.access ?? defaultAccess;
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
@@ -36,7 +38,7 @@ export async function detectFUSEBackend(options: DetectFUSEBackendOptions = {}):
       return { kind: "none", reason: `WSD_FUSE_BACKEND=${requested} is not supported on linux` };
     }
 
-    return await canAccess(access, LINUX_FUSE_DEVICE)
+    return (await canAccess(access, LINUX_FUSE_DEVICE))
       ? { kind: "linux" }
       : { kind: "none", reason: "FUSE is unavailable because /dev/fuse is not accessible" };
   }
@@ -56,7 +58,10 @@ export async function detectFUSEBackend(options: DetectFUSEBackendOptions = {}):
       }
 
       if (requested === "fuse-t") {
-        return { kind: "none", reason: "FUSE-T is unavailable; install fuse-t or use WSD_FUSE_BACKEND=auto" };
+        return {
+          kind: "none",
+          reason: "FUSE-T is unavailable; install fuse-t or use WSD_FUSE_BACKEND=auto",
+        };
       }
     }
 
@@ -66,7 +71,10 @@ export async function detectFUSEBackend(options: DetectFUSEBackendOptions = {}):
       }
 
       if (requested === "macfuse") {
-        return { kind: "none", reason: "macFUSE is unavailable; install macFUSE or use WSD_FUSE_BACKEND=auto" };
+        return {
+          kind: "none",
+          reason: "macFUSE is unavailable; install macFUSE or use WSD_FUSE_BACKEND=auto",
+        };
       }
     }
 

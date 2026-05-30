@@ -20,15 +20,19 @@ await rm(outputDir, { recursive: true, force: true });
 await mkdir(outputDir, { recursive: true });
 
 for (const [target, outputName] of targets) {
-  await run(pkgBin, [
-    resolve(packageRoot, "dist/cli/wsd.cjs"),
-    "--config",
-    resolve(repoRoot, "package.json"),
-    "--target",
-    target,
-    "--output",
-    resolve(outputDir, outputName),
-  ], packageRoot);
+  await run(
+    pkgBin,
+    [
+      resolve(packageRoot, "dist/cli/wsd.cjs"),
+      "--config",
+      resolve(repoRoot, "package.json"),
+      "--target",
+      target,
+      "--output",
+      resolve(outputDir, outputName),
+    ],
+    packageRoot,
+  );
 }
 
 console.log(`wrote standalone binaries to ${outputDir}`);

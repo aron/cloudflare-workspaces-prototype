@@ -8,9 +8,12 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "build:bin": "npm run build:bin --workspaces --if-present"
+    "build:bin": "npm run build:bin --workspaces --if-present",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
     "@types/node": "^22.10.7",
     "@yao-pkg/pkg": "^6.20.0",
     "typescript": "^5.7.3"
