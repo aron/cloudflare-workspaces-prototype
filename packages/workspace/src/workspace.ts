@@ -39,6 +39,7 @@ import {
 import { createQueue, serialize, type Queue } from "./serialize.js";
 import { parseWorkspacePath } from "./path.js";
 import { chunkHashUnion, assembleFileBytes, hashKey } from "./pull-assembly.js";
+import { trace, redactSecrets } from "./tracing.js";
 
 export interface WorkspaceOptions {
   /** DO storage to mount the VFS on. */
@@ -397,36 +398,47 @@ export class Workspace {
    */
   async exec(command: string, cwd?: string): Promise<ExecResult> {
     await this.ensureMountsIndexed();
-    return serialize(this.mutex, async () => {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-        enableDefaultSession: false,
+    // Span boundary spans the mutex wait + push + exec + pull — all of
+    // it is wall-clock the caller paid for and a wedge anywhere in here
+    // looks the same from the outside.
+    return trace("workspace.exec", { "hackspace.cwd": cwd ?? "/tmp" }, async (span) => {
+      span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
+      return serialize(this.mutex, async () => {
+        const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+          enableDefaultSession: false,
+        });
+        const api = await this.getConnection();
+
+        // Hydrate any mount stubs we're about to push — otherwise the container
+        // would receive empty files. We pre-fetch in bounded parallel before
+        // computing the change set so the freshly-written rows are included.
+        const stubs = this.vfs.listStubs().map((s) => s.path);
+        if (stubs.length) await this.hydrateMany(stubs);
+
+        // Push the delta since the last exec.
+        const changes = this.vfs.getChangesSince(this.pushSeq);
+        if (changes.length) {
+          await api.applyChanges(changes);
+          this.pushSeq = changes[changes.length - 1].seq;
+        }
+        span.set("hackspace.pushed", () => changes.length);
+
+        const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
+        span.set("hackspace.exit_code", () => result.exitCode);
+        span.set("hackspace.stdout_bytes", () => result.stdout?.length ?? 0);
+        span.set("hackspace.stderr_bytes", () => result.stderr?.length ?? 0);
+
+        const pulled = await this._pullDirtyAfterLocked();
+        span.set("hackspace.pulled", () => pulled);
+
+        return {
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          pushed: changes.length,
+          pulled,
+        };
       });
-      const api = await this.getConnection();
-
-      // Hydrate any mount stubs we're about to push — otherwise the container
-      // would receive empty files. We pre-fetch in bounded parallel before
-      // computing the change set so the freshly-written rows are included.
-      const stubs = this.vfs.listStubs().map((s) => s.path);
-      if (stubs.length) await this.hydrateMany(stubs);
-
-      // Push the delta since the last exec.
-      const changes = this.vfs.getChangesSince(this.pushSeq);
-      if (changes.length) {
-        await api.applyChanges(changes);
-        this.pushSeq = changes[changes.length - 1].seq;
-      }
-
-      const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
-
-      const pulled = await this._pullDirtyAfterLocked();
-
-      return {
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        pushed: changes.length,
-        pulled,
-      };
     });
   }
 
@@ -455,22 +467,28 @@ export class Workspace {
     opts: { cwd?: string } = {},
   ): Promise<Process> {
     await this.ensureMountsIndexed();
-    return serialize(this.mutex, async () => {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-        enableDefaultSession: false,
+    return trace("workspace.startProcess", { "hackspace.cwd": opts.cwd ?? "/tmp" }, async (span) => {
+      span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
+      return serialize(this.mutex, async () => {
+        const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+          enableDefaultSession: false,
+        });
+        const api = await this.getConnection();
+
+        // Same pre-flight as exec: hydrate stub mounts then push the delta.
+        const stubs = this.vfs.listStubs().map((s) => s.path);
+        if (stubs.length) await this.hydrateMany(stubs);
+        const changes = this.vfs.getChangesSince(this.pushSeq);
+        if (changes.length) {
+          await api.applyChanges(changes);
+          this.pushSeq = changes[changes.length - 1].seq;
+        }
+        span.set("hackspace.pushed", () => changes.length);
+
+        const proc = await sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
+        span.set("hackspace.process_id", () => proc.id);
+        return proc;
       });
-      const api = await this.getConnection();
-
-      // Same pre-flight as exec: hydrate stub mounts then push the delta.
-      const stubs = this.vfs.listStubs().map((s) => s.path);
-      if (stubs.length) await this.hydrateMany(stubs);
-      const changes = this.vfs.getChangesSince(this.pushSeq);
-      if (changes.length) {
-        await api.applyChanges(changes);
-        this.pushSeq = changes[changes.length - 1].seq;
-      }
-
-      return sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
     });
   }
 
@@ -494,18 +512,26 @@ export class Workspace {
     processId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<AsyncIterable<LogEvent>> {
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-      enableDefaultSession: false,
+    // Only the *setup* is traced here — acquiring the sandbox stub,
+    // wiring up the abort handler, and opening the SSE stream. The
+    // iterable's runtime is shaped by the consumer (the agent's exec
+    // tool) and gets its own span at that layer (Phase 3) so the
+    // bytes-streamed numbers attach to the call that actually
+    // consumed them.
+    return trace("workspace.streamProcessLogs", { "hackspace.process_id": processId }, async () => {
+      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
+        enableDefaultSession: false,
+      });
+      if (options.signal) {
+        const onAbort = () => {
+          void sb.killProcess(processId).catch(() => {});
+        };
+        if (options.signal.aborted) onAbort();
+        else options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      const stream = await sb.streamProcessLogs(processId);
+      return parseSSEStream<LogEvent>(stream);
     });
-    if (options.signal) {
-      const onAbort = () => {
-        void sb.killProcess(processId).catch(() => {});
-      };
-      if (options.signal.aborted) onAbort();
-      else options.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const stream = await sb.streamProcessLogs(processId);
-    return parseSSEStream<LogEvent>(stream);
   }
 
   /**
@@ -539,62 +565,70 @@ export class Workspace {
    * calls this; the public pullDirtyAfter() wraps it.
    */
   private async _pullDirtyAfterLocked(): Promise<number> {
-    const api = await this.getConnection();
+    return trace("workspace.pullDirty", {}, async (span) => {
+      const api = await this.getConnection();
 
-    // Pull files the container touched. Three cases per change, by the
-    // mount root of its path:
-    //   - outside any mount: applied to the VFS normally.
-    //   - under a read-only mount: dropped (mounts are read-only end-to-end).
-    //   - under a writable mount: applied to the VFS, then mirrored to R2.
-    const ignore = this.opts.pullIgnore ?? ["node_modules"];
+      // Pull files the container touched. Three cases per change, by the
+      // mount root of its path:
+      //   - outside any mount: applied to the VFS normally.
+      //   - under a read-only mount: dropped (mounts are read-only end-to-end).
+      //   - under a writable mount: applied to the VFS, then mirrored to R2.
+      const ignore = this.opts.pullIgnore ?? ["node_modules"];
 
-    // Prefer the manifest-aware pull . The container
-    // ships one record per dirty path with (hash, size)[] per file — no
-    // inline bytes. We then probe our own content-addressed store and
-    // only ask the container for the bytes we don't already have.
-    //
-    // Fallback: an older container image that predates pullDirtyV2 only
-    // exposes the legacy `pullDirty` (bytes-carrying bulk blob). capnweb
-    // surfaces the missing method as `TypeError: '...' is not a function`
-    // from inside its read loop. We catch *only* that shape so genuine
-    // pull failures still propagate.
-    let result: {
-      changes: ApplyEntry[];
-      mirrors: MirrorEntry[];
-      maxRev: number;
-    };
-    try {
-      result = await this._pullDirtyV2(api, ignore);
-    } catch (err) {
-      if (!isMissingRpcMethod(err, "pullDirtyV2")) throw err;
-      result = await this._pullDirtyLegacy(api, ignore);
-    }
-    const { changes: applyEntries, mirrors, maxRev } = result;
+      // Prefer the manifest-aware pull . The container
+      // ships one record per dirty path with (hash, size)[] per file — no
+      // inline bytes. We then probe our own content-addressed store and
+      // only ask the container for the bytes we don't already have.
+      //
+      // Fallback: an older container image that predates pullDirtyV2 only
+      // exposes the legacy `pullDirty` (bytes-carrying bulk blob). capnweb
+      // surfaces the missing method as `TypeError: '...' is not a function`
+      // from inside its read loop. We catch *only* that shape so genuine
+      // pull failures still propagate.
+      let result: {
+        changes: ApplyEntry[];
+        mirrors: MirrorEntry[];
+        maxRev: number;
+      };
+      let path: "v2" | "legacy" = "v2";
+      try {
+        result = await this._pullDirtyV2(api, ignore);
+      } catch (err) {
+        if (!isMissingRpcMethod(err, "pullDirtyV2")) throw err;
+        path = "legacy";
+        result = await this._pullDirtyLegacy(api, ignore);
+      }
+      span.set("hackspace.pull_path", () => path);
+      const { changes: applyEntries, mirrors, maxRev } = result;
+      span.set("hackspace.pulled_files", () => applyEntries.length);
+      span.set("hackspace.mirrored_files", () => mirrors.length);
+      span.set("hackspace.max_rev", () => maxRev);
 
-    if (applyEntries.length) {
-      this.opts.storage.transactionSync(() =>
-        this.vfs.applyChangesSync(applyEntries),
-      );
-    }
-    // Advance the rev watermark even on an empty pull, so a successive
-    // pull doesn't re-scan the same range. The container reports maxRev
-    // = currentRev when nothing changed, so this is safe.
-    this.pullSinceRev = maxRev;
-    // Mirror writable-mount changes to R2 using the bytes we already
-    // captured above, so we don't pay a second SQLite read per file.
-    if (mirrors.length) {
-      await this.runBounded(mirrors, async (m) => {
-        if (m.op === "delete") {
-          await m.mount.delete!(m.relPath);
-        } else if (m.type === "file") {
-          const bytes = m.bytes ?? this.vfs.readFile(m.path);
-          if (bytes) await m.mount.put!(m.relPath, bytes);
-        }
-      });
-    }
+      if (applyEntries.length) {
+        this.opts.storage.transactionSync(() =>
+          this.vfs.applyChangesSync(applyEntries),
+        );
+      }
+      // Advance the rev watermark even on an empty pull, so a successive
+      // pull doesn't re-scan the same range. The container reports maxRev
+      // = currentRev when nothing changed, so this is safe.
+      this.pullSinceRev = maxRev;
+      // Mirror writable-mount changes to R2 using the bytes we already
+      // captured above, so we don't pay a second SQLite read per file.
+      if (mirrors.length) {
+        await this.runBounded(mirrors, async (m) => {
+          if (m.op === "delete") {
+            await m.mount.delete!(m.relPath);
+          } else if (m.type === "file") {
+            const bytes = m.bytes ?? this.vfs.readFile(m.path);
+            if (bytes) await m.mount.put!(m.relPath, bytes);
+          }
+        });
+      }
 
-    this.saveWatermarks();
-    return applyEntries.length;
+      this.saveWatermarks();
+      return applyEntries.length;
+    });
   }
 
   /**
