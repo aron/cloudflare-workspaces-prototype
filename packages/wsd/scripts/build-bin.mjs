@@ -11,8 +11,8 @@ const outputDir = resolve(repoRoot, "artifacts/wsd");
 const pkgBin = process.platform === "win32" ? "pkg.cmd" : "pkg";
 
 const targets = [
-  ["node18-linux-x64", "wsd-linux-x64"],
-  ["node18-macos-x64", "wsd-macos-x64"],
+  ["node22-linux-x64", "wsd-linux-x64"],
+  ["node22-macos-x64", "wsd-macos-x64"],
 ];
 
 await run("npm", ["run", "build"], packageRoot);

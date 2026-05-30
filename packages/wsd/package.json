@@ -21,6 +21,6 @@
   },
   "dependencies": {
     "fuse-native": "^2.2.6",
-    "node-vfs-polyfill": "https://github.com/vercel-labs/node-vfs-polyfill/archive/1227fb028a26eb0d65e565c11b0a28e7b49b990f.tar.gz"
+    "@platformatic/vfs": "^0.4.0"
   }
 }

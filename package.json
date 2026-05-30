@@ -11,7 +11,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
-    "pkg": "^5.8.1",
+    "@yao-pkg/pkg": "^6.20.0",
     "typescript": "^5.7.3"
   },
   "pkg": {
@@ -20,7 +20,7 @@
       "node_modules/fuse-shared-library-darwin/**/*",
       "node_modules/fuse-shared-library-linux/**/*",
       "node_modules/fuse-shared-library-linux-arm/**/*",
-      "node_modules/node-vfs-polyfill/**/*"
+      "node_modules/@platformatic/vfs/**/*"
     ]
   }
 }
