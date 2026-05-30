@@ -11,10 +11,15 @@ export default defineConfig({
     }),
   ],
   resolve: {
-    alias: {
-      "./with-db.js": new URL("./src/fs/with-db.workers.ts", import.meta.url).pathname,
-      "./fs/with-db.js": new URL("./src/fs/with-db.workers.ts", import.meta.url).pathname,
-    },
+    // Match any relative import that lands on src/fs/with-db.js so
+    // tests under src/fs/, src/, and src/sync/ all resolve to the
+    // workerd-backed implementation regardless of their depth.
+    alias: [
+      {
+        find: /^.*\/with-db\.js$/,
+        replacement: new URL("./src/fs/with-db.workers.ts", import.meta.url).pathname,
+      },
+    ],
   },
   test: {
     globals: true,
