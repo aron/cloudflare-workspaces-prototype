@@ -257,10 +257,15 @@ export class Workspace {
   // for API consistency.
 
   async readFile(path: string): Promise<Uint8Array | null> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    await this.ensureContentLoaded(cp);
-    return this.vfs.readFile(cp);
+    return trace("workspace.readFile", { "hackspace.path": path }, async (span) => {
+      const cp = parseWorkspacePath(path);
+      await this.ensureMountsIndexed();
+      await this.ensureContentLoaded(cp);
+      const bytes = this.vfs.readFile(cp);
+      span.set("hackspace.bytes", () => bytes?.byteLength ?? 0);
+      span.set("hackspace.found", () => bytes !== null);
+      return bytes;
+    });
   }
 
   async writeFile(
@@ -268,24 +273,29 @@ export class Workspace {
     content: Uint8Array | string,
     mode?: number,
   ): Promise<void> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    const bytes =
-      typeof content === "string" ? new TextEncoder().encode(content) : content;
-    return serialize(this.mutex, async () => {
-      // Preserve the existing file's mode on overwrite when the caller didn't
-      // specify one — otherwise a plain `writeFile(path, bytes)` would silently
-      // downgrade an executable script (0o100755) to a regular file (0o100644).
-      // Callers that *want* to change the mode pass it explicitly.
-      const effectiveMode = mode ?? this.vfs.stat(cp)?.mode ?? 0o100644;
-      const m = this.resolveMountForWrite(cp);
-      if (m) {
-        // Push to the backing store first — if it fails, the VFS stays clean.
-        await m.mount.put!(m.relPath, bytes);
-        this.vfs.writeFile(cp, bytes, effectiveMode, m.root);
-      } else {
-        this.vfs.writeFile(cp, bytes, effectiveMode);
-      }
+    return trace("workspace.writeFile", { "hackspace.path": path }, async (span) => {
+      const cp = parseWorkspacePath(path);
+      await this.ensureMountsIndexed();
+      const bytes =
+        typeof content === "string" ? new TextEncoder().encode(content) : content;
+      span.set("hackspace.bytes", () => bytes.byteLength);
+      return serialize(this.mutex, async () => {
+        // Preserve the existing file's mode on overwrite when the caller didn't
+        // specify one — otherwise a plain `writeFile(path, bytes)` would silently
+        // downgrade an executable script (0o100755) to a regular file (0o100644).
+        // Callers that *want* to change the mode pass it explicitly.
+        const effectiveMode = mode ?? this.vfs.stat(cp)?.mode ?? 0o100644;
+        span.set("hackspace.mode", () => effectiveMode);
+        const m = this.resolveMountForWrite(cp);
+        span.set("hackspace.mount", () => m ? m.root : "vfs");
+        if (m) {
+          // Push to the backing store first — if it fails, the VFS stays clean.
+          await m.mount.put!(m.relPath, bytes);
+          this.vfs.writeFile(cp, bytes, effectiveMode, m.root);
+        } else {
+          this.vfs.writeFile(cp, bytes, effectiveMode);
+        }
+      });
     });
   }
 
@@ -304,41 +314,50 @@ export class Workspace {
   }
 
   async mkdir(path: string, mode?: number): Promise<void> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    return serialize(this.mutex, async () => {
-      // mkdir is VFS-only even under writable mounts: R2 has no directories,
-      // and synthesizing zero-byte directory markers would surface as files.
-      const m = this.resolveMountForWrite(cp);
-      this.vfs.mkdir(cp, mode, m ? m.root : null);
+    return trace("workspace.mkdir", { "hackspace.path": path }, async () => {
+      const cp = parseWorkspacePath(path);
+      await this.ensureMountsIndexed();
+      return serialize(this.mutex, async () => {
+        // mkdir is VFS-only even under writable mounts: R2 has no directories,
+        // and synthesizing zero-byte directory markers would surface as files.
+        const m = this.resolveMountForWrite(cp);
+        this.vfs.mkdir(cp, mode, m ? m.root : null);
+      });
     });
   }
 
   async deleteFile(path: string): Promise<void> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    return serialize(this.mutex, async () => {
-      const m = this.resolveMountForWrite(cp);
-      if (m) {
-        // Collect every file under `path` (could be a single file or a subtree)
-        // and delete each from the backing store before touching the VFS.
-        const subtree = this.vfs.listFilesUnder(cp);
-        const files = subtree.length
-          ? subtree
-          : this.vfs.stat(cp)?.type === "file"
-            ? [cp]
-            : [];
-        const rels = files.map((f) => f.slice(m.root.length + 1));
-        await this.runBounded(rels, (r) => m.mount.delete!(r));
-      }
-      this.vfs.deleteFile(cp);
+    return trace("workspace.deleteFile", { "hackspace.path": path }, async (span) => {
+      const cp = parseWorkspacePath(path);
+      await this.ensureMountsIndexed();
+      return serialize(this.mutex, async () => {
+        const m = this.resolveMountForWrite(cp);
+        if (m) {
+          // Collect every file under `path` (could be a single file or a subtree)
+          // and delete each from the backing store before touching the VFS.
+          const subtree = this.vfs.listFilesUnder(cp);
+          const files = subtree.length
+            ? subtree
+            : this.vfs.stat(cp)?.type === "file"
+              ? [cp]
+              : [];
+          span.set("hackspace.files_removed", () => files.length);
+          const rels = files.map((f) => f.slice(m.root.length + 1));
+          await this.runBounded(rels, (r) => m.mount.delete!(r));
+        }
+        this.vfs.deleteFile(cp);
+      });
     });
   }
 
   async listFilesUnder(prefix: string): Promise<string[]> {
-    const cp = parseWorkspacePath(prefix);
-    await this.ensureMountsIndexed();
-    return this.vfs.listFilesUnder(cp);
+    return trace("workspace.listFilesUnder", { "hackspace.path": prefix }, async (span) => {
+      const cp = parseWorkspacePath(prefix);
+      await this.ensureMountsIndexed();
+      const out = this.vfs.listFilesUnder(cp);
+      span.set("hackspace.count", () => out.length);
+      return out;
+    });
   }
 
   /** Search filenames under `directory` for `pattern` (substring match). */
@@ -347,13 +366,20 @@ export class Workspace {
     directory: string,
     pattern?: string,
   ): Promise<Array<{ path: string; type: "file" | "dir" }>> {
-    const cp = parseWorkspacePath(directory);
-    await this.ensureMountsIndexed();
-    return this.vfs
-      .snapshot()
-      .entries.filter((e) => pathStartsWith(e.path, cp))
-      .filter((e) => !pattern || e.path.includes(pattern))
-      .map((e) => ({ path: e.path, type: e.type }));
+    return trace("workspace.findFiles", {
+      "hackspace.path": directory,
+      "hackspace.pattern": pattern,
+    }, async (span) => {
+      const cp = parseWorkspacePath(directory);
+      await this.ensureMountsIndexed();
+      const out = this.vfs
+        .snapshot()
+        .entries.filter((e) => pathStartsWith(e.path, cp))
+        .filter((e) => !pattern || e.path.includes(pattern))
+        .map((e) => ({ path: e.path, type: e.type }));
+      span.set("hackspace.count", () => out.length);
+      return out;
+    });
   }
 
   /** Grep file contents for `pattern`. `path` may be a file or directory. */
@@ -362,28 +388,39 @@ export class Workspace {
     path: string,
     opts: { ignoreCase?: boolean } = {},
   ): Promise<GrepHit[]> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
-    const { entries } = this.vfs.snapshot();
-    const files = entries.filter(
-      (e) => e.type === "file" && pathStartsWith(e.path, cp),
-    );
-    // Hydrate any mount stubs in scope, bounded-concurrent.
-    await this.hydrateMany(files.map((f) => f.path));
-    const hits: GrepHit[] = [];
-    for (const f of files) {
-      const bytes = this.vfs.readFile(f.path);
-      if (!bytes) continue;
-      const text = new TextDecoder().decode(bytes);
-      const lines = text.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const hay = opts.ignoreCase ? lines[i].toLowerCase() : lines[i];
-        if (hay.includes(needle))
-          hits.push({ path: f.path, line: i + 1, text: lines[i] });
+    return trace("workspace.grep", {
+      "hackspace.path": path,
+      "hackspace.ignore_case": opts.ignoreCase ?? false,
+    }, async (span) => {
+      // `pattern` is user-supplied free text; truncate to keep span
+      // storage bounded but don't redact (no secrets-by-convention
+      // inside grep needles).
+      span.set("hackspace.pattern", () => pattern.slice(0, 128));
+      const cp = parseWorkspacePath(path);
+      await this.ensureMountsIndexed();
+      const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
+      const { entries } = this.vfs.snapshot();
+      const files = entries.filter(
+        (e) => e.type === "file" && pathStartsWith(e.path, cp),
+      );
+      span.set("hackspace.files_scanned", () => files.length);
+      // Hydrate any mount stubs in scope, bounded-concurrent.
+      await this.hydrateMany(files.map((f) => f.path));
+      const hits: GrepHit[] = [];
+      for (const f of files) {
+        const bytes = this.vfs.readFile(f.path);
+        if (!bytes) continue;
+        const text = new TextDecoder().decode(bytes);
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const hay = opts.ignoreCase ? lines[i].toLowerCase() : lines[i];
+          if (hay.includes(needle))
+            hits.push({ path: f.path, line: i + 1, text: lines[i] });
+        }
       }
-    }
-    return hits;
+      span.set("hackspace.hits", () => hits.length);
+      return hits;
+    });
   }
 
   // ---- container exec with bidirectional sync ----
