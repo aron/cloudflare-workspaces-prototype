@@ -171,3 +171,79 @@ describe("SyncRPC push convergence", () => {
     }
   });
 });
+
+import { createWorkspaceError } from "@cloudflare/workspace-fs";
+
+describe("WireError propagation", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("preserves err.code across the wire for an unknown hash", async () => {
+    // fetchObjects() throws when asked for a hash the server
+    // doesn't hold. The bytes never made it into vfs_blob_bytes,
+    // so the server-side helper throws WorkspaceFsError with
+    // code='EIO' or similar. We surface the original message
+    // verbatim and assert the props bag survives the round trip.
+    harness = await startHarness();
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const unknown = new Uint8Array(32);
+      unknown.fill(0xff);
+      const stream = await client.fetchObjects([unknown]);
+      const reader = stream.getReader();
+      let caught: unknown;
+      try {
+        await reader.read();
+      } catch (e) {
+        caught = e;
+      } finally {
+        reader.releaseLock();
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(/missing/i);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("propagates own enumerable error properties (e.g. code) over the wire", async () => {
+    // Wire a custom server that throws a WorkspaceFsError so we
+    // can observe the props bag round-trip. We don't need the
+    // Database for this; an inline RpcTarget is enough.
+    const { RpcTarget, newWebSocketRpcSession } = await import("capnweb");
+    const http = createServer();
+    const wss = new WebSocketServer({ server: http, path: "/rpc" });
+    class Bad extends RpcTarget {
+      boom() {
+        throw createWorkspaceError("ENOENT", "no such file", "/missing");
+      }
+    }
+    wss.on("connection", (ws) => {
+      newWebSocketRpcSession(ws, new Bad());
+    });
+    await new Promise<void>((res) => http.listen(0, "127.0.0.1", res));
+    const port = (http.address() as { port: number }).port;
+    const stub = newWebSocketRpcSession(`ws://127.0.0.1:${port}/rpc`) as unknown as {
+      boom(): Promise<void>;
+      [Symbol.dispose]?(): void;
+    };
+    let caught: unknown;
+    try {
+      await stub.boom();
+    } catch (e) {
+      caught = e;
+    } finally {
+      stub[Symbol.dispose]?.();
+      // Force a brutal teardown so we don't depend on the
+      // capnweb session draining cleanly to exit the test.
+      for (const ws of wss.clients) ws.terminate();
+      await new Promise<void>((res) => wss.close(() => res()));
+      await new Promise<void>((res) => http.close(() => res()));
+    }
+    expect((caught as { code?: string })?.code).toBe("ENOENT");
+    expect((caught as Error).message).toMatch(/no such file/);
+  });
+});
