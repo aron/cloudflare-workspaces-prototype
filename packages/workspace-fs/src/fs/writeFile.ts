@@ -1,0 +1,207 @@
+import { createWorkspaceError } from "../errors.js";
+import { canonicalizePath } from "../path.js";
+import { incrementRev } from "../rev.js";
+import { ROOT_INODE } from "../schema/index.js";
+import type { Database } from "../storage.js";
+
+// Fixed chunk size per docs/03_filesystem_schema.md and
+// docs/02_sync_protocol.md. Exported so tests can size inputs precisely
+// without hard-coding the magic number twice.
+export const CHUNK_SIZE = 512 * 1024;
+
+export type WriteFileContent = string | Uint8Array | ReadableStream<Uint8Array>;
+
+export interface WriteFileOptions {
+  mode?: number;
+}
+
+// Resolve directory-only paths (the parent of the target file). The
+// final segment is handled by the caller. Returns the parent inode or
+// throws ENOENT/ENOTDIR.
+function resolveParent(db: Database, parts: string[], canonical: string): number {
+  let parentInode = ROOT_INODE;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const name = parts[i];
+    const child = db.one<{ child_inode: number }>(
+      "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+      parentInode,
+      name,
+    );
+    if (child === undefined) {
+      throw createWorkspaceError("ENOENT", `parent directory missing: ${canonical}`, canonical);
+    }
+    const next = db.one<{ inode: number; type: "file" | "dir" }>(
+      "SELECT inode, type FROM cf_vfs_nodes WHERE inode = ?",
+      child.child_inode,
+    );
+    if (next === undefined) {
+      throw createWorkspaceError("ENOENT", `dangling dirent: ${canonical}`, canonical);
+    }
+    if (next.type !== "dir") {
+      throw createWorkspaceError(
+        "ENOTDIR",
+        `parent path segment is not a directory: ${canonical}`,
+        canonical,
+      );
+    }
+    parentInode = next.inode;
+  }
+  return parentInode;
+}
+
+async function materialize(content: WriteFileContent): Promise<Uint8Array> {
+  if (typeof content === "string") {
+    return new TextEncoder().encode(content);
+  }
+  if (content instanceof Uint8Array) {
+    return content;
+  }
+  // ReadableStream — drain into one buffer. Memory cost = full file
+  // size, matching node:fs/promises.writeFile semantics. Once the
+  // streaming write path lands we can revisit; for now this keeps
+  // the chunking logic uniform.
+  const reader = content.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value !== undefined) {
+      parts.push(value);
+      total += value.byteLength;
+    }
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+  // crypto.subtle is available in both Workers and Node 22. We pass a
+  // copy of the .buffer slice in case `bytes` is a view over a larger
+  // ArrayBuffer (TextEncoder output sometimes is).
+  const slice =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer
+      : bytes.slice().buffer;
+  const digest = await crypto.subtle.digest("SHA-256", slice);
+  return new Uint8Array(digest);
+}
+
+interface PreparedChunk {
+  hash: Uint8Array;
+  bytes: Uint8Array;
+  size: number;
+}
+
+async function chunkAndHash(bytes: Uint8Array): Promise<PreparedChunk[]> {
+  const chunks: PreparedChunk[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, bytes.byteLength);
+    // subarray (not slice) avoids an extra copy; sha256() takes its own
+    // copy when needed.
+    const slice = bytes.subarray(offset, end);
+    const hash = await sha256(slice);
+    chunks.push({ hash, bytes: slice, size: slice.byteLength });
+  }
+  return chunks;
+}
+
+export async function writeFile(
+  db: Database,
+  path: string,
+  content: WriteFileContent,
+  options: WriteFileOptions,
+  now: () => number,
+): Promise<void> {
+  const { parts, path: canonical } = canonicalizePath(path);
+  if (parts.length === 0) {
+    throw createWorkspaceError("EISDIR", `cannot write to the root directory`, canonical);
+  }
+  const mode = (options.mode ?? 0o644) & 0o7777;
+
+  // Materialize and hash outside the transaction — both are async and
+  // can be slow for large inputs, and transactionSync wants a
+  // synchronous closure.
+  const bytes = await materialize(content);
+  const chunks = await chunkAndHash(bytes);
+  const mtime = now();
+
+  db.transactionSync(() => {
+    const parentInode = resolveParent(db, parts, canonical);
+    const leafName = parts[parts.length - 1];
+    const existing = db.one<{ child_inode: number }>(
+      "SELECT child_inode FROM cf_vfs_dirents WHERE parent_inode = ? AND name = ?",
+      parentInode,
+      leafName,
+    );
+
+    let inode: number;
+    if (existing !== undefined) {
+      const node = db.one<{ type: "file" | "dir" }>(
+        "SELECT type FROM cf_vfs_nodes WHERE inode = ?",
+        existing.child_inode,
+      );
+      if (node?.type === "dir") {
+        throw createWorkspaceError("EISDIR", `path is a directory: ${canonical}`, canonical);
+      }
+      inode = existing.child_inode;
+      // Replace the chunk list. Orphaned blobs (if any) are cleaned up
+      // by a later gc() pass.
+      db.run("DELETE FROM cf_vfs_chunks WHERE inode = ?", inode);
+    } else {
+      db.run(
+        "INSERT INTO cf_vfs_nodes (type, mode, mtime, rev) VALUES ('file', ?, ?, 0)",
+        mode,
+        mtime,
+      );
+      const allocated = db.scalar<number>("SELECT last_insert_rowid()");
+      if (allocated === undefined) {
+        throw createWorkspaceError("EIO", "failed to allocate inode");
+      }
+      inode = allocated;
+      db.run(
+        "INSERT INTO cf_vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+        parentInode,
+        leafName,
+        inode,
+      );
+    }
+
+    // Upsert blobs and write the new chunk list.
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const chunk = chunks[idx];
+      db.run(
+        "INSERT INTO cf_vfs_blobs (hash, size, last_seen) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
+        chunk.hash,
+        chunk.size,
+        mtime,
+      );
+      db.run(
+        "INSERT INTO cf_vfs_blob_bytes (hash, bytes) VALUES (?, ?) ON CONFLICT(hash) DO NOTHING",
+        chunk.hash,
+        chunk.bytes,
+      );
+      db.run(
+        "INSERT INTO cf_vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
+        inode,
+        idx,
+        chunk.hash,
+        chunk.size,
+      );
+    }
+
+    const rev = incrementRev(db);
+    db.run(
+      "UPDATE cf_vfs_nodes SET mode = ?, mtime = ?, rev = ? WHERE inode = ?",
+      mode,
+      mtime,
+      rev,
+      inode,
+    );
+  });
+}
