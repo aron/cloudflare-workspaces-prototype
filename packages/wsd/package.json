@@ -22,6 +22,7 @@
   "dependencies": {
     "fuse-native": "^2.2.6",
     "@platformatic/vfs": "^0.4.0",
-    "@cloudflare/workspace-fs": "*"
+    "@cloudflare/workspace-fs": "*",
+    "@cloudflare/workspace-rpc": "*"
   }
 }

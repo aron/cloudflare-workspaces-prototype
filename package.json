@@ -25,7 +25,8 @@
       "node_modules/fuse-shared-library-linux/**/*",
       "node_modules/fuse-shared-library-linux-arm/**/*",
       "node_modules/@platformatic/vfs/**/*",
-      "packages/workspace-fs/dist/**/*"
+      "packages/workspace-fs/dist/**/*",
+      "packages/workspace-rpc/dist/**/*"
     ]
   }
 }

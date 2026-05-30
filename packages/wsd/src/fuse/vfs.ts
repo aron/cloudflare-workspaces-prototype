@@ -1,9 +1,13 @@
 import {
+  applyChanges,
+  type ChangeEntry,
   Database,
   initializeSchema,
   SQLiteTestStorage,
   SQLiteWorkspaceProvider,
+  stageBlob,
 } from "@cloudflare/workspace-fs";
+import type { SyncRPC } from "@cloudflare/workspace-rpc";
 import { create, type VirtualFileSystem, VirtualProvider } from "@platformatic/vfs";
 
 export type NodeVirtualFileSystem = VirtualFileSystem;
@@ -113,9 +117,85 @@ for (const name of FORWARDED_METHODS) {
   });
 }
 
-export function createNodeVirtualFileSystem(): NodeVirtualFileSystem {
+export interface CreateOptions {
+  // Optional upstream sync surface. When set, the local store
+  // performs an initial pull on construction. When unset, wsd runs
+  // standalone against an in-memory store.
+  //
+  // The caller owns the carrier (WebSocket, in-process direct
+  // binding, or any future flavour). This package only needs the
+  // typed surface; the transport seam lives in workspace-rpc.
+  // Future RPCs (exec, mounts, watchers) will travel beside
+  // SyncRPC on the same connection, so the caller may pass a
+  // composite stub — we accept the narrow SyncRPC subset
+  // structurally.
+  upstream?: SyncRPC;
+}
+
+export async function createNodeVirtualFileSystem(
+  options: CreateOptions = {},
+): Promise<NodeVirtualFileSystem> {
   const storage = new SQLiteTestStorage();
   const db = new Database(storage);
   initializeSchema(db, () => Date.now());
+  if (options.upstream !== undefined) {
+    await initialPull(db, options.upstream);
+  }
   return create(new SQLiteVirtualProvider(db), { moduleHooks: false });
+}
+
+// Initial pull: fetch every ChangeEntry from upstream, stage the
+// referenced chunk bytes locally, then apply the entries. Bounded
+// to the wire; large workspaces stream through without buffering
+// the whole change set in memory.
+async function initialPull(db: Database, upstream: SyncRPC): Promise<void> {
+  const changesStream = await upstream.fetchChanges({ sinceRev: 0 });
+  const entries: ChangeEntry[] = [];
+  const wantedHashes: Uint8Array[] = [];
+  const seen = new Set<string>();
+  const reader = changesStream.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      entries.push(value);
+      if (value.kind === "file") {
+        for (const c of value.chunks) {
+          const k = hex(c.hash);
+          if (!seen.has(k)) {
+            seen.add(k);
+            wantedHashes.push(c.hash);
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  // Probe: only fetch hashes the receiver doesn't already hold.
+  // On a fresh DB the probe is empty so we fetch everything; on a
+  // warm DB it's the content-addressed dedup at work.
+  const haveSubset = await upstream.hasObjects(wantedHashes);
+  const have = new Set(haveSubset.map(hex));
+  const missing = wantedHashes.filter((h) => !have.has(hex(h)));
+  if (missing.length > 0) {
+    const bytesStream = await upstream.fetchObjects(missing);
+    const bytesReader = bytesStream.getReader();
+    try {
+      while (true) {
+        const { value, done } = await bytesReader.read();
+        if (done) break;
+        stageBlob(db, value.hash, value.bytes, Date.now());
+      }
+    } finally {
+      bytesReader.releaseLock();
+    }
+  }
+  await applyChanges(db, entries, new Map());
+}
+
+function hex(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.byteLength; i++) s += bytes[i].toString(16).padStart(2, "0");
+  return s;
 }

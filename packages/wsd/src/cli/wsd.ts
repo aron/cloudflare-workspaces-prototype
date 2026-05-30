@@ -3,6 +3,7 @@
 import { mkdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isAbsolute } from "node:path";
+import { createSyncClient, type SyncClient } from "@cloudflare/workspace-rpc/client";
 import {
   createNodeVirtualFileSystem,
   detectFUSEBackend,
@@ -123,7 +124,12 @@ async function main(): Promise<void> {
     throw new Error(`FUSE backend unavailable: ${backend.reason}`);
   }
 
-  const vfs = createNodeVirtualFileSystem();
+  const upstreamUrl = process.env.UPSTREAM_URL?.trim();
+  let upstreamClient: SyncClient | undefined;
+  if (upstreamUrl !== undefined && upstreamUrl.length > 0) {
+    upstreamClient = createSyncClient({ url: upstreamUrl });
+  }
+  const vfs = await createNodeVirtualFileSystem({ upstream: upstreamClient });
   const info: WSDInfo = { backend, mountPoint, port };
 
   await mkdir(mountPoint, { recursive: true });
@@ -142,6 +148,13 @@ async function main(): Promise<void> {
     }
 
     await unmount(fuse);
+    if (upstreamClient !== undefined) {
+      try {
+        await upstreamClient.close();
+      } catch (error) {
+        console.error(error);
+      }
+    }
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
 
