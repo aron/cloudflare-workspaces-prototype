@@ -23,3 +23,33 @@ export async function withDB<T>(
     storage.close();
   }
 }
+
+// Two independent DBs split across a snapshot/apply pair. The shape
+// matches the workerd backend, which can't hold two DOs alive at
+// once because of cross-DO I/O isolation — the snapshot pass
+// captures everything the apply pass needs as plain serializable
+// values.
+//
+// Under node we run both callbacks in the same process with two
+// SQLiteTestStorage instances. Either shape would work here; we
+// match the workerd API so test code stays uniform.
+export async function withTwoDBs<S, T>(
+  snapshot: (a: Database) => S | Promise<S>,
+  apply: (b: Database, snapshot: S) => T | Promise<T>,
+  options: WithDBOptions = {},
+): Promise<T> {
+  const storageA = new SQLiteTestStorage();
+  const storageB = new SQLiteTestStorage();
+  const a = new Database(storageA);
+  const b = new Database(storageB);
+  const now = options.now ?? (() => 1000);
+  initializeSchema(a, now);
+  initializeSchema(b, now);
+  try {
+    const captured = await snapshot(a);
+    return await apply(b, captured);
+  } finally {
+    storageA.close();
+    storageB.close();
+  }
+}

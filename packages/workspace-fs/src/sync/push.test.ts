@@ -5,11 +5,8 @@ import { readFile } from "../fs/readFile.js";
 import { resolveInode } from "../fs/resolve.js";
 import { rm } from "../fs/rm.js";
 import { symlink } from "../fs/symlink.js";
-import { withDB } from "../fs/with-db.js";
+import { withDB, withTwoDBs } from "../fs/with-db.js";
 import { writeFile } from "../fs/writeFile.js";
-import { initializeSchema } from "../schema/index.js";
-import { Database } from "../storage.js";
-import { SQLiteTestStorage } from "../testing.js";
 import { type ChangeEntry } from "./changes.js";
 import { coalesceChanges } from "./coalesce.js";
 import { pushObjects } from "./push.js";
@@ -70,66 +67,47 @@ async function drain<T>(it: AsyncIterable<T>): Promise<T[]> {
   return out;
 }
 
-// Build a fresh receiver DB. Lives outside withDB because we hold two
-// instances at once for the convergence test.
-function freshDB(): { db: Database; close: () => void } {
-  const storage = new SQLiteTestStorage();
-  const db = new Database(storage);
-  initializeSchema(db, () => 1);
-  return { db, close: () => storage.close() };
-}
-
 describe("push", () => {
   it("transfers a single file end-to-end", async () => {
-    await withDB(async (a) => {
-      await writeFile(a, "/hello.txt", "hello world", { mode: 0o644 }, () => 100);
-
-      const entries = await drain(coalesceChanges(a, 0));
-      const hashes = collectHashes(entries);
-      const objects = new Map<string, Uint8Array>();
-      for await (const { hash, bytes } of pushObjects(a, hashes)) {
-        objects.set(hex(hash), bytes);
-      }
-
-      const { db: b, close } = freshDB();
-      try {
+    await withTwoDBs(
+      async (a) => {
+        await writeFile(a, "/hello.txt", "hello world", { mode: 0o644 }, () => 100);
+        const entries = await drain(coalesceChanges(a, 0));
+        const objects = await pull(a, collectHashes(entries));
+        return { entries, objects };
+      },
+      async (b, { entries, objects }) => {
         await apply(b, entries, objects);
-        // Verify convergence: b reads back what a wrote.
         const node = resolveInode(b, "/hello.txt");
         expect(node?.type).toBe("file");
         const got = await readFile(b, "/hello.txt", "utf8");
         expect(got).toBe("hello world");
-      } finally {
-        close();
-      }
-    });
+      },
+    );
   });
 
   it("converges across mixed mutations", async () => {
-    await withDB(async (a) => {
-      mkdir(a, "/d", { mode: 0o755 }, () => 1);
-      await writeFile(a, "/d/a.txt", "alpha", {}, () => 2);
-      await writeFile(a, "/d/b.txt", "beta", {}, () => 3);
-      symlink(a, "/d/a.txt", "/link", () => 4);
-      await writeFile(a, "/tmp.txt", "scratch", {}, () => 5);
-      rm(a, "/tmp.txt", {});
-
-      const entries = await drain(coalesceChanges(a, 0));
-      const objects = await pull(a, collectHashes(entries));
-
-      const { db: b, close } = freshDB();
-      try {
+    await withTwoDBs(
+      async (a) => {
+        mkdir(a, "/d", { mode: 0o755 }, () => 1);
+        await writeFile(a, "/d/a.txt", "alpha", {}, () => 2);
+        await writeFile(a, "/d/b.txt", "beta", {}, () => 3);
+        symlink(a, "/d/a.txt", "/link", () => 4);
+        await writeFile(a, "/tmp.txt", "scratch", {}, () => 5);
+        rm(a, "/tmp.txt", {});
+        const entries = await drain(coalesceChanges(a, 0));
+        const objects = await pull(a, collectHashes(entries));
+        return { entries, objects };
+      },
+      async (b, { entries, objects }) => {
         await apply(b, entries, objects);
         expect(await readFile(b, "/d/a.txt", "utf8")).toBe("alpha");
         expect(await readFile(b, "/d/b.txt", "utf8")).toBe("beta");
         expect(resolveInode(b, "/tmp.txt")).toBeNull();
-        // /link resolves through the symlink to /d/a.txt.
         const linked = await readFile(b, "/link", "utf8");
         expect(linked).toBe("alpha");
-      } finally {
-        close();
-      }
-    });
+      },
+    );
   });
 
   it("pushObjects yields each requested hash exactly once", async () => {

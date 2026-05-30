@@ -33,9 +33,6 @@ export default defineConfig({
       "src/schema/index.test.ts",
       "src/provider.test.ts",
       "src/provider-fd.test.ts",
-      // push.test.ts uses SQLiteTestStorage directly to hold two DBs
-      // at once for the convergence test. node:sqlite isn't in workerd.
-      "src/sync/push.test.ts",
     ],
   },
 });

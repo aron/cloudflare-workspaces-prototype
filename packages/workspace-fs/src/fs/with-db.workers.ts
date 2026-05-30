@@ -30,3 +30,35 @@ export async function withDB<T>(
     return await fn(db);
   });
 }
+
+// Two independent DOs. Each newUniqueId() gives a fresh DO with its
+// own SqlStorage. We can't nest runInDurableObject calls because
+// workerd hard-isolates I/O objects between DOs in the same isolate
+// (the Database wrapper captures the SqlStorage as such an object).
+// Snapshot A's outputs to plain serializable values inside its DO
+// context, then apply them in B's. The caller drives the two passes
+// via a snapshot and apply callback pair.
+//
+// This is the workerd shape; the node-side withTwoDBs runs both
+// callbacks in the same process with two real SQLiteTestStorage
+// instances. Tests that need the simpler signature should branch on
+// the node-only path.
+export async function withTwoDBs<S, T>(
+  snapshot: (a: Database) => S | Promise<S>,
+  apply: (b: Database, snapshot: S) => T | Promise<T>,
+  options: WithDBOptions = {},
+): Promise<T> {
+  const stubA = freshStub();
+  const stubB = freshStub();
+  const now = options.now ?? (() => 1000);
+  const captured = await runInDurableObject(stubA, async (_a, stateA) => {
+    const a = new Database(stateA.storage);
+    initializeSchema(a, now);
+    return await snapshot(a);
+  });
+  return runInDurableObject(stubB, async (_b, stateB) => {
+    const b = new Database(stateB.storage);
+    initializeSchema(b, now);
+    return await apply(b, captured);
+  });
+}
