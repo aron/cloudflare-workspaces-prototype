@@ -33,7 +33,8 @@ export class Database {
   }
 
   all<Row extends object>(query: string, ...bindings: unknown[]): Row[] {
-    return this.sql.exec<Row>(query, ...bindings).toArray();
+    const rows = this.sql.exec<Row>(query, ...bindings).toArray();
+    return rows.map(normalizeRow) as Row[];
   }
 
   one<Row extends object>(query: string, ...bindings: unknown[]): Row | undefined {
@@ -49,4 +50,19 @@ export class Database {
     const [value] = Object.values(row);
     return value;
   }
+}
+
+// Cloudflare's DO SqlStorage returns BLOB columns as ArrayBuffer,
+// whereas node:sqlite returns Uint8Array. Normalise to Uint8Array so
+// the rest of the code only has to handle one shape.
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  let out: Record<string, unknown> | undefined;
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+    if (value instanceof ArrayBuffer) {
+      if (out === undefined) out = { ...row };
+      out[key] = new Uint8Array(value);
+    }
+  }
+  return out ?? row;
 }

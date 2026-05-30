@@ -17,11 +17,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:workers": "vitest run --config vitest.config.workers.ts"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.10",
     "@cloudflare/workers-types": "^4.20250529.0",
     "typescript": "^5.8.3",
-    "vitest": "^3.1.4"
+    "vitest": "^4.1.7",
+    "wrangler": "^4.95.0"
   }
 }
