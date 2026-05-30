@@ -35,14 +35,18 @@ export function gc(db: Database, options: GcOptions = {}): GcResult {
     );
     const blobsFreed = db.scalar<number>("SELECT changes()") ?? 0;
 
-    // vfs_manifests is empty today; gc still runs the sweep so we get
-    // the right semantics the moment the sync layer starts populating
-    // the table.
+    // Manifests share the blob safety window: a writer might have
+    // inserted a manifest row but not yet linked it from vfs_nodes.
+    // Inside the same transactionSync block this can't happen, but
+    // keep the window as defence in depth for sync-layer code that
+    // might stage manifests before linking nodes.
     db.run(
       `DELETE FROM vfs_manifests
-        WHERE NOT EXISTS (
-          SELECT 1 FROM vfs_nodes n WHERE n.manifest_hash = vfs_manifests.hash
-        )`,
+        WHERE last_seen < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM vfs_nodes n WHERE n.manifest_hash = vfs_manifests.hash
+          )`,
+      cutoff,
     );
     const manifestsFreed = db.scalar<number>("SELECT changes()") ?? 0;
 

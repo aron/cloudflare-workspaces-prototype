@@ -4,6 +4,7 @@ import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
+import { buildManifest } from "../sync/manifests.js";
 
 // Fixed chunk size per docs/03_filesystem_schema.md and
 // docs/02_sync_protocol.md. Exported so tests can size inputs precisely
@@ -203,12 +204,14 @@ export function writeFileSync(
       );
     }
 
+    const manifestHash = buildManifest(db, chunks, mtime);
     const rev = incrementRev(db);
     db.run(
-      "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ? WHERE inode = ?",
+      "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ?, manifest_hash = ? WHERE inode = ?",
       mode,
       mtime,
       rev,
+      manifestHash,
       inode,
     );
   });

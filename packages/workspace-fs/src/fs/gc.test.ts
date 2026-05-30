@@ -86,7 +86,7 @@ describe("gc", () => {
       // Outside the window it gets swept.
       expect(gc(db, { now: () => 5000, safetyWindowMs: 1_000 })).toEqual({
         blobsFreed: 1,
-        manifestsFreed: 0,
+        manifestsFreed: 1,
       });
       expect(blobCount(db)).toBe(1);
     });

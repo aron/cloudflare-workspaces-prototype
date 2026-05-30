@@ -4,9 +4,10 @@
 
 export const SYNC_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS vfs_manifests (
-    hash    BLOB    PRIMARY KEY,
-    size    INTEGER NOT NULL,
-    encoded BLOB    NOT NULL
+    hash      BLOB    PRIMARY KEY,
+    size      INTEGER NOT NULL,
+    encoded   BLOB    NOT NULL,
+    last_seen INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS vfs_changes (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
