@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const { createNodeVirtualFileSystem } = require("../../dist/fuse/index.js");
 
 test("createNodeVirtualFileSystem returns a @platformatic/vfs filesystem", async () => {
-  const vfs = await createNodeVirtualFileSystem();
+  const { vfs } = await createNodeVirtualFileSystem();
 
   vfs.mkdirSync("/project", { recursive: true });
   vfs.writeFileSync("/project/hello.txt", Buffer.from("hello"));
@@ -61,7 +61,7 @@ test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC",
     async pushObjects() {},
   };
 
-  const vfs = await createNodeVirtualFileSystem({ upstream });
+  const { vfs } = await createNodeVirtualFileSystem({ upstream });
   assert.equal(fetchChangesCalls, 1);
   assert.equal(vfs.readFileSync("/hi.txt").toString(), "hi");
 });

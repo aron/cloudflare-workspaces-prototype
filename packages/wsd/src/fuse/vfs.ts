@@ -132,16 +132,26 @@ export interface CreateOptions {
   upstream?: SyncRPC;
 }
 
+export interface NodeVfsHandle {
+  // @platformatic/vfs filesystem the FUSE driver consumes.
+  vfs: NodeVirtualFileSystem;
+  // workspace-fs Database backing the same store. Exposed so the
+  // CLI can construct a createSyncServer(db) and serve the local
+  // store to upstream callers over capnweb.
+  db: Database;
+}
+
 export async function createNodeVirtualFileSystem(
   options: CreateOptions = {},
-): Promise<NodeVirtualFileSystem> {
+): Promise<NodeVfsHandle> {
   const storage = new SQLiteTestStorage();
   const db = new Database(storage);
   initializeSchema(db, () => Date.now());
   if (options.upstream !== undefined) {
     await initialPull(db, options.upstream);
   }
-  return create(new SQLiteVirtualProvider(db), { moduleHooks: false });
+  const vfs = create(new SQLiteVirtualProvider(db), { moduleHooks: false });
+  return { vfs, db };
 }
 
 // Initial pull: fetch every ChangeEntry from upstream, stage the

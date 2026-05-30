@@ -56,10 +56,53 @@ test("wsd exposes file IO through the mounted filesystem", async (t) => {
   assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello fuse");
 });
 
-async function startWsd(t, { port, mountPoint }: { port: number; mountPoint: string }) {
+test("/ws serves a capnweb SyncRPC session", async (t) => {
+  const { createSyncClient } = await import("@cloudflare/workspace-rpc/client");
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+
+  const client = createSyncClient({ url: `ws://127.0.0.1:${port}/ws` });
+  try {
+    // hasObjects against a fresh DB returns the empty subset.
+    assert.deepEqual(await client.hasObjects([]), []);
+    // fetchChanges streams zero entries against a fresh DB.
+    const stream = await client.fetchChanges({ sinceRev: 0, ignore: [] });
+    const reader = stream.getReader();
+    const entries = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      entries.push(value);
+    }
+    assert.deepEqual(entries, []);
+  } finally {
+    await client.close();
+  }
+});
+
+test("/api serves a capnweb HTTP-batch SyncRPC session", async (t) => {
+  const { newHttpBatchRpcSession } = await import("capnweb");
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+
+  // HTTP batch flushes on first await; each call is a fresh session.
+  const stub = newHttpBatchRpcSession(`http://127.0.0.1:${port}/api`);
+  assert.deepEqual(await stub.hasObjects([]), []);
+});
+
+async function startWsd(
+  t,
+  {
+    port,
+    mountPoint,
+    env = {},
+  }: { port: number; mountPoint: string; env?: Record<string, string> },
+) {
   const child = spawn(cliPath, {
     cwd: packageRoot,
-    env: { ...process.env, MOUNT_POINT: mountPoint, PORT: String(port) },
+    env: { ...process.env, MOUNT_POINT: mountPoint, PORT: String(port), ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
