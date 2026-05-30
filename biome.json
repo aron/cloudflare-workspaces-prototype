@@ -9,16 +9,14 @@
       "**/*.mjs",
       "**/*.cjs",
       "**/*.json",
-      "**/*.jsonc"
-    ],
-    "experimentalScannerIgnores": [
-      "**/node_modules/**",
-      "**/node_modules.host-backup.*/**",
-      "**/dist/**",
-      "**/artifacts/**",
-      "**/.devbox/**",
-      "**/.venv/**",
-      "package-lock.json"
+      "**/*.jsonc",
+      "!**/node_modules/**",
+      "!**/node_modules.host-backup.*/**",
+      "!**/dist/**",
+      "!**/artifacts/**",
+      "!**/.devbox/**",
+      "!**/.venv/**",
+      "!package-lock.json"
     ]
   },
   "formatter": {
