@@ -15,6 +15,7 @@ export interface DetectFUSEBackendOptions {
 
 const LINUX_FUSE_DEVICE = "/dev/fuse";
 const FUSE_T_FILESYSTEM = "/Library/Filesystems/fuse-t.fs";
+const FUSE_T_APP_SUPPORT_LIB = "/Library/Application Support/fuse-t/lib";
 const MACFUSE_FILESYSTEM = "/Library/Filesystems/macfuse.fs";
 const HOMEBREW_ARM64_LIB = "/opt/homebrew/lib";
 const HOMEBREW_INTEL_LIB = "/usr/local/lib";
@@ -46,8 +47,12 @@ export async function detectFUSEBackend(options: DetectFUSEBackendOptions = {}):
     }
 
     if (requested === "auto" || requested === "fuse-t") {
-      if (await canAccess(access, FUSE_T_FILESYSTEM)) {
-        return { kind: "fuse-t", dylibDir: await resolveFUSETDylibDir(access, arch) };
+      const dylibDir = await resolveFUSETDylibDir(access, arch);
+      const installed =
+        (await canAccess(access, FUSE_T_FILESYSTEM)) ||
+        (await canAccess(access, FUSE_T_APP_SUPPORT_LIB));
+      if (installed) {
+        return { kind: "fuse-t", dylibDir };
       }
 
       if (requested === "fuse-t") {
@@ -75,17 +80,16 @@ async function resolveFUSETDylibDir(
   access: (path: string) => Promise<void>,
   arch: NodeJS.Architecture,
 ): Promise<string> {
-  const preferred = arch === "arm64" ? HOMEBREW_ARM64_LIB : HOMEBREW_INTEL_LIB;
-  const fallback = arch === "arm64" ? HOMEBREW_INTEL_LIB : HOMEBREW_ARM64_LIB;
+  const homebrewPreferred = arch === "arm64" ? HOMEBREW_ARM64_LIB : HOMEBREW_INTEL_LIB;
+  const homebrewFallback = arch === "arm64" ? HOMEBREW_INTEL_LIB : HOMEBREW_ARM64_LIB;
 
-  if (await canAccess(access, preferred)) {
-    return preferred;
-  }
-  if (await canAccess(access, fallback)) {
-    return fallback;
+  for (const candidate of [FUSE_T_APP_SUPPORT_LIB, homebrewPreferred, homebrewFallback]) {
+    if (await canAccess(access, candidate)) {
+      return candidate;
+    }
   }
 
-  return preferred;
+  return FUSE_T_APP_SUPPORT_LIB;
 }
 
 async function canAccess(access: (path: string) => Promise<void>, path: string): Promise<boolean> {

@@ -38,6 +38,14 @@ test("detectFUSEBackend prefers FUSE-T over macFUSE on macOS", async () => {
   }), { kind: "fuse-t", dylibDir: "/opt/homebrew/lib" });
 });
 
+test("detectFUSEBackend detects FUSE-T installed under /Library/Application Support", async () => {
+  assert.deepEqual(await detectFUSEBackend({
+    access: accessFor(["/Library/Application Support/fuse-t/lib"]),
+    arch: "arm64",
+    platform: "darwin",
+  }), { kind: "fuse-t", dylibDir: "/Library/Application Support/fuse-t/lib" });
+});
+
 test("detectFUSEBackend falls back to macFUSE on macOS", async () => {
   assert.deepEqual(await detectFUSEBackend({
     access: accessFor(["/Library/Filesystems/macfuse.fs"]),
