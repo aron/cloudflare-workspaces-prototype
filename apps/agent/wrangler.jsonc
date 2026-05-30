@@ -68,7 +68,15 @@
     // "ACCESS_AUD":         "<aud-tag-from-access-app-settings>"
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    // Enable the `cloudflare:workers` tracing binding (private beta).
+    // The agent emits spans via `src/tracing.ts` and the workspace
+    // package; `persist: true` (default) sends them to the dashboard's
+    // observability platform. No sampling rate set — collect everything
+    // until volume forces a sampler.
+    "traces": {
+      "enabled": true
+    }
   },
   "workers_dev": true,
   "preview_urls": false
