@@ -44,8 +44,17 @@ describe("readFile", () => {
     expect(new TextDecoder().decode(await drain(stream))).toBe("hello workspace");
   });
 
-  // The utf8 / string overloads live at a higher layer; this module
-  // only deals in streams.
+  it("returns a string when encoding is 'utf8'", async () => {
+    const db = freshDB();
+    await writeFile(db, "/a.txt", "hello", {}, () => 0);
+    expect(await readFile(db, "/a.txt", "utf8")).toBe("hello");
+  });
+
+  it("accepts the object-form encoding option", async () => {
+    const db = freshDB();
+    await writeFile(db, "/a.txt", "hello", {}, () => 0);
+    expect(await readFile(db, "/a.txt", { encoding: "utf8" })).toBe("hello");
+  });
 
   it("streams a multi-chunk file in chunk-sized pieces", async () => {
     const db = freshDB();
@@ -74,6 +83,8 @@ describe("readFile", () => {
     const stream = await readFile(db, "/empty");
     const bytes = await drain(stream);
     expect(bytes.byteLength).toBe(0);
+    // And the utf8 form returns "".
+    expect(await readFile(db, "/empty", "utf8")).toBe("");
   });
 
   it("touches cf_vfs_blobs.last_seen when chunks are read", async () => {
@@ -81,8 +92,7 @@ describe("readFile", () => {
     await writeFile(db, "/x.txt", "content", {}, () => 100);
     const before = db.scalar<number>("SELECT last_seen FROM cf_vfs_blobs");
     expect(before).toBe(100);
-    const stream = await readFile(db, "/x.txt", () => 200);
-    await drain(stream);
+    await readFile(db, "/x.txt", "utf8", () => 200);
     const after = db.scalar<number>("SELECT last_seen FROM cf_vfs_blobs");
     expect(after).toBe(200);
   });
@@ -90,12 +100,14 @@ describe("readFile", () => {
   it("rejects ENOENT when the path does not exist", async () => {
     const db = freshDB();
     await expect(readFile(db, "/missing")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(db, "/missing", "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects EISDIR when the path is a directory", async () => {
     const db = freshDB();
     mkdir(db, "/d", {}, () => 0);
     await expect(readFile(db, "/d")).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(readFile(db, "/d", "utf8")).rejects.toMatchObject({ code: "EISDIR" });
   });
 
   it("rejects ENOENT when an intermediate segment is missing", async () => {
