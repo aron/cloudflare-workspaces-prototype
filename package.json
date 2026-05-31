@@ -15,18 +15,8 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",
     "@types/node": "^22.10.7",
-    "@yao-pkg/pkg": "^6.20.0",
+    "esbuild": "^0.27.7",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^6.0.3"
-  },
-  "pkg": {
-    "assets": [
-      "node_modules/fuse-native/prebuilds/**/*",
-      "node_modules/fuse-shared-library-darwin/**/*",
-      "node_modules/fuse-shared-library-linux/**/*",
-      "node_modules/fuse-shared-library-linux-arm/**/*",
-      "node_modules/@platformatic/vfs/**/*",
-      "packages/workspace-fs/dist/**/*",
-      "packages/workspace-rpc/dist/**/*"
-    ]
   }
 }
