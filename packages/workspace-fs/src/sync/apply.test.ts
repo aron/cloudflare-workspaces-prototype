@@ -119,3 +119,97 @@ describe("applyChanges", () => {
     });
   });
 });
+
+describe("applyChanges loopback suppression", () => {
+  it("advances pushRev to currentRev when source=upstream", async () => {
+    await withDB(async (db) => {
+      // Pre-existing local state: a write the container already
+      // pushed. pushRev sits at currentRev.
+      await writeFile(db, "/local.txt", "local", {}, () => 1);
+      const { currentRev, readWatermark, writeWatermark } = await import("./watermarks.js");
+      writeWatermark(db, "pushRev", currentRev(db));
+      const beforePushRev = readWatermark(db, "pushRev");
+      expect(beforePushRev).toBeGreaterThan(0);
+
+      // Apply an entry as if it came from upstream. The local rev
+      // counter bumps (writeFile bumps rev), but the source flag
+      // makes the helper advance pushRev to match \u2014 the bump
+      // looks like it was already pushed.
+      await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            path: "/from-upstream.txt",
+            mode: 0o644,
+            mtime: 2,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+        { source: "upstream" },
+      );
+
+      const afterCurrent = currentRev(db);
+      const afterPushRev = readWatermark(db, "pushRev");
+      // Apply bumped currentRev (the writeFile inside).
+      expect(afterCurrent).toBeGreaterThan(beforePushRev);
+      // pushRev caught up so the next coalesceChanges(db, pushRev)
+      // sees nothing.
+      expect(afterPushRev).toBe(afterCurrent);
+    });
+  });
+
+  it("source=local (default) does not advance pushRev", async () => {
+    await withDB(async (db) => {
+      const { readWatermark } = await import("./watermarks.js");
+      await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            path: "/local.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+      expect(readWatermark(db, "pushRev")).toBe(0);
+    });
+  });
+
+  it("upstream entries do not get re-pushed on the next coalesce", async () => {
+    await withDB(async (db) => {
+      const { coalesceChanges } = await import("./coalesce.js");
+      const { currentRev, readWatermark, writeWatermark } = await import("./watermarks.js");
+      // Seed pushRev at the current point.
+      writeWatermark(db, "pushRev", currentRev(db));
+
+      // Upstream sends a file. After apply, pushRev should equal
+      // currentRev, so coalesceChanges(db, pushRev) is empty.
+      await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            path: "/upstream.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+        { source: "upstream" },
+      );
+      const cursor = readWatermark(db, "pushRev");
+      const drained = [];
+      for await (const e of coalesceChanges(db, cursor)) drained.push(e);
+      expect(drained).toEqual([]);
+    });
+  });
+});

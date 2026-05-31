@@ -4,7 +4,7 @@ import { symlink } from "../fs/symlink.js";
 import { writeFile } from "../fs/writeFile.js";
 import type { Database } from "../storage.js";
 import type { ChangeEntry } from "./changes.js";
-import { readWatermark, writeWatermark } from "./watermarks.js";
+import { currentRev, readWatermark, writeWatermark } from "./watermarks.js";
 
 export interface ApplyOptions {
   // Soft cap on bytes written per transactionSync batch. Default 64
@@ -18,6 +18,16 @@ export interface ApplyOptions {
   // sender's currentRev so the next pull resumes from the right
   // cursor. Never regresses the watermark.
   advanceFetchRev?: number;
+  // Where the entries came from. 'local' (default) treats the apply
+  // path like any other mutation: writeFile/mkdir/etc bump vfs_meta.rev
+  // and the push loop later ships those new revs upstream. 'upstream'
+  // means the entries came from a remote push or fetch; the apply
+  // still bumps rev (so readers see fresh data) but we advance pushRev
+  // to match, so the push loop knows everything in this range is
+  // already on the wire. Without this flag, applying an upstream
+  // entry would generate a push-back on the next tick and the two
+  // sides would ping-pong forever.
+  source?: "local" | "upstream";
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
@@ -120,6 +130,23 @@ export async function applyChanges(
     const current = readWatermark(db, "fetchRev");
     if (options.advanceFetchRev > current) {
       writeWatermark(db, "fetchRev", options.advanceFetchRev);
+    }
+  }
+
+  // Loopback suppression: when this apply pass reflects entries
+  // from upstream, the writeFile/mkdir/symlink/rm calls inside
+  // bumped vfs_meta.rev. Without this advance, the next push tick
+  // would see those rev bumps as fresh local changes and push them
+  // back to upstream, which would apply them and bump again, and
+  // so on. Stamping pushRev = currentRev marks the range as
+  // already-shipped. Safe because wsd runs single-threaded JS,
+  // so no local mutation can interleave between the last
+  // applyChanges write and the writeWatermark below.
+  if (options.source === "upstream") {
+    const after = currentRev(db);
+    const existing = readWatermark(db, "pushRev");
+    if (after > existing) {
+      writeWatermark(db, "pushRev", after);
     }
   }
 }
