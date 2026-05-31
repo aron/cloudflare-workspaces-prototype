@@ -5,8 +5,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { createSyncClient, type SyncClient } from "@cloudflare/workspace-rpc/client";
-import { acceptWebSocketSession, createWorkspaceServer } from "@cloudflare/workspace-rpc/server";
-import { nodeHttpBatchRpcResponse } from "capnweb";
+import {
+  acceptWebSocketSession,
+  createWorkspaceServer,
+  serveHttpBatch,
+} from "@cloudflare/workspace-rpc/server";
 import { WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
 import {
@@ -92,7 +95,7 @@ function createHTTPServer(
         });
         return;
       }
-      void nodeHttpBatchRpcResponse(request, response, rpc).catch((error) => {
+      void serveHttpBatch(request, response, rpc).catch((error) => {
         console.error("/api batch failed:", error);
         if (!response.headersSent) {
           send(response, 500, "internal error\n", {

@@ -452,13 +452,8 @@ export async function mountFuse(options: {
   mountPoint: string;
   vfs: NodeVirtualFileSystem;
 }): Promise<FuseMount> {
-  // fuse-native is CJS; require() it directly. We used to dynamic-import
-  // for ESM compat, but pkg's snapshot loader has no V8
-  // HostImportModuleDynamically callback wired up, so any import() inside
-  // the packed binary throws 'A dynamic import callback was not
-  // specified.'
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const fuseModule = require("fuse-native");
+  // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
+  const fuseModule: any = await import("fuse-native");
   const Fuse = fuseModule.default ?? fuseModule;
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
