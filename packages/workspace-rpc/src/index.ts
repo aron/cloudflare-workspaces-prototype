@@ -16,4 +16,11 @@
 // alternative implementation (a queue-backed server for replay
 // tests, a mock client for unit tests) without changing call sites.
 
-export type { SyncRPC, WireError, WireErrorCode } from "./interface.js";
+export type {
+  ExecEvent,
+  ShellRPC,
+  SyncRPC,
+  WireError,
+  WireErrorCode,
+  WorkspaceRPC,
+} from "./interface.js";

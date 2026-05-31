@@ -12,10 +12,10 @@
 //   hasObjects     — either probes the other. Returns the subset
 //                    the receiver already holds.
 //
-// The exec / getExec / killExec / ackExec surface from docs/08 is
-// out of scope for the initial RPC sketch; this package focuses on
-// the sync wire only. The exec path will land in a separate
-// interface in a follow-up.
+// The exec / getExec / killExec / disposeExec surface from docs/05
+// + docs/08 hangs off a sibling ShellRPC interface. Both compose
+// under the top-level WorkspaceRPC, so the wire stub exposes one
+// stable surface while the two halves stay internally separable.
 
 import type { ChangeEntry } from "@cloudflare/workspace-fs";
 
@@ -90,10 +90,66 @@ export interface SyncRPC {
   pushObjects(objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>): Promise<void>;
 }
 
+// Process supervision surface. Lives alongside SyncRPC; mirrors
+// the docs/08 ContainerRPC shape for the exec half. wsd's Runner
+// is the concrete implementation today; the interface keeps that
+// dependency out of the wire contract.
+export interface ShellRPC {
+  // Spawn a command in the container. Returns an id (caller-
+  // supplied or runner-minted) and a ReadableStream of ExecEvents.
+  // Capnweb streams handle backpressure end-to-end; consumer-side
+  // slowness propagates to the spawned process via the kernel pipe.
+  exec(input: { command: string; cwd?: string; id?: string }): Promise<{
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  }>;
+
+  // Reattach to an in-flight or recently-completed exec by id.
+  // Pass `after` to resume from a known seq; "tail" yields only
+  // future events; omit to receive every event from the start.
+  getExec(input: { id: string; after?: number | "tail" }): Promise<{
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  }>;
+
+  // Signal a running exec. No-op once the process has exited.
+  killExec(input: {
+    id: string;
+    signal?: "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP";
+  }): Promise<void>;
+
+  // Release the event log for a completed exec. Future getExec on
+  // the same id throws ENOENT.
+  disposeExec(input: { id: string }): Promise<void>;
+}
+
+// Composite stub. The wire serves one of these per session; the
+// two halves are independently testable. Host-side callers reach
+// each via `.sync` / `.shell`.
+export interface WorkspaceRPC {
+  sync: SyncRPC;
+  shell: ShellRPC;
+}
+
+// Every event carries a per-id monotonic `seq` (see PLAN.md Phase 8,
+// seq vs timestamp). The host-side Workspace.shell decodes value to
+// string when the caller passes `encoding: "utf8"`.
+export type ExecEvent =
+  | { id: string; seq: number; name: "stdout"; value: Uint8Array }
+  | { id: string; seq: number; name: "stderr"; value: Uint8Array }
+  | { id: string; seq: number; name: "exit"; value: number };
+
 // Error codes carried over the wire. The client adapter rethrows as
 // WorkspaceError preserving `code`, so application code can branch
 // on err.code rather than parse messages. See docs/08.
-export type WireErrorCode = "ENOENT" | "EUNKNOWN_HASH" | "ESHUTDOWN" | "EAUTH" | "EPROTOCOL";
+export type WireErrorCode =
+  | "ENOENT"
+  | "EUNKNOWN_HASH"
+  | "ESHUTDOWN"
+  | "EAUTH"
+  | "EPROTOCOL"
+  | "EEXEC_BUSY"
+  | "ELOG_TRUNCATED";
 
 export interface WireError {
   code: WireErrorCode;

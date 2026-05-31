@@ -20,18 +20,36 @@ import {
 } from "@cloudflare/workspace-fs";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
-import type { SyncRPC } from "./interface.js";
+import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js";
+
+// Subset of wsd's Runner that the shell server needs. Defining
+// the shape here (instead of importing the concrete class) keeps
+// workspace-rpc free of a wsd dependency — the package builds and
+// runs without wsd's process-supervision code on the path.
+export interface RunnerLike {
+  exec(
+    command: string,
+    options?: { id?: string; cwd?: string },
+  ): {
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  };
+  get(
+    id: string,
+    options?: { after?: number | "tail" },
+  ): {
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  };
+  kill(id: string, signal?: "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP"): void;
+  dispose(id: string): void;
+}
 
 export interface ServerOptions {
   ignore?: string[];
   now?: () => number;
 }
 
-// Internal: a class-shaped SyncRPC. Capnweb requires RpcTarget for
-// objects that travel by reference; the server object is the
-// session's localMain so it never travels as a stub, but extending
-// RpcTarget keeps the type machinery happy when methods return
-// references that do.
 class SyncRpcServer extends RpcTarget implements SyncRPC {
   constructor(
     private readonly db: Database,
@@ -123,6 +141,59 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     }
   }
 }
+class ShellRpcServer extends RpcTarget implements ShellRPC {
+  constructor(private readonly runner: RunnerLike) {
+    super();
+  }
+
+  async exec(input: { command: string; cwd?: string; id?: string }): Promise<{
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  }> {
+    return this.runner.exec(input.command, { id: input.id, cwd: input.cwd });
+  }
+
+  async getExec(input: { id: string; after?: number | "tail" }): Promise<{
+    id: string;
+    events: ReadableStream<ExecEvent>;
+  }> {
+    return this.runner.get(input.id, { after: input.after });
+  }
+
+  async killExec(input: {
+    id: string;
+    signal?: "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP";
+  }): Promise<void> {
+    this.runner.kill(input.id, input.signal);
+  }
+
+  async disposeExec(input: { id: string }): Promise<void> {
+    this.runner.dispose(input.id);
+  }
+}
+
+// Composite server: exposes both halves as named fields on one
+// stub. Capnweb walks the property tree on demand, so callers
+// only pay for the half they reach.
+class WorkspaceRpcServer extends RpcTarget implements WorkspaceRPC {
+  // sync / shell are exposed as getters — capnweb's RpcTarget
+  // refuses to traverse plain instance properties (the readLoop
+  // raises 'instance properties cannot be accessed over RPC').
+  // Getters look like methods to the dispatch path.
+  #sync: SyncRPC;
+  #shell: ShellRPC;
+  constructor(sync: SyncRPC, shell: ShellRPC) {
+    super();
+    this.#sync = sync;
+    this.#shell = shell;
+  }
+  get sync(): SyncRPC {
+    return this.#sync;
+  }
+  get shell(): ShellRPC {
+    return this.#shell;
+  }
+}
 
 // Construct a SyncRPC bound to `db`. The carrier (HTTP server +
 // WebSocketServer) is the caller's responsibility; this just hands
@@ -130,6 +201,22 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
 // acceptWebSocketSession().
 export function createSyncServer(db: Database, options: ServerOptions = {}): SyncRPC {
   return new SyncRpcServer(db, { ignore: options.ignore ?? [] });
+}
+
+// Construct a ShellRPC bound to a Runner. wsd holds the only
+// Runner today; tests can pass a fake that implements RunnerLike.
+export function createShellServer(runner: RunnerLike): ShellRPC {
+  return new ShellRpcServer(runner);
+}
+
+// Construct the composite WorkspaceRPC. The wire serves this on
+// /ws so clients reach `.sync` and `.shell` through one session.
+export function createWorkspaceServer(
+  db: Database,
+  runner: RunnerLike,
+  options: ServerOptions = {},
+): WorkspaceRPC {
+  return new WorkspaceRpcServer(createSyncServer(db, options), createShellServer(runner));
 }
 
 // Attach a capnweb RPC session to a WHATWG-shaped WebSocket. The
@@ -142,7 +229,7 @@ export function createSyncServer(db: Database, options: ServerOptions = {}): Syn
 export function acceptWebSocketSession(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ws: any,
-  rpc: SyncRPC,
+  rpc: SyncRPC | ShellRPC | WorkspaceRPC,
 ): void {
   newWebSocketRpcSession(ws, rpc as unknown as RpcTarget);
 }

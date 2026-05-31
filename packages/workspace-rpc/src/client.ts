@@ -5,7 +5,7 @@
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 
-import type { SyncRPC } from "./interface.js";
+import type { SyncRPC, WorkspaceRPC } from "./interface.js";
 
 export interface RpcEvent {
   rpc: keyof SyncRPC;
@@ -103,4 +103,49 @@ export function createSyncClient(options: ClientOptions): SyncClient {
       };
     },
   }) as unknown as SyncClient;
+}
+
+export interface WorkspaceClient extends WorkspaceRPC {
+  close(): Promise<void>;
+}
+
+// Open a WorkspaceRPC session. Same transport as createSyncClient,
+// different stub shape: callers reach the sync half via `.sync`
+// and the shell half via `.shell`.
+//
+// onRpcEvent isn't wired here yet — the composite stub's
+// property-access path is `stub.sync.push(...)` which capnweb
+// surfaces as a two-step proxy traversal; the per-call timing
+// shim from createSyncClient doesn't compose cleanly. Add when a
+// caller actually needs it.
+export function createWorkspaceClient(options: {
+  url: string;
+  WebSocketImpl?: typeof WebSocket;
+}): WorkspaceClient {
+  const WS = options.WebSocketImpl ?? WebSocket;
+  const ws = new WS(options.url);
+  const stub = newWebSocketRpcSession(
+    ws as unknown as globalThis.WebSocket,
+  ) as RpcStub<WorkspaceRPC>;
+  return new Proxy(stub, {
+    get(target, prop, receiver) {
+      if (prop === "close") {
+        return async () => {
+          await new Promise<void>((resolve) => {
+            const w = ws as unknown as { readyState: number; close: () => void };
+            if (w.readyState >= 2) {
+              resolve();
+              return;
+            }
+            (ws as unknown as EventTarget).addEventListener("close", () => resolve(), {
+              once: true,
+            });
+            w.close();
+            setTimeout(resolve, 200);
+          });
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as WorkspaceClient;
 }

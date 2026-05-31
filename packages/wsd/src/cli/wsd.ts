@@ -5,9 +5,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { createSyncClient, type SyncClient } from "@cloudflare/workspace-rpc/client";
-import { acceptWebSocketSession, createSyncServer } from "@cloudflare/workspace-rpc/server";
+import { acceptWebSocketSession, createWorkspaceServer } from "@cloudflare/workspace-rpc/server";
 import { nodeHttpBatchRpcResponse } from "capnweb";
 import { WebSocketServer } from "ws";
+import { Runner } from "../exec/index.js";
 import {
   createNodeVirtualFileSystem,
   detectFUSEBackend,
@@ -72,7 +73,10 @@ interface HTTPHandle {
   close: () => Promise<void>;
 }
 
-function createHTTPServer(info: WSDInfo, rpc: ReturnType<typeof createSyncServer>): HTTPHandle {
+function createHTTPServer(
+  info: WSDInfo,
+  rpc: ReturnType<typeof createWorkspaceServer>,
+): HTTPHandle {
   const server = createServer((request, response) => {
     const path = requestPath(request);
 
@@ -207,7 +211,16 @@ async function main(): Promise<void> {
       vfs,
     });
   }
-  const rpc = createSyncServer(db);
+  // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
+  // without rebuilding the binary. Default lives in the Runner.
+  const logMaxBytesEnv = process.env.EXEC_LOG_MAX_BYTES;
+  const runner = new Runner({
+    db,
+    ...(logMaxBytesEnv !== undefined && logMaxBytesEnv !== ""
+      ? { logMaxBytes: Number(logMaxBytesEnv) }
+      : {}),
+  });
+  const rpc = createWorkspaceServer(db, runner);
   const http = createHTTPServer(info, rpc);
 
   let shuttingDown = false;
@@ -217,6 +230,11 @@ async function main(): Promise<void> {
 
     try {
       await http.close();
+    } catch (error) {
+      console.error(error);
+    }
+    try {
+      runner.disposeAll();
     } catch (error) {
       console.error(error);
     }
