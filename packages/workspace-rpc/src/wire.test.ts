@@ -399,9 +399,14 @@ describe("push semantics — external vs sync peer", () => {
 
   it("push with senderRev>0 (sync peer) advances pushRev to silence loopback", async () => {
     harness = await startHarness();
-    const { currentRev, readWatermark } = await import("@cloudflare/workspace-fs");
+    const { currentRev, readWatermark, writeWatermark } = await import("@cloudflare/workspace-fs");
     const client = createSyncClient({ url: harness.url });
     try {
+      // Seed pushRev at the current point so the F1 guard
+      // is satisfied: with no unpushed local writes, the
+      // suppression is free to advance pushRev past the
+      // apply's own rev bumps.
+      writeWatermark(harness.db, "pushRev", currentRev(harness.db));
       const bytes = new TextEncoder().encode("from peer");
       const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
       await client.pushObjects(

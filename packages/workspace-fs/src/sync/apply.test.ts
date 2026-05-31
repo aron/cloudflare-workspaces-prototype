@@ -213,3 +213,82 @@ describe("applyChanges loopback suppression", () => {
     });
   });
 });
+
+describe("applyChanges loopback suppression — F1", () => {
+  // Regression for F1: when local writes are sitting at
+  // rev > pushRev (i.e. queued for the next push) and an
+  // upstream pull arrives, the old code advanced pushRev to
+  // currentRev unconditionally. That stranded the local
+  // writes — the next pushOnce skipped them as already-
+  // shipped. Fix: only advance pushRev when the existing
+  // value already covers everything that existed before this
+  // apply.
+  it("does not advance pushRev past unpushed local writes", async () => {
+    await withDB(async (db) => {
+      const { currentRev, readWatermark } = await import("./watermarks.js");
+      // Simulate an unpushed local write: pushRev stays at
+      // its initial value (1) but currentRev climbs.
+      await writeFile(db, "/local.txt", new Uint8Array([1, 2, 3]), { mode: 0o644 }, () => 1);
+      const revBeforeApply = currentRev(db);
+      const pushRevBefore = readWatermark(db, "pushRev");
+      expect(pushRevBefore).toBeLessThan(revBeforeApply);
+
+      // Upstream sends an entry. alreadyApplied skips it
+      // (we don't have it locally, so it actually writes —
+      // pick a path that won't conflict).
+      await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            path: "/from-upstream.txt",
+            mode: 0o644,
+            mtime: 2,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+        { source: "upstream" },
+      );
+      // pushRev must NOT have jumped past the unpushed
+      // local write. The local write is at revBeforeApply;
+      // we want pushRev still < revBeforeApply so the next
+      // pushOnce drains it.
+      const pushRevAfter = readWatermark(db, "pushRev");
+      expect(pushRevAfter).toBeLessThan(revBeforeApply);
+      // The local write should still appear in coalesce.
+      const drained = [];
+      for await (const e of coalesceChanges(db, pushRevAfter)) drained.push(e);
+      const paths = drained.map((e) => (e.kind === "delete" ? e.path : e.path));
+      expect(paths).toContain("/local.txt");
+    });
+  });
+
+  it("still advances pushRev when caller had no unpushed locals", async () => {
+    await withDB(async (db) => {
+      const { currentRev, readWatermark, writeWatermark } = await import("./watermarks.js");
+      // pushRev already caught up to currentRev: caller has
+      // no pending local writes.
+      writeWatermark(db, "pushRev", currentRev(db));
+      await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            path: "/from-upstream.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+        { source: "upstream" },
+      );
+      // Loopback suppression still works in the safe case:
+      // pushRev advances to cover the apply's own rev bump.
+      expect(readWatermark(db, "pushRev")).toBe(currentRev(db));
+    });
+  });
+});

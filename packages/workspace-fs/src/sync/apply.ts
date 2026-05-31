@@ -59,6 +59,10 @@ export async function applyChanges(
   objects: Map<string, Uint8Array>,
   options: ApplyOptions = {},
 ): Promise<void> {
+  // Snapshot rev before we touch anything. Used by the loopback-
+  // suppression at the bottom to decide whether it's safe to
+  // advance pushRev past the entries this apply produced.
+  const revBeforeApply = currentRev(db);
   const maxBytes = options.maxBytesPerBatch ?? DEFAULT_MAX_BYTES;
   const maxPaths = options.maxPathsPerBatch ?? DEFAULT_MAX_PATHS;
 
@@ -148,15 +152,26 @@ export async function applyChanges(
   // bumped vfs_meta.rev. Without this advance, the next push tick
   // would see those rev bumps as fresh local changes and push them
   // back to upstream, which would apply them and bump again, and
-  // so on. Stamping pushRev = currentRev marks the range as
-  // already-shipped. Safe because wsd runs single-threaded JS,
-  // so no local mutation can interleave between the last
-  // applyChanges write and the writeWatermark below.
+  // so on.
+  //
+  // Subtle: we can only advance pushRev when it already covered
+  // every rev that existed *before* this apply. If the caller had
+  // unpushed local writes sitting between (existing, revBeforeApply],
+  // advancing pushRev past them would strand them — the next
+  // pushOnce would skip them as already-shipped. That was F1: a
+  // pull whose entries were all idempotent-skipped still bumped
+  // pushRev up to currentRev, masking local writes that hadn't
+  // shipped yet.
+  //
+  // In the unsafe case we leave pushRev alone. The next pushOnce
+  // drains both the unpushed locals and the apply's own bumps;
+  // the receiver's alreadyApplied() check suppresses the latter.
+  // One redundant round-trip per apply, bounded.
   if (options.source === "upstream") {
-    const after = currentRev(db);
+    const revAfter = currentRev(db);
     const existing = readWatermark(db, "pushRev");
-    if (after > existing) {
-      writeWatermark(db, "pushRev", after);
+    if (existing >= revBeforeApply && revAfter > existing) {
+      writeWatermark(db, "pushRev", revAfter);
     }
   }
 }
