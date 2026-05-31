@@ -69,6 +69,10 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     return iterableToReadableStream(coalesceChanges(this.db, sinceRev, { ignore }));
   }
 
+  async currentRev(): Promise<number> {
+    return currentRev(this.db);
+  }
+
   async hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]> {
     return hasObjects(this.db, hashes);
   }

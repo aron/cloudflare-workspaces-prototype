@@ -8,9 +8,9 @@ import {
   fetchObjects,
   initializeSchema,
   ROOT_INODE,
-  SQLiteTestStorage,
   SQLiteWorkspaceProvider,
 } from "@cloudflare/workspace-fs";
+import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 

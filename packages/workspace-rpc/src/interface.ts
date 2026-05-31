@@ -37,6 +37,20 @@ export interface SyncRPC {
   // Probe which object hashes the receiver has. Same semantics in
   // both directions: git's `have` line, batched. Returns the subset
   // of the input the receiver already holds.
+  // Read the receiver's currentRev. Called by the puller before
+  // a fetchChanges round so it knows the cursor to advance
+  // fetchRev to once the apply settles. Cheap — one SQL
+  // scalar.
+  //
+  // TODO(Phase 6): collapse this into fetchChanges by changing
+  // the return type to { rev, stream }. One RPC instead of two,
+  // and the rev is naturally consistent with the stream snapshot
+  // (no race between the currentRev read and coalesceChanges).
+  // Leaving the separate method in place for now because the
+  // pull loop tests are easier to drive with two independent
+  // RPCs; the refactor is mechanical once the loop shape settles.
+  currentRev(): Promise<number>;
+
   hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]>;
 
   // Container → DO direction of object transfer. Stream bytes for a
