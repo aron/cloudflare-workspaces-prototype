@@ -6,25 +6,24 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "default": "./dist/cjs/index.js"
+      "default": "./dist/index.js"
     },
     "./server": {
       "types": "./dist/server.d.ts",
-      "default": "./dist/cjs/server.js"
+      "default": "./dist/server.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
-      "default": "./dist/cjs/client.js"
+      "default": "./dist/client.js"
     },
     "./driver": {
       "types": "./dist/sync-driver.d.ts",
-      "default": "./dist/cjs/sync-driver.js"
+      "default": "./dist/sync-driver.js"
     }
   },
-  "main": "./dist/cjs/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('node:fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type:'commonjs'}))\"",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
