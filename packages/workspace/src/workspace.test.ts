@@ -6,6 +6,19 @@ import { Workspace } from "./workspace.js";
 // In-process fakes. We never spawn anything from the package
 // code; the backend's only contract is "produce a SyncRPC
 // stub that wsd would speak". A plain object is enough.
+function composite(
+  sync: import("@cloudflare/workspace-rpc").SyncRPC,
+): import("@cloudflare/workspace-rpc").WorkspaceRPC {
+  const notWired = () => Promise.reject(new Error("shell not wired in this test"));
+  const shell: import("@cloudflare/workspace-rpc").ShellRPC = {
+    exec: notWired,
+    getExec: notWired,
+    killExec: notWired,
+    disposeExec: notWired,
+  };
+  return { sync, shell };
+}
+
 function fakeRpc(): import("@cloudflare/workspace-rpc").SyncRPC {
   const blobs = new Map<string, Uint8Array>();
   const files = new Map<
@@ -78,6 +91,9 @@ function fakeRpc(): import("@cloudflare/workspace-rpc").SyncRPC {
         },
       });
     },
+    async watermarks() {
+      return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+    },
     async pushObjects(objects) {
       const reader = objects.getReader();
       try {
@@ -100,7 +116,7 @@ function makeBackend(
   return {
     id,
     async connect(): Promise<BackendHandle> {
-      return { rpc: rpc ?? fakeRpc(), close: async () => {} };
+      return { rpc: composite(rpc ?? fakeRpc()), close: async () => {} };
     },
   };
 }
@@ -144,7 +160,7 @@ describe("Workspace backend fallback", () => {
       id: "only",
       async connect() {
         return {
-          rpc: fakeRpc(),
+          rpc: composite(fakeRpc()),
           close: async () => {
             closed++;
           },

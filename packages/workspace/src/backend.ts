@@ -17,7 +17,7 @@
 // not see method signatures; they only produce URLs and tear
 // them down.
 
-import type { SyncRPC } from "@cloudflare/workspace-rpc";
+import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
 
 export interface WorkspaceBackend {
   // Stable identifier for diagnostics. Conventions:
@@ -33,9 +33,9 @@ export interface WorkspaceBackend {
 }
 
 export interface BackendHandle {
-  // A typed SyncRPC stub pointing at the wsd instance the
+  // The composite WorkspaceRPC stub pointing at the wsd
   // backend produced.
-  rpc: SyncRPC;
+  rpc: WorkspaceRPC;
   // Tear down the connection. Idempotent. The Workspace calls
   // close() during its own close(); backend authors don't need
   // to handle re-entry.

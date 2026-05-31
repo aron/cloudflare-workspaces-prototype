@@ -8,4 +8,14 @@
 
 export type { BackendHandle, WorkspaceBackend } from "./backend.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export type {
+  ExecEncoding,
+  ExecHandle,
+  ExecOptions,
+  ExecResult,
+  GetExecOptions,
+  KillSignal,
+  WorkspaceExecEvent,
+} from "./shell.js";
+export { WorkspaceShell } from "./shell.js";
 export { Workspace, WorkspaceFs, type WorkspaceOptions } from "./workspace.js";

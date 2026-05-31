@@ -207,6 +207,28 @@ try {
   assert(sawExit, `chatty stream never saw exit`);
   assert(totalBytes > 8000, `expected ~11 KiB of stdout, got ${totalBytes}`);
   console.log(`  PASS  slow reader: ${totalBytes} bytes delivered intact`);
+
+  // 7. Workspace.shell host wrapper (E3). Uses the composite
+  // client through the high-level facade: encoding utf8 +
+  // ExecHandle.result() in one call.
+  const { TestBackend, Workspace } = await import(
+    `${repoRoot}/packages/workspace/dist/index.js`
+  );
+  const ws = new Workspace({
+    backends: [new TestBackend({ url: `http://localhost:${port}` })],
+  });
+  try {
+    await ws.ready();
+    const handle = await ws.shell.exec("echo from-workspace && exit 0", {
+      encoding: "utf8",
+    });
+    const { exitCode, stdout } = await handle.result();
+    assert(stdout === "from-workspace\n", `Workspace.shell stdout: ${JSON.stringify(stdout)}`);
+    assert(exitCode === 0, `Workspace.shell exitCode: ${exitCode}`);
+    console.log("  PASS  Workspace.shell.exec(...).result() round-trip");
+  } finally {
+    await ws.close();
+  }
 } finally {
   await client.close();
 }

@@ -7,7 +7,7 @@
 // plumbing. The test harness outside the package is what
 // stands up the wsd container and exposes its port.
 
-import { createSyncClient } from "@cloudflare/workspace-rpc/client";
+import { createWorkspaceClient } from "@cloudflare/workspace-rpc/client";
 
 import type { BackendHandle, WorkspaceBackend } from "../backend.js";
 
@@ -35,7 +35,7 @@ export class TestBackend implements WorkspaceBackend {
     // first RPC. The probe surfaces "harness forgot to start the
     // container" up front.
     await probeHealth(this.#url);
-    const client = createSyncClient({ url: `${wsUrl}/ws` });
+    const client = createWorkspaceClient({ url: `${wsUrl}/ws` });
     return {
       rpc: client,
       close: async () => {

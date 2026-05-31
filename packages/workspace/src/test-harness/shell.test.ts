@@ -1,0 +1,112 @@
+// Shell end-to-end harness. Same shape as end-to-end.test.ts —
+// boots wsd via run-harness.sh, dials with TestBackend, drives
+// Workspace.shell against the real container.
+
+import { env } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+
+import { TestBackend, Workspace } from "../index.js";
+
+interface HarnessEnv {
+  WSD_HARNESS_URL: string;
+}
+
+const url = (env as HarnessEnv).WSD_HARNESS_URL;
+const describeIfDocker = url.length > 0 ? describe : describe.skip;
+
+describeIfDocker("Workspace.shell against a real wsd container", () => {
+  it("exec captures stdout and exit code (utf8)", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const handle = await ws.shell.exec("echo hello && exit 7", {
+        encoding: "utf8",
+      });
+      const { exitCode, stdout, stderr } = await handle.result();
+      expect(stdout).toBe("hello\n");
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(7);
+    } finally {
+      await ws.close();
+    }
+  });
+
+  it("exec captures stdout as Uint8Array by default", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const handle = await ws.shell.exec("printf bytes");
+      const { stdout } = await handle.result();
+      expect(stdout).toBeInstanceOf(Uint8Array);
+      expect(new TextDecoder().decode(stdout as Uint8Array)).toBe("bytes");
+    } finally {
+      await ws.close();
+    }
+  });
+
+  it("kill terminates a running command (SIGTERM → 143)", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const handle = await ws.shell.exec("sleep 30", {
+        id: "killme",
+        encoding: "utf8",
+      });
+      await handle.kill();
+      const { exitCode } = await handle.result();
+      expect(exitCode).toBe(143);
+    } finally {
+      await ws.close();
+    }
+  });
+
+  it("get() replays a finished run by seq cursor", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const first = await ws.shell.exec("printf 'a\\nb\\nc\\n'", {
+        id: "replay",
+        encoding: "utf8",
+      });
+      const original = await first.result();
+      expect(original.exitCode).toBe(0);
+
+      const reattach = await ws.shell.get("replay", {
+        encoding: "utf8",
+        resume: "full",
+      });
+      const again = await reattach.result();
+      expect(again.stdout).toBe(original.stdout);
+      expect(again.exitCode).toBe(original.exitCode);
+    } finally {
+      await ws.close();
+    }
+  });
+
+  it("streaming iteration sees stdout chunks in order", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const handle = await ws.shell.exec("printf one; printf two; printf three", {
+        encoding: "utf8",
+      });
+      const chunks: string[] = [];
+      let exitCode = -1;
+      const reader = handle.getReader();
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value.name === "stdout") chunks.push(value.value);
+          else if (value.name === "exit") exitCode = value.value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      expect(chunks.join("")).toBe("onetwothree");
+      expect(exitCode).toBe(0);
+    } finally {
+      await ws.close();
+    }
+  });
+});

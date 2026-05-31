@@ -12,6 +12,7 @@ import type { ChangeEntry } from "@cloudflare/workspace-fs";
 import type { SyncRPC } from "@cloudflare/workspace-rpc";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { WorkspaceShell } from "./shell.js";
 
 export interface WorkspaceOptions {
   // Backends are tried in declared order. The first one whose
@@ -23,6 +24,7 @@ export class Workspace {
   readonly #backends: WorkspaceBackend[];
   #handle: BackendHandle | undefined;
   #fs: WorkspaceFs | undefined;
+  #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
 
   constructor(options: WorkspaceOptions) {
@@ -52,6 +54,14 @@ export class Workspace {
     return this.#fs;
   }
 
+  // Shell facade. Throws if called before ready() resolves.
+  get shell(): WorkspaceShell {
+    if (!this.#shell) {
+      throw new Error("Workspace not connected — await ready() first");
+    }
+    return this.#shell;
+  }
+
   async close(): Promise<void> {
     if (this.#handle) {
       try {
@@ -59,6 +69,7 @@ export class Workspace {
       } finally {
         this.#handle = undefined;
         this.#fs = undefined;
+        this.#shell = undefined;
         this.#readyPromise = undefined;
       }
     }
@@ -70,7 +81,8 @@ export class Workspace {
       try {
         const handle = await backend.connect();
         this.#handle = handle;
-        this.#fs = new WorkspaceFs(handle.rpc);
+        this.#fs = new WorkspaceFs(handle.rpc.sync);
+        this.#shell = new WorkspaceShell(handle.rpc.shell);
         return;
       } catch (error) {
         errors.push({ id: backend.id, error });
