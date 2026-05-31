@@ -195,7 +195,7 @@ async function main(): Promise<void> {
   if (upstreamUrl !== undefined && upstreamUrl.length > 0) {
     upstreamClient = createSyncClient({ url: upstreamUrl });
   }
-  const { vfs, db } = await createNodeVirtualFileSystem({ upstream: upstreamClient });
+  const { vfs, db, stopSync } = await createNodeVirtualFileSystem({ upstream: upstreamClient });
   const info: WSDInfo = { backend, mountPoint, port };
 
   let fuse: FuseMount | undefined;
@@ -226,6 +226,7 @@ async function main(): Promise<void> {
     }
     if (upstreamClient !== undefined) {
       try {
+        stopSync();
         await upstreamClient.close();
       } catch (error) {
         console.error(error);

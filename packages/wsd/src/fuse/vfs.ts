@@ -1,13 +1,7 @@
-import {
-  applyChanges,
-  type ChangeEntry,
-  Database,
-  initializeSchema,
-  SQLiteWorkspaceProvider,
-  stageBlob,
-} from "@cloudflare/workspace-fs";
+import { Database, initializeSchema, SQLiteWorkspaceProvider } from "@cloudflare/workspace-fs";
 import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
 import type { SyncRPC } from "@cloudflare/workspace-rpc";
+import { pullOnce, tick } from "@cloudflare/workspace-rpc/driver";
 import { create, type VirtualFileSystem, VirtualProvider } from "@platformatic/vfs";
 
 export type NodeVirtualFileSystem = VirtualFileSystem;
@@ -139,7 +133,15 @@ export interface NodeVfsHandle {
   // CLI can construct a createSyncServer(db) and serve the local
   // store to upstream callers over capnweb.
   db: Database;
+  // Stop the periodic sync loop, if one was started. No-op when
+  // no upstream was provided. Idempotent.
+  stopSync: () => void;
 }
+
+// Polling cadence for the background sync loop. Picked to match
+// human-typing latency expectations without saturating the wire.
+// Future work: make this configurable via CreateOptions.
+const SYNC_TICK_MS = 250;
 
 export async function createNodeVirtualFileSystem(
   options: CreateOptions = {},
@@ -147,65 +149,39 @@ export async function createNodeVirtualFileSystem(
   const storage = new SQLiteTestStorage();
   const db = new Database(storage);
   initializeSchema(db, () => Date.now());
+
+  let stopSync = () => {};
   if (options.upstream !== undefined) {
-    await initialPull(db, options.upstream);
+    // Initial pull. The polling loop would catch up eventually,
+    // but the FUSE mount comes up populated by waiting for the
+    // first pull to settle before returning.
+    await pullOnce(db, options.upstream);
+    stopSync = startSyncLoop(db, options.upstream);
   }
+
   const vfs = create(new SQLiteVirtualProvider(db), { moduleHooks: false });
-  return { vfs, db };
+  return { vfs, db, stopSync };
 }
 
-// Initial pull: fetch every ChangeEntry from upstream, stage the
-// referenced chunk bytes locally, then apply the entries. Bounded
-// to the wire; large workspaces stream through without buffering
-// the whole change set in memory.
-async function initialPull(db: Database, upstream: SyncRPC): Promise<void> {
-  const changesStream = await upstream.fetchChanges({ sinceRev: 0 });
-  const entries: ChangeEntry[] = [];
-  const wantedHashes: Uint8Array[] = [];
-  const seen = new Set<string>();
-  const reader = changesStream.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      entries.push(value);
-      if (value.kind === "file") {
-        for (const c of value.chunks) {
-          const k = hex(c.hash);
-          if (!seen.has(k)) {
-            seen.add(k);
-            wantedHashes.push(c.hash);
-          }
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  // Probe: only fetch hashes the receiver doesn't already hold.
-  // On a fresh DB the probe is empty so we fetch everything; on a
-  // warm DB it's the content-addressed dedup at work.
-  const haveSubset = await upstream.hasObjects(wantedHashes);
-  const have = new Set(haveSubset.map(hex));
-  const missing = wantedHashes.filter((h) => !have.has(hex(h)));
-  if (missing.length > 0) {
-    const bytesStream = await upstream.fetchObjects(missing);
-    const bytesReader = bytesStream.getReader();
-    try {
-      while (true) {
-        const { value, done } = await bytesReader.read();
-        if (done) break;
-        stageBlob(db, value.hash, value.bytes, Date.now());
-      }
-    } finally {
-      bytesReader.releaseLock();
-    }
-  }
-  await applyChanges(db, entries, new Map());
-}
-
-function hex(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.byteLength; i++) s += bytes[i].toString(16).padStart(2, "0");
-  return s;
+// Drive tick(db, upstream) on a setInterval. Errors during a tick
+// log and continue — a transient upstream failure shouldn't
+// kill the daemon. The watermarks are durable, so the next tick
+// resumes from where the failed one would have.
+function startSyncLoop(db: Database, upstream: SyncRPC): () => void {
+  let stopped = false;
+  const handle = setInterval(() => {
+    if (stopped) return;
+    tick(db, upstream).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("sync tick failed:", error);
+    });
+  }, SYNC_TICK_MS);
+  // Don't block process exit on the timer. wsd's shutdown path
+  // calls stopSync() explicitly; this is belt-and-braces.
+  handle.unref?.();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(handle);
+  };
 }

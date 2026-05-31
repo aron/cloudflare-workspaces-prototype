@@ -28,6 +28,9 @@ test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC",
 
   let fetchChangesCalls = 0;
   const upstream = {
+    async currentRev() {
+      return 1;
+    },
     async fetchChanges() {
       fetchChangesCalls++;
       return new ReadableStream({
@@ -44,8 +47,10 @@ test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC",
         },
       });
     },
-    async hasObjects() {
-      return [];
+    async hasObjects(hashes) {
+      // The fake upstream is the source of truth for this file's
+      // chunk. Reply that we have every hash the client probes.
+      return hashes;
     },
     async fetchObjects(hashes) {
       return new ReadableStream({
