@@ -5,8 +5,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { createSyncClient, type SyncClient } from "@cloudflare/workspace-rpc/client";
-import { acceptWebSocketSession, createSyncServer } from "@cloudflare/workspace-rpc/server";
-import { nodeHttpBatchRpcResponse } from "capnweb";
+import {
+  acceptWebSocketSession,
+  createSyncServer,
+  serveHttpBatch,
+} from "@cloudflare/workspace-rpc/server";
 import { WebSocketServer } from "ws";
 import {
   createNodeVirtualFileSystem,
@@ -88,7 +91,7 @@ function createHTTPServer(info: WSDInfo, rpc: ReturnType<typeof createSyncServer
         });
         return;
       }
-      void nodeHttpBatchRpcResponse(request, response, rpc).catch((error) => {
+      void serveHttpBatch(request, response, rpc).catch((error) => {
         console.error("/api batch failed:", error);
         if (!response.headersSent) {
           send(response, 500, "internal error\n", {

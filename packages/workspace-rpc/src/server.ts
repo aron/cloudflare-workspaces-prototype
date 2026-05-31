@@ -17,7 +17,7 @@ import {
   readWatermark,
   stageBlob,
 } from "@cloudflare/workspace-fs";
-import { newWebSocketRpcSession, RpcTarget } from "capnweb";
+import { newWebSocketRpcSession, nodeHttpBatchRpcResponse, RpcTarget } from "capnweb";
 
 import type { SyncRPC } from "./interface.js";
 
@@ -125,6 +125,20 @@ export function acceptWebSocketSession(
   rpc: SyncRPC,
 ): void {
   newWebSocketRpcSession(ws, rpc as unknown as RpcTarget);
+}
+
+// Serve a single capnweb HTTP-batch session against a SyncRPC. Wraps
+// capnweb's nodeHttpBatchRpcResponse so wsd never directly imports
+// capnweb (which would split capnweb's module identity in mixed
+// ESM/CJS contexts — the RpcTarget instanceof check then fails).
+export function serveHttpBatch(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  request: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  response: any,
+  rpc: SyncRPC,
+): Promise<void> {
+  return nodeHttpBatchRpcResponse(request, response, rpc as unknown as RpcTarget);
 }
 
 function iterableToReadableStream<T>(it: AsyncIterable<T>): ReadableStream<T> {
