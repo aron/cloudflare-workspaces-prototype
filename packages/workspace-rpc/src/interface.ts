@@ -54,6 +54,15 @@ export interface SyncRPC {
   // RPCs; the refactor is mechanical once the loop shape settles.
   currentRev(): Promise<number>;
 
+  // Materialise the receiver's view of a single path as a
+  // ChangeEntry. Returns null when the path doesn't exist and
+  // hasn't been tombstoned. File entries carry chunk (hash,
+  // size) pairs only; the caller follows up with hasObjects +
+  // fetchObjects for the bytes. Used by interactive readers
+  // that don't want to drive the full fetchChanges stream just
+  // to look up one path.
+  readEntry(path: string): Promise<ChangeEntry | null>;
+
   hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]>;
 
   // Container → DO direction of object transfer. Stream bytes for a

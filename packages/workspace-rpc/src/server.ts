@@ -13,6 +13,7 @@ import {
   DEFAULT_IGNORE,
   fetchObjects,
   hasObjects,
+  materialiseChange,
   pushObjects,
   readWatermark,
   stageBlob,
@@ -74,6 +75,10 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     const ignore =
       input.ignore ?? (this.options.ignore.length > 0 ? this.options.ignore : DEFAULT_IGNORE);
     return iterableToReadableStream(coalesceChanges(this.db, sinceRev, { ignore }));
+  }
+
+  async readEntry(path: string): Promise<ChangeEntry | null> {
+    return materialiseChange(this.db, path);
   }
 
   async currentRev(): Promise<number> {
