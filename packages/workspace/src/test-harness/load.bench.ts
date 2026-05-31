@@ -8,8 +8,8 @@
 // available); contributors without docker still see the
 // benchmark file pass.
 
-import { bench, describe } from "vitest";
 import { env } from "cloudflare:test";
+import { bench, describe } from "vitest";
 
 import { TestBackend, Workspace } from "../index.js";
 

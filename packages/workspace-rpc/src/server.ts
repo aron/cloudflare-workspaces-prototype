@@ -85,6 +85,14 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     return currentRev(this.db);
   }
 
+  async watermarks(): Promise<{ currentRev: number; pushRev: number; fetchRev: number }> {
+    return {
+      currentRev: currentRev(this.db),
+      pushRev: readWatermark(this.db, "pushRev"),
+      fetchRev: readWatermark(this.db, "fetchRev"),
+    };
+  }
+
   async hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]> {
     return hasObjects(this.db, hashes);
   }

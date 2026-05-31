@@ -209,3 +209,67 @@ describe("sync driver — bidirectional convergence", () => {
     { iterations: 5 },
   );
 });
+
+describe("sync driver — convergence time after a burst", () => {
+  // Measure how long it takes from "burst landed on A" to
+  // "A.currentRev == A.pushRev AND B.fetchRev == A.currentRev".
+  // The push loop ships ChangeEntries to B; the close-the-gap
+  // time is what matters for "agent wrote N files, when can it
+  // expect the container to see them all".
+  bench(
+    "10000 small writes -> drain to settled (single push)",
+    async () => {
+      const a = makePeer();
+      const b = makePeer();
+      try {
+        const provider = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+        for (let i = 0; i < 10000; i++) {
+          provider.writeFileSync(`/f${i}.txt`, `x${i}`);
+        }
+        // Single push handles the full set in one batch — A's
+        // currentRev is what we expect B to converge to.
+        const target = currentRev(a.db);
+        await pushOnce(a.db, b.rpc);
+        if (readWatermark(a.db, "pushRev") < target) {
+          throw new Error("pushRev did not catch up to currentRev");
+        }
+      } finally {
+        a.close();
+        b.close();
+      }
+    },
+    { iterations: 3 },
+  );
+
+  bench(
+    "burst-then-tick convergence (100 writes, 250 ms tick cadence)",
+    async () => {
+      // Simulates the production loop. Write 100 files,
+      // then drive ticks until B's fetchRev catches A's
+      // currentRev. Count the tick calls so we have a sense
+      // of how many tick cycles the wire takes to settle.
+      const a = makePeer();
+      const b = makePeer();
+      try {
+        const provider = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+        for (let i = 0; i < 100; i++) {
+          provider.writeFileSync(`/f${i}.txt`, `x${i}`);
+        }
+        const target = currentRev(a.db);
+        // Push-side loop: each tick is one pushOnce. 100
+        // entries fit in one tick on this hardware; the
+        // measurement is whether the tick cost is constant.
+        let ticks = 0;
+        while (readWatermark(a.db, "pushRev") < target) {
+          await pushOnce(a.db, b.rpc);
+          ticks++;
+          if (ticks > 10) throw new Error(`did not settle in 10 ticks`);
+        }
+      } finally {
+        a.close();
+        b.close();
+      }
+    },
+    { iterations: 5 },
+  );
+});

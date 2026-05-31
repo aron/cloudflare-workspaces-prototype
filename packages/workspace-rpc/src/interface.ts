@@ -54,6 +54,20 @@ export interface SyncRPC {
   // RPCs; the refactor is mechanical once the loop shape settles.
   currentRev(): Promise<number>;
 
+  // Read the receiver's full sync watermark state. Cheap (three
+  // SQL scalars) and read-only. Diagnostic surface for load
+  // tests, dashboards, and the agent's exec stream when it
+  // wants to wait for the wire to drain. The three values are:
+  //
+  //   currentRev  — latest rev stamped on any local mutation.
+  //   pushRev     — highest rev already shipped to the upstream.
+  //   fetchRev    — highest upstream rev applied locally.
+  //
+  // pushRev / fetchRev only move when the sync loop is running
+  // (UPSTREAM_URL configured on this peer). Otherwise they sit
+  // at 0.
+  watermarks(): Promise<{ currentRev: number; pushRev: number; fetchRev: number }>;
+
   // Materialise the receiver's view of a single path as a
   // ChangeEntry. Returns null when the path doesn't exist and
   // hasn't been tombstoned. File entries carry chunk (hash,

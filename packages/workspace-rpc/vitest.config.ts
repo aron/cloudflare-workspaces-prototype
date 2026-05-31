@@ -4,5 +4,9 @@ export default defineConfig({
   test: {
     globals: true,
     include: ["src/**/*.test.ts"],
+    benchmark: {
+      include: ["src/**/*.bench.ts"],
+      exclude: ["dist/**"],
+    },
   },
 });
