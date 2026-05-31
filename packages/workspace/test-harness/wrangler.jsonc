@@ -1,0 +1,11 @@
+{
+  // Test-only worker for the docker harness. Not deployed.
+  // The Workspace facade runs inside this worker; the wsd
+  // container is a sibling process the harness boots in
+  // globalSetup, addressable from the worker via the URL the
+  // setup writes into a per-test binding.
+  "name": "workspace-harness",
+  "main": "../src/test-harness-worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"]
+}
