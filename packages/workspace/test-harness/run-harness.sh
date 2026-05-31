@@ -25,7 +25,7 @@ trap cleanup EXIT INT TERM
 if ! docker info >/dev/null 2>&1; then
   echo "docker not available; skipping harness" >&2
   cd "$WORKSPACE_ROOT"
-  exec npx vitest run --config vitest.config.harness.ts
+  exec npx vitest "${1:-run}" --run --config vitest.config.harness.ts
 fi
 
 # Capture the container id from run-wsd.sh's stderr while
@@ -38,5 +38,8 @@ export WSD_HARNESS_URL WSD_HARNESS_CID
 
 echo "harness: wsd at $WSD_HARNESS_URL (container $WSD_HARNESS_CID)" >&2
 
+# First positional arg picks the vitest mode (run|bench).
+# Default is `run` so the existing scripts keep working.
+MODE="${1:-run}"
 cd "$WORKSPACE_ROOT"
-npx vitest run --config vitest.config.harness.ts
+npx vitest "$MODE" --run --config vitest.config.harness.ts
