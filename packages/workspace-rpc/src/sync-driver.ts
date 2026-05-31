@@ -11,6 +11,7 @@
 
 import {
   applyChanges,
+  assertAppliedPushRev,
   type ChangeEntry,
   coalesceChanges,
   currentRev,
@@ -169,7 +170,13 @@ export async function pushOnce(db: Database, remote: SyncRPC): Promise<number> {
       controller.close();
     },
   });
-  await remote.push(entryStream);
+  const response = await remote.push({ senderRev: localRev, changes: entryStream });
+
+  // Cross-side invariant: the receiver must echo back at least
+  // the rev we just claimed to push. A drift means the apply
+  // path lost data, or a stale receiver is serving an old
+  // snapshot. Tear down loudly rather than corrupt watermarks.
+  assertAppliedPushRev(response.appliedPushRev, localRev);
 
   // Local pushRev advances to the rev we observed at the start of
   // this round. Anything written after that gets caught next tick.

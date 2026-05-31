@@ -39,11 +39,12 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     super();
   }
 
-  async push(
-    changes: ReadableStream<ChangeEntry>,
-  ): Promise<{ rev: number; appliedPushRev: number }> {
+  async push(input: {
+    senderRev: number;
+    changes: ReadableStream<ChangeEntry>;
+  }): Promise<{ rev: number; appliedPushRev: number }> {
     const entries: ChangeEntry[] = [];
-    const reader = changes.getReader();
+    const reader = input.changes.getReader();
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -53,12 +54,18 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     } finally {
       reader.releaseLock();
     }
+    // The sender's snapshot is at `senderRev`. After we apply,
+    // fetchRev = senderRev means 'we've consumed everything up
+    // through that point of the sender's timeline'. We echo the
+    // value back as appliedPushRev so the sender can verify on
+    // every response.
     await applyChanges(this.db, entries, new Map(), {
-      advanceFetchRev: currentRev(this.db),
+      source: "upstream",
+      advanceFetchRev: input.senderRev,
     });
     return {
       rev: currentRev(this.db),
-      appliedPushRev: readWatermark(this.db, "fetchRev"),
+      appliedPushRev: input.senderRev,
     };
   }
 

@@ -162,3 +162,33 @@ describe("sync driver — bidirectional convergence", () => {
     }
   });
 });
+
+describe("sync driver — cross-side invariant", () => {
+  it("pushOnce throws when the remote echoes back a lower appliedPushRev", async () => {
+    const a = makePeer();
+    const b = makePeer();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      providerA.writeFileSync("/x.txt", "x");
+
+      // Wrap B's rpc to lie about appliedPushRev. Simulates a
+      // regression in the suppress-dirty-tracking apply path.
+      const lyingRpc = new Proxy(b.rpc as object, {
+        get(target, prop, receiver) {
+          if (prop === "push") {
+            return async (input: { senderRev: number; changes: ReadableStream<unknown> }) => {
+              const real = await Reflect.get(target, prop, receiver).call(target, input);
+              return { ...real, appliedPushRev: 0 };
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as typeof b.rpc;
+
+      await expect(pushOnce(a.db, lyingRpc)).rejects.toThrow(/cross-side invariant violated/i);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});

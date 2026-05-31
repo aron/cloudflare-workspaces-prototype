@@ -147,7 +147,7 @@ describe("SyncRPC push convergence", () => {
             controller.close();
           },
         });
-        const result = await client.push(changes);
+        const result = await client.push({ senderRev: 0, changes });
         expect(result.rev).toBeGreaterThan(0);
 
         // Inspect the server DB directly through the harness handle.
@@ -266,7 +266,7 @@ describe("cross-side invariant", () => {
           c.close();
         },
       });
-      const result = await client.push(empty);
+      const result = await client.push({ senderRev: 0, changes: empty });
       expect(result.appliedPushRev).toBeGreaterThanOrEqual(0);
       // The DO would pass result.appliedPushRev as `applied`
       // and its own pushRev counter as `pushed`. With the

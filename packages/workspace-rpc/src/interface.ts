@@ -23,9 +23,12 @@ export interface SyncRPC {
   // DO → container. Stream a coalesced batch of changes. Bytes are
   // not inline: the DO sends ChangeEntry records with chunk hashes,
   // the container calls back via hasObjects / asks for the missing
-  // bytes through pushObjects. Returns the container's new rev and
-  // its appliedPushRev once the batch is durably applied.
-  push(changes: ReadableStream<ChangeEntry>): Promise<{
+  // bytes through pushObjects. `senderRev` is the sender's
+  // currentRev at the moment it captured the batch — the
+  // receiver advances its fetchRev to this value after the apply
+  // settles, and echoes it back as `appliedPushRev` so the sender
+  // can assert applied ≥ pushed on every response.
+  push(input: { senderRev: number; changes: ReadableStream<ChangeEntry> }): Promise<{
     rev: number;
     appliedPushRev: number;
   }>;
