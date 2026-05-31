@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceFilesystem } from "../index.js";
+import { Database } from "../storage.js";
 import { RecordingStorage } from "../testing-recording.js";
+import { initializeSchema } from "./index.js";
 
-describe("createWorkspaceFilesystem", () => {
-  it("lazily initializes the documented schema on first use", async () => {
+describe("initializeSchema", () => {
+  it("lazily initializes the documented schema on first use", () => {
     const storage = new RecordingStorage();
-    const fs = createWorkspaceFilesystem(storage, { now: () => 1234 });
+    const db = new Database(storage);
 
-    await expect(fs.stat("/")).rejects.toMatchObject({ code: "EIO" });
+    initializeSchema(db, () => 1234);
 
     const executed = storage.statements.map((statement) => statement.query);
     expect(executed).toEqual(
@@ -33,12 +34,11 @@ describe("createWorkspaceFilesystem", () => {
     );
   });
 
-  it("rejects a newer on-disk schema version", async () => {
+  it("rejects a newer on-disk schema version", () => {
     const storage = new RecordingStorage({ schemaVersion: 999 });
-    const fs = createWorkspaceFilesystem(storage);
+    const db = new Database(storage);
 
-    await expect(fs.stat("/")).rejects.toMatchObject({ code: "EIO" });
-    await expect(fs.stat("/")).rejects.toThrow(
+    expect(() => initializeSchema(db, () => 0)).toThrow(
       /Unsupported workspace filesystem schema version 999/,
     );
   });
