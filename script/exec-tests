@@ -96,6 +96,29 @@ try {
   assert(exit && exit.value === 7, `unexpected exit: ${JSON.stringify(exit)}`);
   console.log("  PASS  exec captures stdout + exit code");
 
+  // 1b. EEXEC_BUSY surfaces with the right code over the wire.
+  // The runner refuses a second exec on a live id; the host
+  // catches a plain Error with err.code intact (capnweb copies
+  // own enumerable props on Error subclasses).
+  const live = await client.shell.exec({ command: "sleep 30", id: "busy" });
+  let busyErr;
+  try {
+    await client.shell.exec({ command: "echo nope", id: "busy" });
+  } catch (err) {
+    busyErr = err;
+  }
+  assert(busyErr && busyErr.code === "EEXEC_BUSY",
+    `expected EEXEC_BUSY, got ${busyErr && busyErr.code}`);
+  await client.shell.killExec({ id: "busy" });
+  // Drain so the kill resolves cleanly before the next test
+  // touches the runner.
+  const liveReader = live.events.getReader();
+  while (true) {
+    const { done } = await liveReader.read();
+    if (done) break;
+  }
+  console.log("  PASS  EEXEC_BUSY propagates with err.code");
+
   // 2. kill a long-running process.
   const long = await client.shell.exec({ command: "sleep 30", id: "killme" });
   await client.shell.killExec({ id: "killme", signal: "SIGTERM" });
