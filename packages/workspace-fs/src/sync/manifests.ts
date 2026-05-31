@@ -35,18 +35,32 @@ function sha256(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(createHash("sha256").update(bytes).digest());
 }
 
-// Build a manifest row for the given chunk list. Idempotent: a
-// second call with the same chunks no-ops on the UNIQUE(hash). The
-// returned hash is what the caller writes onto
-// `vfs_nodes.manifest_hash`.
-export function buildManifest(db: Database, chunks: ManifestChunk[], now: number): Uint8Array {
+// Compute the manifest hash for a chunk list without touching the
+// DB. Used by the apply path to short-circuit when an upstream
+// entry already matches the local node — the manifest hash is
+// content-addressed so identical chunks always produce the same
+// hash.
+export function computeManifestHash(chunks: ManifestChunk[]): Uint8Array {
   const encoded: EncodedManifest = {
     version: MANIFEST_VERSION,
     chunks: chunks.map((c) => ({ hash: toHex(c.hash), size: c.size })),
   };
   const bytes = new TextEncoder().encode(JSON.stringify(encoded));
-  const hash = sha256(bytes);
+  return sha256(bytes);
+}
+
+// Build a manifest row for the given chunk list. Idempotent: a
+// second call with the same chunks no-ops on the UNIQUE(hash). The
+// returned hash is what the caller writes onto
+// `vfs_nodes.manifest_hash`.
+export function buildManifest(db: Database, chunks: ManifestChunk[], now: number): Uint8Array {
+  const hash = computeManifestHash(chunks);
   const size = chunks.reduce((acc, c) => acc + c.size, 0);
+  const encoded: EncodedManifest = {
+    version: MANIFEST_VERSION,
+    chunks: chunks.map((c) => ({ hash: toHex(c.hash), size: c.size })),
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(encoded));
   db.run(
     "INSERT INTO vfs_manifests (hash, size, encoded, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
     hash,

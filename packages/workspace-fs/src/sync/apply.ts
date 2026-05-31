@@ -1,9 +1,11 @@
 import { mkdir } from "../fs/mkdir.js";
+import { resolveInode } from "../fs/resolve.js";
 import { rm } from "../fs/rm.js";
 import { symlink } from "../fs/symlink.js";
 import { writeFile } from "../fs/writeFile.js";
 import type { Database } from "../storage.js";
 import type { ChangeEntry } from "./changes.js";
+import { computeManifestHash } from "./manifests.js";
 import { currentRev, readWatermark, writeWatermark } from "./watermarks.js";
 
 export interface ApplyOptions {
@@ -68,6 +70,14 @@ export async function applyChanges(
   };
 
   for await (const entry of entries) {
+    // Idempotent skip: if the entry already matches the local
+    // state, drop it on the floor. The check is what stops a
+    // pull from bumping vfs_meta.rev for entries that are
+    // already in place, which in turn stops the next push from
+    // re-shipping them.
+    if (options.source === "upstream" && entry.kind !== "delete") {
+      if (alreadyApplied(db, entry)) continue;
+    }
     if (entry.kind === "delete") {
       try {
         rm(db, entry.path, { recursive: true, force: true });
@@ -149,4 +159,44 @@ export async function applyChanges(
       writeWatermark(db, "pushRev", after);
     }
   }
+}
+
+// Compare an entry against the local node graph. Returns true when
+// the entry would be a no-op apply: the manifest hash (files),
+// mode + symlink target (symlinks), or mode (dirs) already matches.
+// We deliberately skip mtime comparison \u2014 mtime is metadata
+// the source decides on, and re-applying it would still bump the
+// local rev counter for nothing. Receivers see eventual mtime
+// drift between peers; the wire stays quiet.
+function alreadyApplied(db: Database, entry: Exclude<ChangeEntry, { kind: "delete" }>): boolean {
+  const live = resolveInode(db, entry.path, { followSymlinks: false });
+  if (live === null) return false;
+
+  if (entry.kind === "file") {
+    if (live.type !== "file") return false;
+    const row = db.one<{ manifest_hash: Uint8Array | null }>(
+      "SELECT manifest_hash FROM vfs_nodes WHERE inode = ?",
+      live.inode,
+    );
+    if (!row?.manifest_hash) return false;
+    const wanted = computeManifestHash(entry.chunks);
+    return uint8Equal(row.manifest_hash, wanted);
+  }
+  if (entry.kind === "dir") {
+    return live.type === "dir" && (live.mode & 0o7777) === (entry.mode & 0o7777);
+  }
+  // symlink
+  return (
+    live.type === "symlink" &&
+    live.linkTarget === entry.target &&
+    (live.mode & 0o7777) === (entry.mode & 0o7777)
+  );
+}
+
+function uint8Equal(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
