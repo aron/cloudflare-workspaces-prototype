@@ -15,7 +15,7 @@ describe("SQLiteWorkspaceProvider — capability flags", () => {
     await withProvider((p) => {
       expect(p.readonly).toBe(false);
       expect(p.supportsSymlinks).toBe(true);
-      expect(p.supportsWatch).toBe(false);
+      expect(p.supportsWatch).toBe(true);
     });
   });
 });
@@ -137,7 +137,6 @@ describe("SQLiteWorkspaceProvider — unimplemented surface (stubs)", () => {
     ["copyFileSync", (p: SQLiteWorkspaceProvider) => p.copyFileSync("/x", "/y")],
     ["internalModuleStat", (p: SQLiteWorkspaceProvider) => p.internalModuleStat("/x")],
 
-    ["watch", (p: SQLiteWorkspaceProvider) => p.watch("/x")],
     ["watchFile", (p: SQLiteWorkspaceProvider) => p.watchFile("/x")],
   ])("%s throws ENOSYS", async (_name, call) => {
     await withProvider((p) => {

@@ -16,6 +16,13 @@ import { resolveInode } from "./fs/resolve.js";
 import { rm as rmImpl } from "./fs/rm.js";
 import { stat as statImpl } from "./fs/stat.js";
 import { symlink as symlinkImpl } from "./fs/symlink.js";
+import {
+  createWatchAsyncIterable,
+  createWatcher,
+  type WatchEvent,
+  type WatchHandle,
+  type WatchOptions,
+} from "./fs/watch.js";
 import { writeFileSync as writeFileSyncImpl } from "./fs/writeFile.js";
 import { canonicalizePath } from "./path.js";
 import type { Database } from "./storage.js";
@@ -24,6 +31,10 @@ export interface SQLiteWorkspaceProviderOptions {
   // Wall-clock source. Defaults to Date.now so production callers
   // don't need to thread one through; tests pin it.
   now?: () => number;
+  // Poll interval for watch() in milliseconds. Defaults to 100 ms
+  // to match node's fs.watch on most filesystems; tests can lower
+  // it to keep durations short.
+  watchIntervalMs?: number;
 }
 
 interface VirtualStatsLike {
@@ -84,7 +95,7 @@ export class SQLiteWorkspaceProvider {
   // Capability flags consulted by @platformatic/vfs callers.
   readonly readonly = false;
   readonly supportsSymlinks = true;
-  readonly supportsWatch = false;
+  readonly supportsWatch = true;
 
   // Fd table. Start at 3 — 0/1/2 are reserved by convention even
   // though we don't expose them — so consumers that pass them around
@@ -92,9 +103,12 @@ export class SQLiteWorkspaceProvider {
   #fds = new Map<number, FdState>();
   #nextFd = 3;
 
+  readonly watchIntervalMs: number;
+
   constructor(db: Database, options: SQLiteWorkspaceProviderOptions = {}) {
     this.db = db;
     this.now = options.now ?? Date.now;
+    this.watchIntervalMs = options.watchIntervalMs ?? 100;
   }
 
   // -- Essential primitives ------------------------------------------
@@ -545,16 +559,35 @@ export class SQLiteWorkspaceProvider {
     symlinkImpl(this.db, target, path, this.now);
   }
 
-  // -- Watch (stubbed) -----------------------------------------------
+  // -- Watch ----------------------------------------------------------
+  //
+  // The watcher polls vfs_meta.rev on a timer. Each tick
+  // coalesceChanges yields every path touched since the last
+  // observed rev; we filter by the watched directory (and
+  // recursive flag) and emit one 'change' event per path. Cheap
+  // because coalesceChanges is one indexed range scan on
+  // vfs_nodes.rev plus a path walk per touched inode.
+  //
+  // Event types follow node's fs.watch convention:
+  //   - 'rename' for deletes (path went away)
+  //   - 'change' for everything else (file/dir/symlink mutation)
+  // We don't distinguish first-time creation from in-place edit
+  // — the cost is a per-watcher state map that's bigger than
+  // the signal is worth. Callers that need rename-vs-change
+  // semantics can stat the path themselves.
 
-  watch(_path: string, _options?: unknown): unknown {
-    throw notImplemented("watch");
+  watch(path: string, options: WatchOptions = {}): WatchHandle {
+    return createWatcher(this.db, path, options, this.watchIntervalMs);
   }
 
-  watchAsync(_path: string, _options?: unknown): unknown {
-    throw notImplemented("watchAsync");
+  watchAsync(path: string, options: WatchOptions = {}): AsyncIterable<WatchEvent> {
+    return createWatchAsyncIterable(this.watch(path, options));
   }
 
+  // watchFile / unwatchFile fire on stat changes at a single path
+  // (not the directory under it). Different semantics from watch();
+  // editors typically use watch() instead. Leave as ENOSYS until a
+  // real call site shows up.
   watchFile(
     _path: string,
     _options?: unknown,
