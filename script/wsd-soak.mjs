@@ -31,7 +31,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { newHttpBatchRpcSession } from "capnweb";
+import { newHttpBatchRpcSession, newWebSocketRpcSession } from "capnweb";
 
 const execFileP = promisify(execFile);
 
@@ -171,28 +171,44 @@ function payloadBytes(seed) {
   return out;
 }
 
-// One write into the wsd container's FUSE mount via docker
-// exec. We pipe bytes directly into the mount so wsd's FUSE
-// handler does its usual writeFile path: bumps
-// vfs_meta.rev, stamps vfs_nodes.rev, and the sync loop
-// picks it up on the next 250 ms tick.
-//
-// docker exec is per-call expensive (cold-start a child
-// process inside the container), but it matches what real
-// workloads do — the test stresses the *path*, not the
-// minimum-overhead path.
-async function pushOneWrite(cid, i, bytes) {
-  const proc = spawn(
-    "docker",
-    ["exec", "-i", cid, "dd", `of=/workspace/soak_${i}.bin`, "status=none"],
-    {
-      stdio: ["pipe", "ignore", "ignore"],
-    },
+// Persistent capnweb WebSocket session against B. Reused
+// across the soak; one upgrade, many push round-trips.
+function wsStub(url) {
+  return newWebSocketRpcSession(`${url.replace("http://", "ws://")}/ws`);
+}
+
+// One write into wsd via the SyncRPC push path. senderRev=0
+// marks us as an external writer — the server applies as
+// a local write (bumps vfs_meta.rev, leaves pushRev alone) so
+// the outbound sync loop picks the entry up on the next tick.
+// This is the F2 fix in practice; before it landed, this
+// path silenced the outbound loop and A never saw any of B's
+// writes.
+async function pushOneWrite(stub, i, bytes) {
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  await stub.pushObjects(
+    new ReadableStream({
+      start(c) {
+        c.enqueue({ hash, bytes });
+        c.close();
+      },
+    }),
   );
-  proc.stdin.end(bytes);
-  await new Promise((res, rej) => {
-    proc.on("exit", (code) => (code === 0 ? res() : rej(new Error(`docker exec exit ${code}`))));
-    proc.on("error", rej);
+  await stub.push({
+    senderRev: 0,
+    changes: new ReadableStream({
+      start(c) {
+        c.enqueue({
+          kind: "file",
+          path: `/soak_${i}.bin`,
+          mode: 0o644,
+          mtime: Date.now(),
+          size: bytes.byteLength,
+          chunks: [{ hash, size: bytes.byteLength }],
+        });
+        c.close();
+      },
+    }),
   });
 }
 
@@ -233,13 +249,14 @@ async function main() {
   let writesSent = 0;
   let writesInFlight = 0;
 
-  // Writes hammer B's FUSE mount directly via docker exec.
-  // That's how a real workload mutates the container side
-  // — the path under test is FUSE → wsd → sync loop
-  // → A.applyChanges. Pushing via /ws would have the
-  // server treat the entries as already-applied upstream
-  // changes and never forward them, so this is the right
-  // shape.
+  // Writes go through B's SyncRPC /ws push path with
+  // senderRev=0. The server treats them as local writes;
+  // B's outbound sync loop ships them to A on the next
+  // tick. This is the path an external orchestrator (a
+  // DO accepting agent requests, the agent itself) would
+  // take — the same wire surface a wsd-to-wsd peer
+  // uses, just with a different senderRev value.
+  const writeStub = wsStub(b.url);
 
   // Fire-and-forget write loop. We don't await every write
   // because the goal is to saturate; we cap the in-flight
@@ -253,7 +270,7 @@ async function main() {
       }
       const i = writeSeq++;
       writesInFlight++;
-      pushOneWrite(b.cid, i, payloadBytes(i))
+      pushOneWrite(writeStub, i, payloadBytes(i))
         .then(() => {
           writesSent++;
           writesInFlight--;

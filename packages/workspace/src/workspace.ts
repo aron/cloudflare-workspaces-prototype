@@ -166,9 +166,13 @@ export class WorkspaceFs {
         controller.close();
       },
     });
-    // senderRev is purely diagnostic from the Workspace seat —
-    // we don't keep a local counter — so we pass 0. The peer
-    // echoes it back as appliedPushRev; nothing checks it here.
+    // senderRev: 0 marks the Workspace as an external
+    // writer (not a sync peer with its own rev space).
+    // The server treats the entries as local writes —
+    // its outbound sync loop will ship them upstream on
+    // the next tick. A sync peer would pass its own
+    // currentRev here so loopback suppression kicks in;
+    // the Workspace doesn't have one to share.
     await this.#rpc.push({ senderRev: 0, changes });
   }
 

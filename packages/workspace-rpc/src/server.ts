@@ -55,14 +55,21 @@ class SyncRpcServer extends RpcTarget implements SyncRPC {
     } finally {
       reader.releaseLock();
     }
-    // The sender's snapshot is at `senderRev`. After we apply,
-    // fetchRev = senderRev means 'we've consumed everything up
-    // through that point of the sender's timeline'. We echo the
-    // value back as appliedPushRev so the sender can verify on
-    // every response.
+    // senderRev > 0 — the caller is a sync peer with its
+    // own rev space; advance fetchRev to that point and let
+    // loopback suppression silence the outbound push so we
+    // don't ping-pong the same entries back.
+    //
+    // senderRev === 0 — the caller is an external writer
+    // (an orchestrator using the wire as a transport, the
+    // soak script, a manual curl). Treat the entries as
+    // local writes: bump rev through the normal apply path,
+    // leave pushRev untouched so the outbound sync loop
+    // ships them upstream on the next tick.
+    const isPeer = input.senderRev > 0;
     await applyChanges(this.db, entries, new Map(), {
-      source: "upstream",
-      advanceFetchRev: input.senderRev,
+      source: isPeer ? "upstream" : "local",
+      ...(isPeer ? { advanceFetchRev: input.senderRev } : {}),
     });
     return {
       rev: currentRev(this.db),

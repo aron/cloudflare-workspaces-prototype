@@ -147,7 +147,10 @@ describe("SyncRPC push convergence", () => {
             controller.close();
           },
         });
-        const result = await client.push({ senderRev: 0, changes });
+        // Use senderDb's currentRev as senderRev — we're
+        // simulating a sync peer, not an external orchestrator.
+        const { currentRev } = await import("@cloudflare/workspace-fs");
+        const result = await client.push({ senderRev: currentRev(senderDb), changes });
         expect(result.rev).toBeGreaterThan(0);
 
         // Inspect the server DB directly through the harness handle.
@@ -332,5 +335,109 @@ describe("client lifecycle", () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(Error);
+  });
+});
+
+describe("push semantics — external vs sync peer", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("push with senderRev=0 (external orchestrator) leaves pushRev alone so the outbound sync loop can ship the entry", async () => {
+    harness = await startHarness();
+    const { coalesceChanges, currentRev, readWatermark } = await import("@cloudflare/workspace-fs");
+    const client = createSyncClient({ url: harness.url });
+    try {
+      // Stage one chunk + push one entry as if we were an
+      // external writer (no rev space of our own).
+      const bytes = new TextEncoder().encode("external write");
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      await client.pushObjects(
+        new ReadableStream({
+          start(c) {
+            c.enqueue({ hash, bytes });
+            c.close();
+          },
+        }),
+      );
+      await client.push({
+        senderRev: 0,
+        changes: new ReadableStream({
+          start(c) {
+            c.enqueue({
+              kind: "file",
+              path: "/external.txt",
+              mode: 0o644,
+              mtime: 100,
+              size: bytes.byteLength,
+              chunks: [{ hash, size: bytes.byteLength }],
+            });
+            c.close();
+          },
+        }),
+      });
+
+      // The push landed: currentRev bumped past 1.
+      expect(currentRev(harness.db)).toBeGreaterThan(1);
+      // pushRev was NOT advanced. Anything driving the
+      // outbound sync loop (a Phase 6 wsd with UPSTREAM_URL
+      // set) would see the new entry on the next tick.
+      expect(readWatermark(harness.db, "pushRev")).toBe(0);
+      // fetchRev was NOT advanced either — the sender has
+      // no rev space.
+      expect(readWatermark(harness.db, "fetchRev")).toBe(0);
+      // The entry is in the coalesce stream.
+      const drained: { path: string }[] = [];
+      for await (const e of coalesceChanges(harness.db, 0)) drained.push(e);
+      expect(drained.some((e) => e.path === "/external.txt")).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("push with senderRev>0 (sync peer) advances pushRev to silence loopback", async () => {
+    harness = await startHarness();
+    const { currentRev, readWatermark } = await import("@cloudflare/workspace-fs");
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const bytes = new TextEncoder().encode("from peer");
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      await client.pushObjects(
+        new ReadableStream({
+          start(c) {
+            c.enqueue({ hash, bytes });
+            c.close();
+          },
+        }),
+      );
+      await client.push({
+        senderRev: 42, // pretend we're a peer at rev 42
+        changes: new ReadableStream({
+          start(c) {
+            c.enqueue({
+              kind: "file",
+              path: "/from-peer.txt",
+              mode: 0o644,
+              mtime: 100,
+              size: bytes.byteLength,
+              chunks: [{ hash, size: bytes.byteLength }],
+            });
+            c.close();
+          },
+        }),
+      });
+
+      // Loopback suppression kicks in: pushRev was advanced
+      // to currentRev so the receiver doesn't push these
+      // entries back to the peer.
+      const cur = currentRev(harness.db);
+      expect(readWatermark(harness.db, "pushRev")).toBe(cur);
+      // fetchRev was advanced to senderRev.
+      expect(readWatermark(harness.db, "fetchRev")).toBe(42);
+    } finally {
+      await client.close();
+    }
   });
 });
