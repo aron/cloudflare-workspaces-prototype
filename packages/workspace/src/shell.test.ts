@@ -280,6 +280,49 @@ describe("WorkspaceShell.exec — handle shape", () => {
     await handle.kill();
     expect(f.calls.killExec).toEqual([{ id: "kid", signal: undefined }]);
   });
+
+  it("kill() resolves only after the exit event is observed on the wire", async () => {
+    // Build a controllable stream where exit lands on demand. The
+    // kill() promise must not resolve before exit shows up, even
+    // though killExec returns immediately.
+    let pushExit: ((code: number) => void) | undefined;
+    const events: ReadableStream<ExecEvent> = new ReadableStream({
+      start(c) {
+        pushExit = (code) => {
+          c.enqueue({ id: "kid", seq: 1, name: "exit", value: code });
+          c.close();
+        };
+      },
+    });
+    let killReturned = 0;
+    let killExecReturned = 0;
+    let order = 0;
+    const shellRpc: ShellRPC = {
+      async exec(input) {
+        return { id: input.id ?? "kid", events };
+      },
+      async getExec() {
+        throw new Error("unused");
+      },
+      async killExec() {
+        killExecReturned = ++order;
+      },
+      async disposeExec() {},
+    };
+    const shell = new WorkspaceShell(shellRpc, makeSync());
+    const handle = await shell.exec("noop", { id: "kid" });
+    const killPromise = handle.kill("SIGTERM").then(() => {
+      killReturned = ++order;
+    });
+    // Give microtasks a chance to settle so killExec has returned.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(killExecReturned).toBe(1);
+    expect(killReturned).toBe(0); // not yet — exit hasn't arrived
+    // Now deliver exit. kill() should resolve.
+    pushExit?.(143);
+    await killPromise;
+    expect(killReturned).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

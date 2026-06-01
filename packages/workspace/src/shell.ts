@@ -166,6 +166,12 @@ function resumeToAfter(resume: "tail" | "full" | number | undefined): number | "
 // Stitch the runtime extras (id, result, kill) onto a fresh
 // ReadableStream that pipes from the wire stream and applies any
 // encoding conversion in flight.
+//
+// The wire stream is tee'd so kill() can observe the exit event
+// independently of whatever the caller does with the handle. kill()
+// sends the signal then awaits the exit event so callers can rely on
+// "resolved ⇒ child has exited" without having to drain the stream
+// or await result() themselves.
 function wrapHandle<E extends ExecEncoding>(
   shell: ShellRPC,
   sync: Sync,
@@ -174,7 +180,9 @@ function wrapHandle<E extends ExecEncoding>(
   encoding: E | undefined,
   pushed: number,
 ): ExecHandle<E> {
-  const stream = pipeEvents<E>(wireEvents, encoding);
+  const [forUser, forWatcher] = wireEvents.tee();
+  const exited = watchForExit(forWatcher);
+  const stream = pipeEvents<E>(forUser, encoding);
   const handle = stream as ExecHandle<E>;
   Object.defineProperties(handle, {
     id: { value: id, enumerable: false, writable: false },
@@ -184,12 +192,37 @@ function wrapHandle<E extends ExecEncoding>(
       writable: false,
     },
     kill: {
-      value: (signal?: KillSignal) => shell.killExec({ id, signal }),
+      value: async (signal?: KillSignal) => {
+        await shell.killExec({ id, signal });
+        await exited;
+      },
       enumerable: false,
       writable: false,
     },
   });
   return handle;
+}
+
+// Drain the watcher branch in the background, resolving once the
+// first exit event is observed (or the stream closes / errors
+// without one). Errors are swallowed so kill() doesn't reject on a
+// torn-down wire — the caller's own branch will surface any real
+// stream error.
+function watchForExit(events: ReadableStream<ExecEvent>): Promise<void> {
+  return (async () => {
+    const reader = events.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        if (value.name === "exit") return;
+      }
+    } catch {
+      // Swallow — surfaced via the user-facing branch instead.
+    } finally {
+      reader.releaseLock();
+    }
+  })();
 }
 
 function pipeEvents<E extends ExecEncoding>(
