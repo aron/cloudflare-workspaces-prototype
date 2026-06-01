@@ -1,5 +1,17 @@
 export type { WorkspaceErrorCode, WorkspaceFsError } from "./errors.js";
 export { createWorkspaceError } from "./errors.js";
+export {
+  WorkspaceFilesystem,
+  type WorkspaceFilesystemOptions,
+} from "./fs/filesystem.js";
+export type { WorkspaceFoundEntry } from "./fs/find.js";
+export type { GrepOptions, WorkspaceGrepMatch } from "./fs/grep.js";
+export type { MkdirOptions } from "./fs/mkdir.js";
+export type { WorkspaceDirentResult } from "./fs/readdir.js";
+export type { ReadFileOptions } from "./fs/readFile.js";
+export type { RmOptions } from "./fs/rm.js";
+export type { WorkspaceStatResult } from "./fs/stat.js";
+export type { WriteFileContent, WriteFileOptions } from "./fs/writeFile.js";
 export type { SQLiteWorkspaceProviderOptions } from "./provider.js";
 export { SQLiteWorkspaceProvider } from "./provider.js";
 export { initializeSchema, ROOT_INODE, SCHEMA_VERSION } from "./schema/index.js";
