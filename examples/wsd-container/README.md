@@ -52,12 +52,12 @@ The DO extends the plain `DurableObject` class from
 `cloudflare:workers`. The container lifecycle plumbing all lives
 in `CloudflareContainerBackend` — the DO is a thin host.
 
-FUSE is currently disabled (`DISABLE_FUSE=1`) — Cloudflare Containers
-don't expose `/dev/fuse`. That means `exec`'d commands see the
-container's local filesystem, **not** the wsd VFS. File reads /
-writes go through the RPC stub; exec is a separate channel. Once
-FUSE access lands on the platform, dropping `DISABLE_FUSE` mounts
-the same VFS into the container so both surfaces see the same tree.
+The container mounts wsd's VFS at `MOUNT_POINT` via FUSE, so
+`exec`'d commands see the same tree the RPC surface reads and
+writes. Cloudflare Containers expose `/dev/fuse` to the workload.
+`wrangler dev` does not, so local runs need the Dockerfile patched
+to set `DISABLE_FUSE=1` first; `exec` then runs against the
+container's own root filesystem rather than the VFS.
 
 ## HTTP surface
 
@@ -65,7 +65,7 @@ the same VFS into the container so both surfaces see the same tree.
 PUT  /c/<name>/file/<path...>   raw body → wsd writeFile
 GET  /c/<name>/file/<path...>   octet-stream of file bytes
 POST /c/<name>/exec             { command | argv, cwd?, encoding? }
-                                → SSE result frame
+                                → JSON { exitCode, stdout, stderr }
 
 ```
 
@@ -114,9 +114,19 @@ examples/wsd-container/
 
 ## Known limitations / next steps
 
-- **Exec doesn't see wsd VFS files.** FUSE disabled — see above.
+- **Local `wrangler dev` won't run this image.** The container
+  mounts FUSE on boot, which needs `/dev/fuse` plus CAP_SYS_ADMIN.
+  Cloudflare Containers grant both to deployed workloads; the
+  local container runtime `wrangler dev` shells out to does not,
+  and there's no flag to opt in. wsd exits with a mount-permission
+  error before `/health` ever comes up. To exercise the example
+  end-to-end you have to `wrangler deploy` it. For local iteration
+  on the *Worker* code, flip the Dockerfile to `DISABLE_FUSE=1`
+  by hand — `exec` then runs against the container's local root
+  rather than the VFS, but file reads and writes still go through
+  the RPC surface.
 - **Exec is run-and-collect, not streamed.** The handler awaits
-  `handle.result()` and emits one SSE frame. Live streaming needs
+  `handle.result()` and emits one JSON response. Live streaming needs
   the DO to expose an async-iterable RPC; v1 keeps the surface flat.
 - **No auth.** The egress proxy trusts anything the container sends.
   Fine for in-DO traffic (only the owning Worker can address it),

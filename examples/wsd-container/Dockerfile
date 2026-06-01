@@ -5,11 +5,10 @@
 # example's predev/predeploy hook stages it into ./build/wsd-linux-x64
 # so the image build context stays small and self-contained.
 #
-# The local wrangler dev runtime does not expose /dev/fuse to
-# containers, so we run wsd with DISABLE_FUSE=1 and only exercise
-# the capnweb RPC surface (/health, /api, /ws). libfuse is still
-# installed so the image is ready the moment FUSE access lands in
-# wrangler — flipping the env var off is the only change needed.
+# wsd mounts a FUSE filesystem at MOUNT_POINT so exec'd commands
+# see the same VFS the RPC surface reads and writes. Cloudflare
+# Containers expose /dev/fuse to the workload; locally,
+# `wrangler dev` does not, so this image is intended for deploys.
 
 FROM --platform=linux/amd64 debian:stable-slim
 
@@ -21,12 +20,9 @@ RUN apt-get update \
 COPY build/wsd-linux-x64 /usr/local/bin/wsd
 RUN chmod +x /usr/local/bin/wsd
 
-# wsd's defaults: HTTP+WS on :8080. MOUNT_POINT is ignored when
-# DISABLE_FUSE=1 but we set it anyway so the startup log line is
-# consistent across environments.
+# wsd's defaults: HTTP+WS on :8080, FUSE mount on MOUNT_POINT.
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
-ENV DISABLE_FUSE=1
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/wsd"]
