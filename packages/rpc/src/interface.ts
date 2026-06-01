@@ -144,5 +144,4 @@ export type WireErrorCode =
 export interface WireError {
   code: WireErrorCode;
   message: string;
-  detail?: unknown;
 }

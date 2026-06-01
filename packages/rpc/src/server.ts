@@ -46,7 +46,6 @@ export interface RunnerLike {
 
 export interface ServerOptions {
   ignore?: string[];
-  now?: () => number;
 }
 
 class SyncRPCServer extends RpcTarget implements SyncRPC {
