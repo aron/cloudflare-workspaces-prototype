@@ -127,4 +127,14 @@ describe("mkdir", () => {
       );
     });
   });
+
+  it("accepts recursive: false for node:fs/promises parity", async () => {
+    await withDB((db) => {
+      // boolean false should be accepted by the type and behave as default.
+      mkdir(db, "/dir", { recursive: false }, () => 0);
+      expect(() => mkdir(db, "/dir", { recursive: false }, () => 0)).toThrowError(
+        expect.objectContaining({ code: "EEXIST" }),
+      );
+    });
+  });
 });

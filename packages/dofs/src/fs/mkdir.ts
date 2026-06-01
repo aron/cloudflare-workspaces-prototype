@@ -5,7 +5,7 @@ import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 
 export interface MkdirOptions {
-  recursive?: true;
+  recursive?: boolean;
   mode?: number;
 }
 

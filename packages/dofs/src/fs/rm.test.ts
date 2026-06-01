@@ -158,4 +158,13 @@ describe("rm", () => {
       expect(() => rm(db, "/no/such/path", { force: true })).not.toThrow();
     });
   });
+
+  it("accepts recursive: false / force: false for node:fs/promises parity", async () => {
+    await withDB(async (db) => {
+      await writeFile(db, "/a.txt", "hello", {}, () => 0);
+      // boolean false should be accepted by the type and behave as default.
+      rm(db, "/a.txt", { recursive: false, force: false });
+      expect(resolveInode(db, "/a.txt")).toBeNull();
+    });
+  });
 });

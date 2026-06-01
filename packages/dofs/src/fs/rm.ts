@@ -6,8 +6,8 @@ import { recordDelete } from "../sync/changes.js";
 import { resolveInode } from "./resolve.js";
 
 export interface RmOptions {
-  recursive?: true;
-  force?: true;
+  recursive?: boolean;
+  force?: boolean;
 }
 
 interface DirChild {
