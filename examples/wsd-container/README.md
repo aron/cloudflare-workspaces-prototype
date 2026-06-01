@@ -18,30 +18,34 @@ client ─► Worker /c/<name>/{file,exec}
              └────────── capnweb session ◄──────┘
 ```
 
-1. The DO boots the Container; the Container's entrypoint is the
-   `wsd` SEA binary.
+1. The DO constructs a `CloudflareContainerBackend` from
+   `@cloudflare/workspace` and hands it to a `Workspace` instance.
+   That backend owns the entire wsd lifecycle: container start,
+   outbound egress interception, port-readiness polling, POST
+   `/connect` to wsd, `/ws` upgrade routing, and capnweb session
+   attach.
 2. wsd reaches the Worker through the container's **outbound
    interception** (`ctx.container.interceptOutboundHttp("workspace.internal",
-   …)`). The DO registers a `WsdEgress` `WorkerEntrypoint` as the
-   handler; wsd's outbound HTTP to `http://workspace.internal`
-   lands there.
-3. The DO POSTs `/connect` into wsd with
+   …)`, set up by the backend). The DO supplies a `WsdEgress`
+   `WorkerEntrypoint` instance with its own id in props; the
+   entrypoint routes `/ws` upgrades back to the owning DO.
+3. When `Workspace.ready()` is called for the first time, the
+   backend posts `/connect` into wsd with
    `{ url: "http://workspace.internal" }`. wsd polls
    `workspace.internal/health`, then dials
    `ws://workspace.internal/ws`.
 4. `WsdEgress.fetch` forwards the upgrade to the DO's `fetch()` via
-   the DO binding (`env.WSD.get(idFromString(ctx.props.doId))`); the
-   DO accepts the WebSocket and runs a **capnweb client session**
-   over it, getting a typed `WorkspaceRPC` stub.
-5. The DO wraps the stub in a `Workspace` instance from
-   `@cloudflare/workspace`. The Worker calls into the DO via RPC
-   methods; the DO drives the stub.
+   the DO binding. The DO's `fetch()` delegates to
+   `backend.handleFetch(req)`, which performs the WebSocket upgrade,
+   resolves the in-flight `connect()`, and attaches a capnweb
+   client session to the server-side socket.
+5. The DO exposes flat RPC methods (`do_writeFile`, `do_readFile`,
+   `do_execCollect`) that delegate to `this.#workspace.fs` /
+   `.shell`. The Worker's fetch handler parses paths and forwards.
 
 The DO extends the plain `DurableObject` class from
-`cloudflare:workers` and drives the container via `ctx.container`
-directly — no `@cloudflare/containers` helper. Boot, port-readiness
-polling, outbound interception, and exit monitoring are all explicit
-in `src/index.ts`.
+`cloudflare:workers`. The container lifecycle plumbing all lives
+in `CloudflareContainerBackend` — the DO is a thin host.
 
 FUSE is currently disabled (`DISABLE_FUSE=1`) — Cloudflare Containers
 don't expose `/dev/fuse`. That means `exec`'d commands see the
@@ -99,7 +103,7 @@ curl -X POST http://127.0.0.1:8787/c/demo/exec \
 examples/wsd-container/
   Dockerfile                debian + libfuse + wsd binary (ENTRYPOINT)
   wrangler.jsonc            Worker + DO + Container binding
-  src/index.ts              Worker handler, DO, StubBackend
+  src/index.ts              Worker handler, DO, WsdEgress entrypoint
   scripts/stage-wsd.mjs     copies wsd-linux-x64 into ./build/
 ```
 
@@ -113,6 +117,8 @@ examples/wsd-container/
   Fine for in-DO traffic (only the owning Worker can address it),
   but the moment we expose `workspace.internal` more broadly we need
   a handshake.
-- **One-shot session.** If wsd's WebSocket drops, the DO has to be
-  re-entered for the next `onStart` to drive a new `/connect`. A
-  health-monitor / re-dial loop is the natural follow-up.
+- **One-shot session.** If wsd's WebSocket drops mid-session, the
+  cached `BackendHandle` goes stale and the next call throws.
+  `Workspace.ready()` will retry on the next call, but in-flight
+  operations are lost. Transparent reconnect is Phase 5 R2
+  deferred work.

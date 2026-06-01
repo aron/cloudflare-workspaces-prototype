@@ -13,9 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudflare/workspace": "*",
-    "@cloudflare/workspace-rpc": "*",
-    "capnweb": "^0.8.0"
+    "@cloudflare/workspace": "*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.1",
