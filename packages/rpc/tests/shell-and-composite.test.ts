@@ -18,8 +18,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { Database, initializeSchema, ROOT_INODE } from "@cloudflare/workspace-fs";
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+import { Database, initializeSchema, ROOT_INODE } from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 import { createSyncClient, createWorkspaceClient } from "../src/client.js";

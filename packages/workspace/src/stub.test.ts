@@ -11,7 +11,7 @@
 // class's own contract: accessor shape, eager spawn, readFile
 // overload routing, stat ENOENT propagation, close() idempotency.
 
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
