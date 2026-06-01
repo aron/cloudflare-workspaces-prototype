@@ -41,6 +41,6 @@ export type { ExecutedStatement } from "./testing-recording.js";
 export { RecordingStorage } from "./testing-recording.js";
 export type {
   DurableObjectStorageLike,
-  SqlCursorLike,
-  SqlStorageLike,
+  SQLCursorLike,
+  SQLStorageLike,
 } from "./types.js";

@@ -1,4 +1,4 @@
-import type { DurableObjectStorageLike, SqlCursorLike } from "./types.js";
+import type { DurableObjectStorageLike, SQLCursorLike } from "./types.js";
 
 // Pure-JS test fixture. Records every SQL statement the production
 // code emits, lets the test assert against the trace, and serves a
@@ -14,7 +14,7 @@ export interface ExecutedStatement {
   bindings: unknown[];
 }
 
-class TestCursor<Row extends object> implements SqlCursorLike<Row> {
+class TestCursor<Row extends object> implements SQLCursorLike<Row> {
   private readonly rows: Row[];
 
   constructor(rows: Row[]) {
@@ -32,7 +32,7 @@ export class RecordingStorage implements DurableObjectStorageLike {
     exec: <Row extends object = Record<string, unknown>>(
       query: string,
       ...bindings: unknown[]
-    ): SqlCursorLike<Row> => {
+    ): SQLCursorLike<Row> => {
       this.statements.push({ query, bindings });
       return new TestCursor<Row>(this.rowsFor<Row>(query, bindings));
     },

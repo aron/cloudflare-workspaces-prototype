@@ -1,16 +1,16 @@
-export interface SqlCursorLike<Row extends object = Record<string, unknown>> {
+export interface SQLCursorLike<Row extends object = Record<string, unknown>> {
   toArray(): Row[];
 }
 
-export interface SqlStorageLike {
+export interface SQLStorageLike {
   exec<Row extends object = Record<string, unknown>>(
     query: string,
     ...bindings: unknown[]
-  ): SqlCursorLike<Row>;
+  ): SQLCursorLike<Row>;
 }
 
 export interface DurableObjectStorageLike {
-  sql: SqlStorageLike;
+  sql: SQLStorageLike;
   transaction?<T>(closure: () => T | Promise<T>): T | Promise<T>;
   transactionSync?<T>(closure: () => T): T;
 }

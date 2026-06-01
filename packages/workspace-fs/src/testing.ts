@@ -13,12 +13,12 @@
 
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-import type { DurableObjectStorageLike, SqlCursorLike } from "./types.js";
+import type { DurableObjectStorageLike, SQLCursorLike } from "./types.js";
 
 export type { ExecutedStatement } from "./testing-recording.js";
 export { RecordingStorage } from "./testing-recording.js";
 
-class TestCursor<Row extends object> implements SqlCursorLike<Row> {
+class TestCursor<Row extends object> implements SQLCursorLike<Row> {
   private readonly rows: Row[];
 
   constructor(rows: Row[]) {
@@ -34,13 +34,13 @@ export class SQLiteTestStorage implements DurableObjectStorageLike {
   private readonly db: DatabaseSync;
   private readonly cache = new Map<string, StatementSync>();
   readonly sql: {
-    exec: <Row extends object>(query: string, ...bindings: unknown[]) => SqlCursorLike<Row>;
+    exec: <Row extends object>(query: string, ...bindings: unknown[]) => SQLCursorLike<Row>;
   };
 
   constructor() {
     this.db = new DatabaseSync(":memory:");
     this.sql = {
-      exec: <Row extends object>(query: string, ...bindings: unknown[]): SqlCursorLike<Row> => {
+      exec: <Row extends object>(query: string, ...bindings: unknown[]): SQLCursorLike<Row> => {
         // node:sqlite refuses statements with trailing whitespace through
         // prepare(); also we cache prepared statements per unique query
         // string to keep the fixture fast.

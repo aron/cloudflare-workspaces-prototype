@@ -1,7 +1,7 @@
-import type { DurableObjectStorageLike, SqlStorageLike } from "./types.js";
+import type { DurableObjectStorageLike, SQLStorageLike } from "./types.js";
 
 export class Database {
-  readonly sql: SqlStorageLike;
+  readonly sql: SQLStorageLike;
   readonly transactionSync: <T>(closure: () => T) => T;
 
   constructor(storage: DurableObjectStorageLike) {
