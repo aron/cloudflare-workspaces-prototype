@@ -76,10 +76,9 @@ POST /c/<name>/exec             { command | argv, cwd?, encoding? }
 Requires Docker.
 
 ```sh
-# Build the wsd SEA binary (one-time / after wsd changes).
-npm run build:bin --workspace @cloudflare/workspace-wsd
-
-# Boot the example. predev stages the binary into ./build/.
+# Boot the example. predev builds the wsd docker image
+# (cloudflare/workspace-wsd-linux-x64:VERSION) so the example's
+# Dockerfile can COPY --from it.
 npm run dev --workspace @cloudflare/example-wsd-container
 ```
 
@@ -109,7 +108,6 @@ examples/wsd-container/
   Dockerfile                debian + libfuse + wsd binary (ENTRYPOINT)
   wrangler.jsonc            Worker + DO + Container binding
   src/index.ts              Worker handler, DO (ContainerExample)
-  scripts/stage-wsd.mjs     copies wsd-linux-x64 into ./build/
 ```
 
 ## Known limitations / next steps
