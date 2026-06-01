@@ -9,6 +9,12 @@
 // 100 ms). That's already what node's fs.watch uses internally on
 // platforms without inotify, and it's slow enough that the SQL
 // scan stays in the noise even with many watchers active.
+//
+// Coverage: there is no watch.test.ts here because watch is only
+// reachable through SQLiteWorkspaceProvider.watch /
+// watchAsyncIterable; the test surface is provider.watch.test.ts,
+// which exercises both the EventEmitter and the AsyncIterable
+// adapters end-to-end.
 
 import { EventEmitter } from "node:events";
 
