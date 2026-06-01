@@ -12,7 +12,7 @@ bridge.
 client ─► Worker /c/<name>/{file,exec}
              │  (DO RPC calls)
              ▼
-       DO (WsdContainer) ──► Container ──► wsd (:8080)
+       DO (ContainerExample) ──► Container ──► wsd (:8080)
              ▲                                  │
              │      ws://workspace.internal/ws  │
              └────────── capnweb session ◄──────┘
@@ -26,19 +26,20 @@ client ─► Worker /c/<name>/{file,exec}
    attach.
 2. wsd reaches the Worker through the container's **outbound
    interception** (`ctx.container.interceptOutboundHttp("workspace.internal",
-   …)`, set up by the backend). The DO supplies a `WsdEgress`
-   `WorkerEntrypoint` instance with its own id in props; the
-   entrypoint routes `/ws` upgrades back to the owning DO.
+   …)`, set up by the backend). The DO passes
+   `ctx.exports.WorkspaceProxy({ props: { binding, id } })` as the
+   egress fetcher; that `WorkerEntrypoint` (re-exported from
+   `@cloudflare/workspace`) routes `/ws` upgrades back to the owning DO.
 3. When `Workspace.ready()` is called for the first time, the
    backend posts `/connect` into wsd with
    `{ url: "http://workspace.internal" }`. wsd polls
    `workspace.internal/health`, then dials
    `ws://workspace.internal/ws`.
-4. `WsdEgress.fetch` forwards the upgrade to the DO's `fetch()` via
-   the DO binding. The DO's `fetch()` delegates to
-   `backend.handleFetch(req)`, which performs the WebSocket upgrade,
-   resolves the in-flight `connect()`, and attaches a capnweb
-   client session to the server-side socket.
+4. `WorkspaceProxy.fetch` forwards the upgrade to the DO's `fetch()`
+   via the DO binding looked up from its props. The DO's `fetch()`
+   delegates to `backend.handleFetch(req)`, which performs the
+   WebSocket upgrade, resolves the in-flight `connect()`, and
+   attaches a capnweb client session to the server-side socket.
 5. The DO exposes a single `getWorkspace()` RPC method that
    returns a `WorkspaceStub` (an `RpcTarget` wrapping the inner
    `Workspace`). The Worker's fetch handler calls
@@ -107,7 +108,7 @@ curl -X POST http://127.0.0.1:8787/c/demo/exec \
 examples/wsd-container/
   Dockerfile                debian + libfuse + wsd binary (ENTRYPOINT)
   wrangler.jsonc            Worker + DO + Container binding
-  src/index.ts              Worker handler, DO, WsdEgress entrypoint
+  src/index.ts              Worker handler, DO (ContainerExample)
   scripts/stage-wsd.mjs     copies wsd-linux-x64 into ./build/
 ```
 

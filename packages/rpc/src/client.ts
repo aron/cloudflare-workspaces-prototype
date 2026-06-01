@@ -7,7 +7,7 @@ import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 
 import type { SyncRPC, WorkspaceRPC } from "./interface.js";
 
-export interface RpcEvent {
+export interface RPCEvent {
   rpc: keyof SyncRPC;
   durationMs: number;
   ok: boolean;
@@ -25,7 +25,7 @@ export interface ClientOptions {
   // observability surface the host already uses. bytesIn /
   // bytesOut aren't exposed yet — capnweb doesn't surface
   // per-call frame sizes through the stub API.
-  onRpcEvent?: (event: RpcEvent) => void;
+  onRPCEvent?: (event: RPCEvent) => void;
 }
 
 export interface SyncClient extends SyncRPC {
@@ -39,11 +39,16 @@ export interface SyncClient extends SyncRPC {
 export function createSyncClient(options: ClientOptions): SyncClient {
   const WS = options.WebSocketImpl ?? WebSocket;
   const ws = new WS(options.url);
+  // The WebSocket cast crosses two type boundaries: the runtime
+  // ws (node `ws` package or global) is structurally compatible
+  // with capnweb's expected globalThis.WebSocket but TS can't
+  // bridge the nominal types. The RpcStub cast names the remote
+  // interface so the Proxy returned downstream is strongly typed.
   const stub = newWebSocketRpcSession(ws as unknown as globalThis.WebSocket) as RpcStub<SyncRPC>;
   // capnweb's RpcStub is a Proxy that exposes the remote interface
   // as if it were local. We wrap it so callers see SyncClient
   // (= SyncRPC + close).
-  const onEvent = options.onRpcEvent;
+  const onEvent = options.onRPCEvent;
   return new Proxy(stub, {
     get(target, prop, receiver) {
       if (prop === "close") {
@@ -68,7 +73,7 @@ export function createSyncClient(options: ClientOptions): SyncClient {
       if (onEvent === undefined || typeof prop !== "string") return value;
       // Capnweb's Proxy returns a callable RpcPromise/RpcStub for
       // every string property. Wrap the call to time it and fire
-      // onRpcEvent. The wrapped value still behaves like an
+      // onRPCEvent. The wrapped value still behaves like an
       // RpcPromise (thenable + property-access for pipelining) for
       // calls that return synchronously-pipelined values; we only
       // measure the awaited terminal call.
@@ -102,6 +107,9 @@ export function createSyncClient(options: ClientOptions): SyncClient {
         return result;
       };
     },
+    // The Proxy is structurally a SyncRPC stub + the close()
+    // override; TS can't infer that from the get-handler shape,
+    // so route through unknown to land on SyncClient.
   }) as unknown as SyncClient;
 }
 
@@ -113,7 +121,7 @@ export interface WorkspaceClient extends WorkspaceRPC {
 // different stub shape: callers reach the sync half via `.sync`
 // and the shell half via `.shell`.
 //
-// onRpcEvent isn't wired here yet — the composite stub's
+// onRPCEvent isn't wired here yet — the composite stub's
 // property-access path is `stub.sync.push(...)` which capnweb
 // surfaces as a two-step proxy traversal; the per-call timing
 // shim from createSyncClient doesn't compose cleanly. Add when a
@@ -124,6 +132,9 @@ export function createWorkspaceClient(options: {
 }): WorkspaceClient {
   const WS = options.WebSocketImpl ?? WebSocket;
   const ws = new WS(options.url);
+  // Same WebSocket / RpcStub cast pattern as createSyncClient —
+  // see comment there. WorkspaceRPC adds the composite shape so
+  // callers can pipeline `.sync.push(...)` and `.shell.exec(...)`.
   const stub = newWebSocketRpcSession(
     ws as unknown as globalThis.WebSocket,
   ) as RpcStub<WorkspaceRPC>;
@@ -147,5 +158,8 @@ export function createWorkspaceClient(options: {
       }
       return Reflect.get(target, prop, receiver);
     },
+    // As in createSyncClient, the Proxy is structurally a
+    // WorkspaceRPC stub + close(); route through unknown so TS
+    // accepts the WorkspaceClient landing type.
   }) as unknown as WorkspaceClient;
 }

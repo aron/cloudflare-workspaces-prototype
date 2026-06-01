@@ -28,6 +28,12 @@ For a single package:
 npm test --workspace @cloudflare/workspace-fs
 ```
 
+For a single test file inside a package:
+
+```bash
+npm test --workspace @cloudflare/workspace-fs -- src/path/to/file.test.ts
+```
+
 ## Commits
 
 - One logical change per commit. Don't bundle unrelated edits.

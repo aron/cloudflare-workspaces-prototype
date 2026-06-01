@@ -14,8 +14,8 @@ import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 
-import { createSyncClient } from "./client.js";
-import { acceptWebSocketSession, createSyncServer } from "./server.js";
+import { createSyncClient } from "../src/client.js";
+import { acceptWebSocketSession, createSyncServer } from "../src/server.js";
 
 interface Harness {
   url: string;
@@ -282,9 +282,9 @@ describe("cross-side invariant", () => {
   });
 });
 
-import type { RpcEvent } from "./client.js";
+import type { RPCEvent } from "../src/client.js";
 
-describe("onRpcEvent observability", () => {
+describe("onRPCEvent observability", () => {
   let harness: Harness | undefined;
   afterEach(async () => {
     await harness?.close();
@@ -293,10 +293,10 @@ describe("onRpcEvent observability", () => {
 
   it("fires once per RPC with ok=true on success", async () => {
     harness = await startHarness();
-    const events: RpcEvent[] = [];
+    const events: RPCEvent[] = [];
     const client = createSyncClient({
       url: harness.url,
-      onRpcEvent: (e) => events.push(e),
+      onRPCEvent: (e) => events.push(e),
     });
     try {
       await client.hasObjects([]);

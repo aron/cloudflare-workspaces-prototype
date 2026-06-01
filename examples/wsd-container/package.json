@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Example Worker + Durable Object that runs wsd inside a Cloudflare Container.",
+  "description": "Example Worker + Durable Object that uses @cloudflare/workspace inside a Cloudflare Container.",
   "scripts": {
     "build:wsd": "npm run build:bin --workspace @cloudflare/workspace-wsd",
     "predev": "npm run build:wsd && node ./scripts/stage-wsd.mjs",

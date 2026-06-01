@@ -8,7 +8,7 @@ import { createWorkspaceClient, type WorkspaceClient } from "@cloudflare/workspa
 import {
   acceptWebSocketSession,
   createWorkspaceServer,
-  serveHttpBatch,
+  serveHTTPBatch,
 } from "@cloudflare/workspace-rpc/server";
 import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
@@ -95,7 +95,7 @@ function createHTTPServer(
         });
         return;
       }
-      void serveHttpBatch(request, response, rpc).catch((error) => {
+      void serveHTTPBatch(request, response, rpc).catch((error) => {
         console.error("/api batch failed:", error);
         if (!response.headersSent) {
           send(response, 500, "internal error\n", {

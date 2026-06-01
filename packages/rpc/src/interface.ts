@@ -3,7 +3,7 @@
 // against a SQLite-backed VFS; the only thing that differs is which
 // direction each method is called from.
 //
-// Naming follows docs/02 + docs/08 of the prototype repo:
+// Naming summary:
 //
 //   push           — DO  → container.   Streams ChangeEntry.
 //   pushObjects    — DO  → container.   Streams chunk bytes by hash.
@@ -12,10 +12,10 @@
 //   hasObjects     — either probes the other. Returns the subset
 //                    the receiver already holds.
 //
-// The exec / getExec / killExec / disposeExec surface from docs/05
-// + docs/08 hangs off a sibling ShellRPC interface. Both compose
-// under the top-level WorkspaceRPC, so the wire stub exposes one
-// stable surface while the two halves stay internally separable.
+// The exec / getExec / killExec / disposeExec surface hangs off a
+// sibling ShellRPC interface. Both compose under the top-level
+// WorkspaceRPC, so the wire stub exposes one stable surface while
+// the two halves stay internally separable.
 
 import type { ChangeEntry } from "@cloudflare/workspace-fs";
 
@@ -44,14 +44,6 @@ export interface SyncRPC {
   // a fetchChanges round so it knows the cursor to advance
   // fetchRev to once the apply settles. Cheap — one SQL
   // scalar.
-  //
-  // TODO(Phase 6): collapse this into fetchChanges by changing
-  // the return type to { rev, stream }. One RPC instead of two,
-  // and the rev is naturally consistent with the stream snapshot
-  // (no race between the currentRev read and coalesceChanges).
-  // Leaving the separate method in place for now because the
-  // pull loop tests are easier to drive with two independent
-  // RPCs; the refactor is mechanical once the loop shape settles.
   currentRev(): Promise<number>;
 
   // Read the receiver's full sync watermark state. Cheap (three
@@ -63,9 +55,8 @@ export interface SyncRPC {
   //   pushRev     — highest rev already shipped to the upstream.
   //   fetchRev    — highest upstream rev applied locally.
   //
-  // pushRev / fetchRev only move when the sync loop is running
-  // (UPSTREAM_URL configured on this peer). Otherwise they sit
-  // at 0.
+  // pushRev / fetchRev only move when the receiver is acting as
+  // a sync peer. Otherwise they sit at 0.
   watermarks(): Promise<{ currentRev: number; pushRev: number; fetchRev: number }>;
 
   // Materialise the receiver's view of a single path as a
@@ -90,10 +81,9 @@ export interface SyncRPC {
   pushObjects(objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>): Promise<void>;
 }
 
-// Process supervision surface. Lives alongside SyncRPC; mirrors
-// the docs/08 ContainerRPC shape for the exec half. wsd's Runner
-// is the concrete implementation today; the interface keeps that
-// dependency out of the wire contract.
+// Process supervision surface. Lives alongside SyncRPC. wsd's
+// Runner is the concrete implementation today; the interface keeps
+// that dependency out of the wire contract.
 export interface ShellRPC {
   // Spawn a command in the container. Returns an id (caller-
   // supplied or runner-minted) and a ReadableStream of ExecEvents.
@@ -131,9 +121,9 @@ export interface WorkspaceRPC {
   shell: ShellRPC;
 }
 
-// Every event carries a per-id monotonic `seq` (see PLAN.md Phase 8,
-// seq vs timestamp). The host-side Workspace.shell decodes value to
-// string when the caller passes `encoding: "utf8"`.
+// Every event carries a per-id monotonic `seq`. The host-side
+// Workspace.shell decodes value to string when the caller passes
+// `encoding: "utf8"`.
 export type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
   | { id: string; seq: number; name: "stderr"; value: Uint8Array }
@@ -141,7 +131,7 @@ export type ExecEvent =
 
 // Error codes carried over the wire. The client adapter rethrows as
 // WorkspaceError preserving `code`, so application code can branch
-// on err.code rather than parse messages. See docs/08.
+// on err.code rather than parse messages.
 export type WireErrorCode =
   | "ENOENT"
   | "EUNKNOWN_HASH"

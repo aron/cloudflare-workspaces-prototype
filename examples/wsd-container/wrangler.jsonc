@@ -4,14 +4,14 @@
   // Worker reaches the DO, the DO boots the container, the container's
   // wsd process answers /health on port 8080.
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "wsd-container-example",
+  "name": "workspace-container-example",
   "main": "src/index.ts",
-  "compatibility_date": "2025-11-17",
+  "compatibility_date": "2026-05-26",
   "compatibility_flags": ["nodejs_compat"],
 
   "containers": [
     {
-      "class_name": "WsdContainer",
+      "class_name": "ContainerExample",
       // Built from the local Dockerfile, which bakes in the wsd binary
       // produced by `npm run build:bin --workspace @cloudflare/workspace-wsd`.
       "image": "./Dockerfile",
@@ -22,8 +22,8 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "WSD",
-        "class_name": "WsdContainer"
+        "name": "ContainerExample",
+        "class_name": "ContainerExample"
       }
     ]
   },
@@ -31,7 +31,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["WsdContainer"]
+      "new_sqlite_classes": ["ContainerExample"]
     }
   ]
 }

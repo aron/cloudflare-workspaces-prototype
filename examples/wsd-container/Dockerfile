@@ -5,11 +5,11 @@
 # example's predev/predeploy hook stages it into ./build/wsd-linux-x64
 # so the image build context stays small and self-contained.
 #
-# Cloudflare Containers do not expose /dev/fuse today, so we run wsd
-# with DISABLE_FUSE=1 and only exercise the capnweb RPC surface
-# (/health, /api, /ws). libfuse is still installed so the image is
-# ready the moment FUSE access lands on the platform — flipping the
-# env var off is the only change needed.
+# The local wrangler dev runtime does not expose /dev/fuse to
+# containers, so we run wsd with DISABLE_FUSE=1 and only exercise
+# the capnweb RPC surface (/health, /api, /ws). libfuse is still
+# installed so the image is ready the moment FUSE access lands in
+# wrangler — flipping the env var off is the only change needed.
 
 FROM --platform=linux/amd64 debian:stable-slim
 

@@ -26,6 +26,7 @@
     "indentWidth": 2,
     "lineWidth": 100
   },
+  // TODO: enable the linter once the existing tree is clean.
   "linter": { "enabled": false },
   "javascript": {
     "formatter": {

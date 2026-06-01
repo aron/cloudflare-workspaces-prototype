@@ -3,7 +3,7 @@
 This repository hosts the Cloudflare Workspace prototype as a small monorepo:
 
 - [`packages/workspace-fs`](packages/workspace-fs/README.md) (`@cloudflare/workspace-fs`) — Durable Object SQLite-backed virtual filesystem, sync protocol building blocks, and a `@platformatic/vfs` provider for Node.
-- [`packages/workspace-rpc`](packages/workspace-rpc) (`@cloudflare/workspace-rpc`) — capnweb-based RPC wire types and server/client helpers shared between the DO and `wsd`.
+- [`packages/rpc`](packages/rpc) (`@cloudflare/workspace-rpc`) — capnweb-based RPC wire types and server/client helpers shared between the DO and `wsd`.
 - [`packages/wsd`](packages/wsd/README.md) (`@cloudflare/workspace-wsd`) — the `wsd` daemon: a FUSE mount plus HTTP/WebSocket RPC server that runs inside the sandbox container.
 - [`packages/workspace`](packages/workspace) (`@cloudflare/workspace`) — the top-level Workspace package consumed by Durable Objects. Still a work in progress; see [`docs/README.md`](docs/README.md) for the intended design (note: that document is forward-looking and has diverged from `main`).
 
