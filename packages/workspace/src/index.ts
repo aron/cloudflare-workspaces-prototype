@@ -6,6 +6,7 @@
 // pluggable; v1 ships TestBackend (point at a URL) and the
 // two CloudflareSandboxBackend flavours land in Phase 7.5.
 
+export type { DurableObjectStorageLike } from "@cloudflare/workspace-fs";
 export type { BackendHandle, WorkspaceBackend } from "./backend.js";
 export {
   CloudflareContainerBackend,
