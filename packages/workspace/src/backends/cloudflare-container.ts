@@ -11,7 +11,7 @@
 //     #backend = new CloudflareContainerBackend({
 //       container: () => this.ctx.container!,
 //       egress: this.ctx.exports.WsdEgress({
-//         props: { doId: this.ctx.id.toString() },
+//         props: { id: this.ctx.id.toString() },
 //       }),
 //     });
 //     #workspace = new Workspace({ backends: [this.#backend] });
@@ -58,7 +58,7 @@ export interface CloudflareContainerBackendOptions {
   // construction inside a DO:
   //
   //   ctx.exports.WsdEgress({
-  //     props: { doId: ctx.id.toString() },
+  //     props: { id: ctx.id.toString() },
   //   })
   egress: Fetcher;
 
