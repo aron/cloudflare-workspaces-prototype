@@ -31,35 +31,33 @@ Current filesystem support:
 - Optional host/DO synchronization: when `UPSTREAM_URL` is set, `wsd` opens a `SyncClient` from `@cloudflare/workspace-rpc/client` against that URL and runs the sync loop in the background.
 - No on-disk persistence yet — the in-memory VFS is rebuilt on each start, with sync pulling state back from the upstream when configured.
 
-## Gotcha: FUSE writes are buffered in memory
+## FUSE buffer flushing
 
 The FUSE driver in `src/fuse/driver.ts` keeps a per-file in-memory
-buffer (`files` Map) that `write` updates directly. The backing
-`@platformatic/vfs` filesystem only ever sees the initial empty
-inode created by `create()` plus subsequent metadata operations
-(`rename`, `chmod`, `unlink`). `release` / `flush` / `fsync` are
-intentionally cheap and do *not* spill the buffer.
+buffer (`files` Map) that `write` updates directly. The buffer is
+the FUSE read path's source of truth, so reads stay fast even when
+the backing `@platformatic/vfs` filesystem would otherwise need to
+stream chunks from SQLite.
 
-This is a deliberate performance choice — chunking, hashing, and
-writing every `write()` syscall into SQLite would pin the daemon
-on the synchronous chunk pipeline. The buffer absorbs the burst,
-and a periodic flush task is meant to spill into the VFS later.
+Writes only become visible through the VFS surface (capnweb sync,
+any host-side `@platformatic/vfs` consumer) once the driver spills
+the buffer:
 
-It also produces a surprising failure mode that's easy to miss:
+- `release` — fires when the kernel drops the last reference to an
+  open file. The standard "close-and-forget" path.
+- `flush` — fires on every `close(2)`, before `release`. Catches the
+  case where one process closes its handle while another keeps the
+  file open.
+- `fsync(2)` — explicit user-driven sync.
 
-- `cat /workspace/foo.txt` inside the container after a write **sees
-  the bytes** — the FUSE `read` op pulls from the same buffer.
-- An RPC consumer that pulls from the capnweb wire (the DO side
-  in `examples/wsd-container`, anyone calling `pullOnce` against
-  `/ws`) **sees an empty file** — the dirent transferred, but
-  the sync layer reads chunks from the VFS, which never got the
-  bytes.
+Plain `write` does not spill. A burst of small writes coalesces in
+the buffer and pays the chunk/hash cost once on close.
 
-If a test or downstream caller writes to the FUSE mount and then
-expects the bytes back through the RPC surface, the writes have
-to land in the VFS first. The flush task that closes this gap is
-tracked alongside the failing test in `src/fuse/driver.test.ts`
-(`FUSE write is visible through the backing VFS after release`).
+If you're tracking down "file looks empty over RPC" symptoms,
+either the writer skipped `close(2)`/`fsync`, or one of the spill
+ops is broken. The driver's `flushEntry` helper is the single place
+VFS spills happen — a missing call site there is the most likely
+cause.
 
 ## FUSE prerequisites
 
