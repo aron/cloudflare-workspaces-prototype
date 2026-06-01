@@ -13,6 +13,7 @@ import type { SyncRPC } from "@cloudflare/workspace-rpc";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { WorkspaceShell } from "./shell.js";
+import { WorkspaceStub } from "./stub.js";
 
 export interface WorkspaceOptions {
   // Backends are tried in declared order. The first one whose
@@ -60,6 +61,20 @@ export class Workspace {
       throw new Error("Workspace not connected — await ready() first");
     }
     return this.#shell;
+  }
+
+  // Wrap this workspace in a WorkspaceStub so it can be handed
+  // across the Workers-RPC boundary (e.g. returned from a DO RPC
+  // method). The stub is a lazy RpcTarget — it doesn't own any
+  // resources itself; it just delegates back to this workspace.
+  // Throws if called before ready() resolves, because the inner
+  // .fs / .shell getters do.
+  stub(): WorkspaceStub {
+    // Touch .fs and .shell so the not-connected error surfaces
+    // here rather than on the first RPC method call.
+    void this.fs;
+    void this.shell;
+    return new WorkspaceStub(this);
   }
 
   async close(): Promise<void> {

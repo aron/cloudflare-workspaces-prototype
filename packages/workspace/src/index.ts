@@ -22,4 +22,11 @@ export type {
   WorkspaceExecEvent,
 } from "./shell.js";
 export { WorkspaceShell } from "./shell.js";
+export {
+  type WorkspaceExecOptions,
+  type WorkspaceExecResult,
+  WorkspaceFsStub,
+  WorkspaceShellStub,
+  WorkspaceStub,
+} from "./stub.js";
 export { Workspace, WorkspaceFs, type WorkspaceOptions } from "./workspace.js";
