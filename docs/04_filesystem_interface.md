@@ -68,10 +68,14 @@ writeFile(
 ```
 
 Accepts a stream so callers can supply uploads, R2 bodies, and `fetch`
-responses without an intermediate `arrayBuffer()`. Today the stream is
-drained into a single in-memory buffer before hashing and chunking;
-true streaming chunking is a roadmap item (see `PLAN.md` *Important*).
-The public signature won't change when that lands.
+responses without an intermediate `arrayBuffer()`. Stream sources are
+consumed incrementally: bytes are re-windowed into fixed `CHUNK_SIZE`
+(512 KiB) pieces, hashed, and staged into `vfs_blobs` as they arrive,
+so peak memory is bounded by one chunk plus whatever the source
+yields per pull — not the full file. The inode, dirent, chunk-list,
+and manifest rows are committed in one short transaction once the
+source drains; a mid-stream failure leaves orphan blob rows that
+`gc()` reaps on its next pass.
 
 ```ts
 // Text.
@@ -80,7 +84,7 @@ await fs.writeFile("/workspace/notes/todo.md", "- [ ] ship it\n");
 // Binary.
 await fs.writeFile("/workspace/data/blob.bin", new Uint8Array([1, 2, 3]));
 
-// Supply an HTTP upload as a stream (buffered internally today).
+// Supply an HTTP upload as a stream (consumed incrementally).
 await fs.writeFile("/workspace/uploads/big.csv", request.body!);
 
 // Pipe an R2 object into the workspace.
@@ -320,7 +324,7 @@ maps to `Workspace.fs`:
 | `node:fs/promises` | `Workspace.fs` | Notes |
 | --- | --- | --- |
 | `readFile` | `readFile` | Stream by default; pass `"utf8"` for a string. |
-| `writeFile` | `writeFile` | Accepts `string`, `Uint8Array`, or `ReadableStream`. Stream is buffered internally today. |
+| `writeFile` | `writeFile` | Accepts `string`, `Uint8Array`, or `ReadableStream` (consumed incrementally). |
 | `appendFile` | — | Read, concat, write. Not a primitive. |
 | `mkdir` | `mkdir` | `{ recursive: true }` supported. |
 | `rmdir` | `rm` | One method for files and dirs (matches modern Node). |

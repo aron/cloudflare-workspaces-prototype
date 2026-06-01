@@ -4,6 +4,7 @@ import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
+import { stageBlob } from "../sync/blobs.js";
 import { buildManifest } from "../sync/manifests.js";
 
 // Fixed chunk size. Exported so tests can size inputs precisely
@@ -50,35 +51,11 @@ function resolveParent(db: Database, parts: string[], canonical: string): number
   return parentInode;
 }
 
-async function materialize(content: WriteFileContent): Promise<Uint8Array> {
+async function materialize(content: string | Uint8Array): Promise<Uint8Array> {
   if (typeof content === "string") {
     return new TextEncoder().encode(content);
   }
-  if (content instanceof Uint8Array) {
-    return content;
-  }
-  // ReadableStream — drain into one buffer. Memory cost = full file
-  // size, matching node:fs/promises.writeFile semantics. Once the
-  // streaming write path lands we can revisit; for now this keeps
-  // the chunking logic uniform.
-  const reader = content.getReader();
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (value !== undefined) {
-      parts.push(value);
-      total += value.byteLength;
-    }
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
+  return content;
 }
 
 // sha256 with a synchronous code path so writeFile can be called both
@@ -117,8 +94,146 @@ export async function writeFile(
   options: WriteFileOptions,
   now: () => number,
 ): Promise<void> {
+  if (content instanceof ReadableStream) {
+    await writeFileStreaming(db, path, content, options, now);
+    return;
+  }
   const bytes = await materialize(content);
   writeFileSync(db, path, bytes, options, now);
+}
+
+// Streaming write path. Reads the source one source-chunk at a time,
+// re-windows into fixed CHUNK_SIZE pieces, hashes each window, and
+// stages it into vfs_blobs / vfs_blob_bytes as it goes. The final
+// inode / dirent / vfs_chunks / manifest writes happen in a single
+// short transaction once the source is drained, against a list of
+// {hash, size} entries that's O(file_size / CHUNK_SIZE) bytes — not
+// O(file_size).
+//
+// Failure mid-stream leaves blob rows behind; gc() reaps orphans on
+// its next pass since no node references them.
+async function writeFileStreaming(
+  db: Database,
+  path: string,
+  source: ReadableStream<Uint8Array>,
+  options: WriteFileOptions,
+  now: () => number,
+): Promise<void> {
+  const { parts, path: canonical } = canonicalizePath(path);
+  if (parts.length === 0) {
+    throw createWorkspaceError("EISDIR", "cannot write to the root directory", canonical);
+  }
+  const mode = (options.mode ?? 0o644) & 0o7777;
+  const mtime = now();
+
+  const chunkRefs: Array<{ hash: Uint8Array; size: number }> = [];
+  // Carry-over buffer: bytes left over from the previous source chunk
+  // that didn't fill a CHUNK_SIZE window.
+  let carry: Uint8Array | undefined;
+
+  const flush = (chunk: Uint8Array): void => {
+    const hash = sha256(chunk);
+    stageBlob(db, hash, chunk, mtime);
+    chunkRefs.push({ hash, size: chunk.byteLength });
+  };
+
+  const reader = source.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value === undefined || value.byteLength === 0) continue;
+      let input = value;
+      if (carry !== undefined) {
+        // Splice carry-over onto the front of this source chunk so
+        // we can re-window cleanly.
+        const merged = new Uint8Array(carry.byteLength + input.byteLength);
+        merged.set(carry, 0);
+        merged.set(input, carry.byteLength);
+        input = merged;
+        carry = undefined;
+      }
+      let offset = 0;
+      while (input.byteLength - offset >= CHUNK_SIZE) {
+        // Copy the window so the staged blob doesn't alias a
+        // larger backing buffer.
+        const window = input.slice(offset, offset + CHUNK_SIZE);
+        flush(window);
+        offset += CHUNK_SIZE;
+      }
+      if (offset < input.byteLength) {
+        carry = input.slice(offset);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (carry !== undefined && carry.byteLength > 0) {
+    flush(carry);
+  }
+
+  // Wire up the inode against the staged blobs in one short
+  // transaction. From this point on the SQL is the same shape as the
+  // synchronous path — only the chunk-bytes step is skipped because
+  // stageBlob already landed them above.
+  db.transactionSync(() => {
+    const parentInode = resolveParent(db, parts, canonical);
+    const leafName = parts[parts.length - 1];
+    const existing = db.one<{ child_inode: number }>(
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
+      parentInode,
+      leafName,
+    );
+    let inode: number;
+    if (existing !== undefined) {
+      const node = db.one<{ type: "file" | "dir" }>(
+        "SELECT type FROM vfs_nodes WHERE inode = ?",
+        existing.child_inode,
+      );
+      if (node?.type === "dir") {
+        throw createWorkspaceError("EISDIR", `path is a directory: ${canonical}`, canonical);
+      }
+      inode = existing.child_inode;
+      db.run("DELETE FROM vfs_chunks WHERE inode = ?", inode);
+    } else {
+      db.run(
+        "INSERT INTO vfs_nodes (type, mode, mtime, rev) VALUES ('file', ?, ?, 0)",
+        mode,
+        mtime,
+      );
+      const allocated = db.scalar<number>("SELECT last_insert_rowid()");
+      if (allocated === undefined) {
+        throw createWorkspaceError("EIO", "failed to allocate inode");
+      }
+      inode = allocated;
+      db.run(
+        "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+        parentInode,
+        leafName,
+        inode,
+      );
+    }
+    for (let idx = 0; idx < chunkRefs.length; idx++) {
+      const ref = chunkRefs[idx];
+      db.run(
+        "INSERT INTO vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
+        inode,
+        idx,
+        ref.hash,
+        ref.size,
+      );
+    }
+    const manifestHash = buildManifest(db, chunkRefs, mtime);
+    const rev = incrementRev(db);
+    db.run(
+      "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ?, manifest_hash = ? WHERE inode = ?",
+      mode,
+      mtime,
+      rev,
+      manifestHash,
+      inode,
+    );
+  });
 }
 
 // Synchronous entry point used by the VirtualProvider. Identical SQL

@@ -220,4 +220,77 @@ describe("writeFile", () => {
       expect(new TextDecoder().decode(readBack(db, "/a/b/c.txt"))).toBe("nested");
     });
   });
+
+  it("stages blobs incrementally as the stream produces them", async () => {
+    await withDB(async (db) => {
+      // Stream 3 CHUNK_SIZE-aligned source chunks. After the first
+      // is pulled, the receiver should have already staged it —
+      // we don't want to wait for the whole stream to drain.
+      const filler = new Uint8Array(CHUNK_SIZE);
+      filler.fill(0x41);
+      const filler2 = new Uint8Array(CHUNK_SIZE);
+      filler2.fill(0x42);
+      const filler3 = new Uint8Array(CHUNK_SIZE);
+      filler3.fill(0x43);
+
+      let pulled = 0;
+      let blobsAfterFirstPull: number | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (pulled === 0) {
+            controller.enqueue(filler);
+          } else if (pulled === 1) {
+            // Snapshot blob count after the writer has consumed
+            // the first source chunk but before we hand it the
+            // second. With streaming this is ≥ 1; with buffering
+            // it stays at 0 until end-of-stream.
+            blobsAfterFirstPull = countBlobs(db);
+            controller.enqueue(filler2);
+          } else if (pulled === 2) {
+            controller.enqueue(filler3);
+          } else {
+            controller.close();
+          }
+          pulled++;
+        },
+      });
+
+      await writeFile(db, "/big.bin", stream, {}, () => 0);
+      expect(blobsAfterFirstPull).toBeGreaterThanOrEqual(1);
+      expect(countBlobs(db)).toBe(3);
+      const back = readBack(db, "/big.bin");
+      expect(back.byteLength).toBe(3 * CHUNK_SIZE);
+      expect(back[0]).toBe(0x41);
+      expect(back[CHUNK_SIZE]).toBe(0x42);
+      expect(back[2 * CHUNK_SIZE]).toBe(0x43);
+    });
+  });
+
+  it("chunks correctly when source ReadableStream chunks don't align to CHUNK_SIZE", async () => {
+    await withDB(async (db) => {
+      // Source emits oddly-sized parts: 100 bytes, then CHUNK_SIZE,
+      // then 50 bytes. Total = CHUNK_SIZE + 150 → 2 chunks.
+      const a = new Uint8Array(100);
+      a.fill(0x31);
+      const b = new Uint8Array(CHUNK_SIZE);
+      b.fill(0x32);
+      const c = new Uint8Array(50);
+      c.fill(0x33);
+      await writeFile(db, "/oddly.bin", streamOf(a, b, c), {}, () => 0);
+      const back = readBack(db, "/oddly.bin");
+      expect(back.byteLength).toBe(CHUNK_SIZE + 150);
+      expect(back[0]).toBe(0x31);
+      expect(back[99]).toBe(0x31);
+      expect(back[100]).toBe(0x32);
+      expect(back[CHUNK_SIZE + 99]).toBe(0x32);
+      expect(back[CHUNK_SIZE + 100]).toBe(0x33);
+      // 2 chunks (first 512KiB, then 150-byte trailing).
+      const node = resolveInode(db, "/oddly.bin");
+      const chunkCount = db.scalar<number>(
+        "SELECT COUNT(*) FROM vfs_chunks WHERE inode = ?",
+        node?.inode,
+      );
+      expect(chunkCount).toBe(2);
+    });
+  });
 });
