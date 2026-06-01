@@ -11,8 +11,7 @@ import { type ChangeEntry } from "./changes.js";
 import { coalesceChanges } from "./coalesce.js";
 import { pushObjects } from "./push.js";
 
-// Minimal hand-rolled apply loop. Y8 generalises this with batching
-// and watermark advancement. For Y4 we just need to prove that
+// Minimal hand-rolled apply loop. We just need to prove that
 // coalesceChanges + pushObjects together transfer enough information
 // for the receiver to converge.
 async function apply(db: Database, entries: ChangeEntry[], objects: Map<string, Uint8Array>) {
@@ -31,7 +30,7 @@ async function apply(db: Database, entries: ChangeEntry[], objects: Map<string, 
     }
     if (entry.kind === "symlink") {
       // Best-effort: writeFile to a path the symlink replaces won't
-      // round-trip through symlink. For this Y4 test we never overwrite
+      // round-trip through symlink. For this test we never overwrite
       // a symlink with a non-symlink, so a fresh create is fine.
       symlink(db, entry.target, entry.path, () => entry.mtime);
       continue;
