@@ -160,6 +160,61 @@ test("kill() terminates a running exec", async () => {
   }
 });
 
+test("exec times out at timeoutMs and exits 143", async () => {
+  const { runner, dispose } = fixture();
+  try {
+    // 100ms is short enough for a fast test but long enough to
+    // exclude any plausible spawn-jitter false positive.
+    const handle = runner.exec("sleep 30", { id: "slow", timeoutMs: 100 });
+    const events = await drain(handle.events);
+    const exit = events.find((e) => e.name === "exit");
+    assert.ok(exit !== undefined, "expected exit event");
+    // SIGTERM → 143 per mapExitCode.
+    assert.equal(exit?.value, 143);
+  } finally {
+    dispose();
+  }
+});
+
+test("exec uses defaultTimeoutMs from the runner when no per-call value", async () => {
+  const { runner, dispose } = fixture({ defaultTimeoutMs: 100 });
+  try {
+    const handle = runner.exec("sleep 30", { id: "slow" });
+    const events = await drain(handle.events);
+    const exit = events.find((e) => e.name === "exit");
+    assert.ok(exit !== undefined);
+    assert.equal(exit?.value, 143);
+  } finally {
+    dispose();
+  }
+});
+
+test("per-call timeoutMs overrides the runner default", async () => {
+  // Runner default is 5s; per-call 100ms must win.
+  const { runner, dispose } = fixture({ defaultTimeoutMs: 5_000 });
+  try {
+    const start = Date.now();
+    const handle = runner.exec("sleep 30", { id: "override", timeoutMs: 100 });
+    await drain(handle.events);
+    assert.ok(Date.now() - start < 2_000, "should have killed well before 5s");
+  } finally {
+    dispose();
+  }
+});
+
+test("timeoutMs: 0 disables the timeout", async () => {
+  const { runner, dispose } = fixture({ defaultTimeoutMs: 50 });
+  try {
+    // The 50ms default would kill this; 0 must override to disable.
+    const handle = runner.exec("echo hi", { id: "noto", timeoutMs: 0 });
+    const events = await drain(handle.events);
+    const exit = events.find((e) => e.name === "exit");
+    assert.equal(exit?.value, 0);
+  } finally {
+    dispose();
+  }
+});
+
 test("dispose() removes the log and subsequent get() throws ENOENT", async () => {
   const { runner, dispose } = fixture();
   try {

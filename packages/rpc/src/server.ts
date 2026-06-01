@@ -28,7 +28,7 @@ import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js"
 export interface RunnerLike {
   exec(
     command: string,
-    options?: { id?: string; cwd?: string },
+    options?: { id?: string; cwd?: string; timeoutMs?: number },
   ): {
     id: string;
     events: ReadableStream<ExecEvent>;
@@ -144,11 +144,15 @@ class ShellRPCServer extends RpcTarget implements ShellRPC {
     super();
   }
 
-  async exec(input: { command: string; cwd?: string; id?: string }): Promise<{
+  async exec(input: { command: string; cwd?: string; id?: string; timeoutMs?: number }): Promise<{
     id: string;
     events: ReadableStream<ExecEvent>;
   }> {
-    return this.runner.exec(input.command, { id: input.id, cwd: input.cwd });
+    return this.runner.exec(input.command, {
+      id: input.id,
+      cwd: input.cwd,
+      timeoutMs: input.timeoutMs,
+    });
   }
 
   async getExec(input: { id: string; after?: number | "tail" }): Promise<{

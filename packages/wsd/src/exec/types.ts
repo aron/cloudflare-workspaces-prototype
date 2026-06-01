@@ -18,6 +18,11 @@ export interface ExecOptions {
   // Absolute path inside the container. Defaults to the runner's
   // configured cwd (typically the workspace root).
   cwd?: string;
+  // Per-call timeout. After this many milliseconds the runner
+  // sends SIGTERM (then SIGKILL after a short grace) to the
+  // child. A value of 0 disables the timeout for this call.
+  // Omit to use the runner's defaultTimeoutMs.
+  timeoutMs?: number;
   // Inherited by the child. Merged on top of the runner's base env.
   env?: Record<string, string>;
 }
@@ -37,6 +42,9 @@ export interface RunnerOptions {
   retentionMs?: number;
   // How often to scan for expired records. Default 30 s.
   sweepIntervalMs?: number;
+  // Default exec timeout (ms). Per-call timeoutMs overrides this.
+  // 0 disables the default; omit to use the built-in 320_000.
+  defaultTimeoutMs?: number;
   // Test seam: replaces Date.now() for retention math and log ts.
   now?: () => number;
 }

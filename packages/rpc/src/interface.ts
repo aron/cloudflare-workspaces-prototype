@@ -89,7 +89,16 @@ export interface ShellRPC {
   // supplied or runner-minted) and a ReadableStream of ExecEvents.
   // Capnweb streams handle backpressure end-to-end; consumer-side
   // slowness propagates to the spawned process via the kernel pipe.
-  exec(input: { command: string; cwd?: string; id?: string }): Promise<{
+  exec(input: {
+    command: string;
+    cwd?: string;
+    id?: string;
+    // Per-call timeout in milliseconds. Past this duration the
+    // container sends SIGTERM (then SIGKILL after a short grace).
+    // 0 disables the timeout. Omit to use the runner's default
+    // (typically 320_000).
+    timeoutMs?: number;
+  }): Promise<{
     id: string;
     events: ReadableStream<ExecEvent>;
   }>;

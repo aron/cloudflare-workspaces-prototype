@@ -32,6 +32,8 @@ interface ExecRecord {
   exitedAt?: number;
   live: boolean;
   subscriber?: LiveSubscriber;
+  timeoutTimer?: NodeJS.Timeout;
+  killTimer?: NodeJS.Timeout;
 }
 
 interface LiveSubscriber {
@@ -52,6 +54,10 @@ const DEFAULTS = {
   logMaxBytes: 16 * 1024 * 1024,
   retentionMs: 5 * 60 * 1000,
   sweepIntervalMs: 30 * 1000,
+  defaultTimeoutMs: 320_000,
+  // After SIGTERM, give the child this long to exit on its own
+  // before sending SIGKILL.
+  killGraceMs: 5_000,
 } as const;
 
 export interface RunnerInit extends RunnerOptions {
@@ -69,6 +75,7 @@ export class Runner {
     logMaxBytes: number;
     retentionMs: number;
     sweepIntervalMs: number;
+    defaultTimeoutMs: number;
     now: () => number;
   };
   private readonly records = new Map<string, ExecRecord>();
@@ -83,6 +90,7 @@ export class Runner {
       logMaxBytes: init.logMaxBytes ?? DEFAULTS.logMaxBytes,
       retentionMs: init.retentionMs ?? DEFAULTS.retentionMs,
       sweepIntervalMs: init.sweepIntervalMs ?? DEFAULTS.sweepIntervalMs,
+      defaultTimeoutMs: init.defaultTimeoutMs ?? DEFAULTS.defaultTimeoutMs,
       now: init.now ?? Date.now,
     };
     initializeExecSchema(this.db);
@@ -130,6 +138,14 @@ export class Runner {
       if (!record.live) return;
       record.live = false;
       record.exitedAt = this.opts.now();
+      if (record.timeoutTimer !== undefined) {
+        clearTimeout(record.timeoutTimer);
+        record.timeoutTimer = undefined;
+      }
+      if (record.killTimer !== undefined) {
+        clearTimeout(record.killTimer);
+        record.killTimer = undefined;
+      }
       const exitCode = mapExitCode(code, signal);
       let seq: number;
       try {
@@ -159,6 +175,26 @@ export class Runner {
       record.subscriber?.enqueue({ id, seq, name: "stderr", value });
       finalise(-1, null);
     });
+
+    const timeoutMs = options.timeoutMs ?? this.opts.defaultTimeoutMs;
+    if (timeoutMs > 0) {
+      record.timeoutTimer = setTimeout(() => {
+        if (!record.live) return;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // Child already gone; finalise will sort it out.
+        }
+        record.killTimer = setTimeout(() => {
+          if (!record.live) return;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }, DEFAULTS.killGraceMs);
+      }, timeoutMs);
+    }
 
     this.scheduleSweep();
     return { id, events: this.makeLiveStream(record, -1) };
@@ -316,6 +352,14 @@ export class Runner {
 
   private disposeRecord(record: ExecRecord): void {
     record.live = false;
+    if (record.timeoutTimer !== undefined) {
+      clearTimeout(record.timeoutTimer);
+      record.timeoutTimer = undefined;
+    }
+    if (record.killTimer !== undefined) {
+      clearTimeout(record.killTimer);
+      record.killTimer = undefined;
+    }
     try {
       if (record.child.exitCode === null && record.child.signalCode === null) {
         record.child.kill("SIGKILL");

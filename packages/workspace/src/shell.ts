@@ -88,6 +88,11 @@ export interface ExecOptions<E extends ExecEncoding = undefined> {
   // Uint8Array; "utf8" decodes per-chunk through a stream-mode
   // TextDecoder so multi-byte boundaries survive.
   encoding?: E;
+  // Per-call timeout in milliseconds. Past this duration the
+  // container sends SIGTERM (then SIGKILL after a short grace).
+  // Omit to use the runner's default (typically 320_000). Pass 0
+  // to disable the timeout for this call.
+  timeoutMs?: number;
 }
 
 export interface GetExecOptions<E extends ExecEncoding = undefined> {
@@ -137,6 +142,7 @@ export class WorkspaceShell {
       command,
       id: options.id,
       cwd: options.cwd,
+      timeoutMs: options.timeoutMs,
     });
     return wrapHandle<E>(this.#shell, this.#sync, id, events, options.encoding, pushed);
   }

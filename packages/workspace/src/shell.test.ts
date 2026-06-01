@@ -36,6 +36,7 @@ interface ExecCall {
   command: string;
   id: string | undefined;
   cwd: string | undefined;
+  timeoutMs: number | undefined;
 }
 
 interface GetExecCall {
@@ -135,7 +136,12 @@ function fakeRpc(options: FakeRpcOptions = {}): FakeRpc {
 
   const shell: ShellRPC = {
     async exec(input) {
-      calls.exec.push({ command: input.command, id: input.id, cwd: input.cwd });
+      calls.exec.push({
+        command: input.command,
+        id: input.id,
+        cwd: input.cwd,
+        timeoutMs: input.timeoutMs,
+      });
       if (options.throwOnExec !== undefined) throw options.throwOnExec;
       const id = input.id ?? mintedId;
       return { id, events: makeStream(id) };
@@ -196,6 +202,27 @@ describe("WorkspaceShell.exec — RPC forwarding", () => {
     const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.exec("noop", { cwd: "/workspace/sub" });
     expect(f.calls.exec[0].cwd).toBe("/workspace/sub");
+  });
+
+  it("forwards timeoutMs", async () => {
+    const f = fakeRpc();
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
+    await shell.exec("noop", { timeoutMs: 1000 });
+    expect(f.calls.exec[0].timeoutMs).toBe(1000);
+  });
+
+  it("forwards timeoutMs: 0 to disable the timeout", async () => {
+    const f = fakeRpc();
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
+    await shell.exec("noop", { timeoutMs: 0 });
+    expect(f.calls.exec[0].timeoutMs).toBe(0);
+  });
+
+  it("leaves timeoutMs undefined when the caller omits it", async () => {
+    const f = fakeRpc();
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
+    await shell.exec("noop");
+    expect(f.calls.exec[0].timeoutMs).toBeUndefined();
   });
 
   it("uses the id the runner returned, not the caller-supplied one", async () => {
