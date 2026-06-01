@@ -1,0 +1,26 @@
+{
+  "name": "@cloudflare/example-wsd-container",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Example Worker + Durable Object that runs wsd inside a Cloudflare Container.",
+  "scripts": {
+    "build:wsd": "npm run build:bin --workspace @cloudflare/workspace-wsd",
+    "predev": "npm run build:wsd && node ./scripts/stage-wsd.mjs",
+    "predeploy": "npm run build:wsd && node ./scripts/stage-wsd.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.5",
+    "@cloudflare/workspace": "*",
+    "@cloudflare/workspace-rpc": "*",
+    "capnweb": "^0.8.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260601.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.95.0"
+  }
+}
