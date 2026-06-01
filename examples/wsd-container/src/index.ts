@@ -89,17 +89,6 @@ export class WsdContainer extends DurableObject<Env> {
     return this.#workspace.stub();
   }
 
-  // Forward raw HTTP into wsd. Used by the Worker's legacy
-  // passthrough path (`/c/<name>/<wsd-path>`) for debugging —
-  // e.g. `curl /c/demo/health` hits wsd's /health.
-  //
-  // Drives Workspace.ready() first so the backend has started
-  // the container and confirmed :8080 is open.
-  async do_proxy(req: Request): Promise<Response> {
-    await this.#workspace.ready();
-    return this.ctx.container!.getTcpPort(8080).fetch(req);
-  }
-
   // ---- WebSocket: wsd's outbound /ws upgrade ---------------------
 
   override async fetch(request: Request): Promise<Response> {
@@ -128,16 +117,6 @@ export default {
     const execMatch = url.pathname.match(/^\/c\/([^/]+)\/exec\/?$/);
     if (execMatch) return handleExec(request, env, execMatch[1]);
 
-    // Legacy passthrough: /c/<name>/<rest> proxies into wsd's HTTP.
-    const passMatch = url.pathname.match(/^\/c\/([^/]+)(\/.*)?$/);
-    if (passMatch) {
-      const [, name, rest] = passMatch;
-      const stub = env.WSD.get(env.WSD.idFromName(name));
-      const forwarded = new URL(request.url);
-      forwarded.pathname = rest ?? "/";
-      return stub.do_proxy(new Request(forwarded, request));
-    }
-
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
         [
@@ -146,7 +125,7 @@ export default {
           "  PUT  /c/<name>/file/<path>     write file",
           "  GET  /c/<name>/file/<path>     read file",
           "  POST /c/<name>/exec            run a command (SSE result frame)",
-          "  GET  /c/<name>/<wsd-path>      proxy raw HTTP to wsd",
+
           "",
         ].join("\n"),
         { headers: { "content-type": "text/plain" } },

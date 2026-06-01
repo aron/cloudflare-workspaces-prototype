@@ -65,7 +65,7 @@ PUT  /c/<name>/file/<path...>   raw body → wsd writeFile
 GET  /c/<name>/file/<path...>   octet-stream of file bytes
 POST /c/<name>/exec             { command | argv, cwd?, encoding? }
                                 → SSE result frame
-GET  /c/<name>/<wsd-path>       raw HTTP passthrough into wsd
+
 ```
 
 `<name>` selects a DO instance; each gets its own container.
