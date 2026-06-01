@@ -11,7 +11,7 @@
 # Containers expose /dev/fuse to the workload; locally,
 # `wrangler dev` does not, so this image is intended for deploys.
 
-FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.0 AS wsd
+FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.1 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 

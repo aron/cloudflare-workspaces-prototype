@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/workspace-wsd-linux-x64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Prebuilt wsd binary for linux-x64. Single-platform distribution; install on a linux-x64 host or COPY --from a docker build stage that installed it.",
   "license": "MIT",
   "os": [

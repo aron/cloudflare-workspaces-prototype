@@ -2,7 +2,10 @@
   "name": "@cloudflare/workspace",
   "private": true,
   "workspaces": [
-    "packages/*",
+    "packages/dofs",
+    "packages/rpc",
+    "packages/workspace",
+    "packages/wsd",
     "examples/*"
   ],
   "scripts": {

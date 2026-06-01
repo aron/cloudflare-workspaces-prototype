@@ -6,7 +6,7 @@
 # run as a service — its sole job is to ship the binary at a known
 # path so downstream Dockerfiles can `COPY --from`:
 #
-#   FROM cloudflare/workspace-wsd-linux-x64:0.1.0 AS wsd
+#   FROM cloudflare/workspace-wsd-linux-x64:0.1.1 AS wsd
 #   FROM debian:stable-slim
 #   COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 #

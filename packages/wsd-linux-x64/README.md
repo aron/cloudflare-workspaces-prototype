@@ -27,7 +27,7 @@ copies it into a minimal runtime image:
 ```dockerfile
 FROM node:22-slim AS wsd
 RUN npm install --no-save --omit=dev \
-    @cloudflare/workspace-wsd-linux-x64@0.1.0
+    @cloudflare/workspace-wsd-linux-x64@0.1.1
 
 FROM debian:stable-slim
 RUN apt-get update \
