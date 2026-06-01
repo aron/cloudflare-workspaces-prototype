@@ -22,8 +22,7 @@ import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
 export interface WorkspaceBackend {
   // Stable identifier for diagnostics. Conventions:
   //   "test"
-  //   "cloudflare-sandbox:binding"
-  //   "cloudflare-sandbox:remote"
+  //   "cloudflare-container"
   readonly id: string;
 
   // Materialise a wsd connection. Throws if the backend isn't

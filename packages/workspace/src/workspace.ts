@@ -5,9 +5,8 @@
 // to wsd. Filesystem operations on Workspace.fs mutate the local
 // store directly via the WorkspaceFilesystem class from
 // @cloudflare/dofs; sync between the host store and wsd
-// is driven explicitly via Workspace.push() / Workspace.pull()
-// (TODO: not yet wired — those land in a follow-up commit). The
-// shell-side pre-exec push / post-exec pull bracket already lives
+// is driven explicitly via Workspace.push() / Workspace.pull().
+// The shell-side pre-exec push / post-exec pull bracket lives
 // on Workspace.shell.exec.
 
 import {
