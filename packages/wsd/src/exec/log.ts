@@ -76,31 +76,15 @@ export class EventLog {
     this.db = db;
     this.id = id;
     this.opts = opts;
-    // Recover nextSeq if the row already had events (post-restart
-    // reattach). For fresh logs the COALESCE returns 0.
+    // Recover nextSeq when openLog() reattaches to a log that the
+    // Runner has dropped from memory but whose rows still live in
+    // the DB. For fresh logs the COALESCE returns 0.
     const lastSeq =
       this.db.scalar<number>(
         `SELECT COALESCE(MAX(seq), 0) AS s FROM wsd_exec_log WHERE exec_id = ?`,
         id,
       ) ?? 0;
     this.nextSeq = lastSeq + 1;
-  }
-
-  get lastSeq(): number {
-    return this.nextSeq - 1;
-  }
-
-  get isExited(): boolean {
-    const meta = this.meta();
-    return meta?.exited_at !== null && meta?.exited_at !== undefined;
-  }
-
-  get isEvicted(): boolean {
-    return (this.meta()?.evicted ?? 0) === 1;
-  }
-
-  get totalBytes(): number {
-    return this.meta()?.bytes ?? 0;
   }
 
   append(name: "stdout" | "stderr", value: Uint8Array): number {
