@@ -296,8 +296,9 @@ describe("WireError propagation", () => {
     // fetchObjects() throws when asked for a hash the server
     // doesn't hold. The bytes never made it into vfs_blob_bytes,
     // so the server-side helper throws WorkspaceFsError with
-    // code='EIO' or similar. We surface the original message
-    // verbatim and assert the props bag survives the round trip.
+    // code='EUNKNOWN_HASH'. We surface the original message and
+    // assert err.code survives the round trip so application code
+    // can branch on it without parsing the message.
     harness = await startHarness();
     const client = createSyncClient({ url: harness.url });
     try {
@@ -315,6 +316,7 @@ describe("WireError propagation", () => {
       }
       expect(caught).toBeInstanceOf(Error);
       expect((caught as Error).message).toMatch(/missing/i);
+      expect((caught as { code?: string }).code).toBe("EUNKNOWN_HASH");
     } finally {
       await client.close();
     }

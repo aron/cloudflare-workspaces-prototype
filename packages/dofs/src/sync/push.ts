@@ -1,3 +1,4 @@
+import { createWorkspaceError } from "../errors.js";
 import type { Database } from "../storage.js";
 
 // Stream chunk bytes by hash. The receiver collects these into the
@@ -19,7 +20,7 @@ export async function* pushObjects(
       hash,
     );
     if (row === undefined) {
-      throw new Error("pushObjects: missing blob for requested hash");
+      throw createWorkspaceError("EUNKNOWN_HASH", "pushObjects: missing blob for requested hash");
     }
     yield { hash, bytes: row.bytes };
   }

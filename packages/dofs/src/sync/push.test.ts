@@ -122,6 +122,23 @@ describe("push", () => {
       expect(objects.size).toBe(1);
     });
   });
+
+  it("pushObjects throws EUNKNOWN_HASH when a hash is not in vfs_blob_bytes", async () => {
+    await withDB(async (a) => {
+      const unknown = new Uint8Array(32);
+      unknown.fill(0xff);
+      let caught: unknown;
+      try {
+        for await (const _ of pushObjects(a, [unknown])) {
+          // drain
+        }
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as { code?: string }).code).toBe("EUNKNOWN_HASH");
+    });
+  });
 });
 
 function collectHashes(entries: ChangeEntry[]): Uint8Array[] {

@@ -11,6 +11,7 @@ export type WorkspaceErrorCode =
   | "ENOSYS"
   | "EBADF"
   | "ELOOP"
+  | "EUNKNOWN_HASH"
   | "EIO";
 
 export interface WorkspaceFsError extends Error {
