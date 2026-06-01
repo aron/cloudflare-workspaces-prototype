@@ -2,7 +2,7 @@ import { mkdir } from "../fs/mkdir.js";
 import { resolveInode } from "../fs/resolve.js";
 import { rm } from "../fs/rm.js";
 import { symlink } from "../fs/symlink.js";
-import { writeFile } from "../fs/writeFile.js";
+import { writeFile, writeFileSync } from "../fs/writeFile.js";
 import type { Database } from "../storage.js";
 import type { ChangeEntry } from "./changes.js";
 import { computeManifestHash } from "./manifests.js";
@@ -167,6 +167,103 @@ export async function applyChanges(
   // drains both the unpushed locals and the apply's own bumps;
   // the receiver's alreadyApplied() check suppresses the latter.
   // One redundant round-trip per apply, bounded.
+  if (options.source === "upstream") {
+    const revAfter = currentRev(db);
+    const existing = readWatermark(db, "pushRev");
+    if (existing >= revBeforeApply && revAfter > existing) {
+      writeWatermark(db, "pushRev", revAfter);
+    }
+  }
+}
+
+// Synchronous variant of applyChanges. Same semantics; takes an
+// in-memory entry array instead of an iterable. Used on the push
+// receiver so the whole batch can run inside a single transactionSync
+// and a mid-stream failure rolls back every prior entry.
+//
+// Stays separate from applyChanges so the streaming pull path
+// (which can't hold a sync transaction across network I/O) keeps
+// its async semantics.
+export function applyChangesSync(
+  db: Database,
+  entries: readonly ChangeEntry[],
+  objects: Map<string, Uint8Array>,
+  options: ApplyOptions = {},
+): void {
+  const revBeforeApply = currentRev(db);
+  const maxBytes = options.maxBytesPerBatch ?? DEFAULT_MAX_BYTES;
+  const maxPaths = options.maxPathsPerBatch ?? DEFAULT_MAX_PATHS;
+
+  let bytesInBatch = 0;
+  let pathsInBatch = 0;
+  const flush = () => {
+    bytesInBatch = 0;
+    pathsInBatch = 0;
+  };
+
+  for (const entry of entries) {
+    if (options.source === "upstream" && entry.kind !== "delete") {
+      if (alreadyApplied(db, entry)) continue;
+    }
+    if (entry.kind === "delete") {
+      try {
+        rm(db, entry.path, { recursive: true, force: true });
+      } catch {
+        // Already gone is fine — idempotent apply.
+      }
+      pathsInBatch++;
+      if (pathsInBatch >= maxPaths) flush();
+      continue;
+    }
+    if (entry.kind === "dir") {
+      mkdir(db, entry.path, { mode: entry.mode, recursive: true }, () => entry.mtime);
+      pathsInBatch++;
+      if (pathsInBatch >= maxPaths) flush();
+      continue;
+    }
+    if (entry.kind === "symlink") {
+      symlink(db, entry.target, entry.path, () => entry.mtime);
+      pathsInBatch++;
+      if (pathsInBatch >= maxPaths) flush();
+      continue;
+    }
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (const c of entry.chunks) {
+      const k = hex(c.hash);
+      let bytes = objects.get(k);
+      if (bytes === undefined) {
+        const row = db.one<{ bytes: Uint8Array }>(
+          "SELECT bytes FROM vfs_blob_bytes WHERE hash = ?",
+          c.hash,
+        );
+        bytes = row?.bytes;
+      }
+      if (bytes === undefined) {
+        throw new Error(`applyChanges: missing object ${k} for ${entry.path}`);
+      }
+      parts.push(bytes);
+      total += bytes.byteLength;
+    }
+    const buf = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      buf.set(p, off);
+      off += p.byteLength;
+    }
+    writeFileSync(db, entry.path, buf, { mode: entry.mode }, () => entry.mtime);
+    bytesInBatch += total;
+    pathsInBatch++;
+    if (bytesInBatch >= maxBytes || pathsInBatch >= maxPaths) flush();
+  }
+
+  if (options.advanceFetchRev !== undefined) {
+    const current = readWatermark(db, "fetchRev");
+    if (options.advanceFetchRev > current) {
+      writeWatermark(db, "fetchRev", options.advanceFetchRev);
+    }
+  }
+
   if (options.source === "upstream") {
     const revAfter = currentRev(db);
     const existing = readWatermark(db, "pushRev");

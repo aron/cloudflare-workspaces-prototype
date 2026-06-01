@@ -3,28 +3,58 @@ import type { DurableObjectStorageLike, SQLStorageLike } from "./types.js";
 export class Database {
   readonly sql: SQLStorageLike;
   readonly transactionSync: <T>(closure: () => T) => T;
+  // Depth counter so reentrant transactionSync() calls work. The
+  // outer call uses the storage adapter's transactionSync (or
+  // BEGIN/COMMIT under the hood); nested calls use SAVEPOINTs
+  // through sql.exec directly. SQLite forbids a real BEGIN inside
+  // an active transaction.
+  #txDepth = 0;
 
   constructor(storage: DurableObjectStorageLike) {
     this.sql = storage.sql;
     this.transactionSync = <T>(closure: () => T): T => {
-      if (storage.transactionSync !== undefined) {
-        return storage.transactionSync(closure);
-      }
-
-      if (storage.transaction !== undefined) {
-        const result = storage.transaction(closure);
-        if (
-          result !== undefined &&
-          result !== null &&
-          typeof result === "object" &&
-          "then" in result
-        ) {
-          throw new Error("Durable Object storage adapter requires synchronous transactions");
+      if (this.#txDepth > 0) {
+        // Reentrant call: use a savepoint. SQLite's RELEASE on a
+        // savepoint inside an outer transaction commits the inner
+        // work without ending the outer one.
+        const sp = `_t${this.#txDepth}`;
+        this.sql.exec(`SAVEPOINT ${sp}`);
+        this.#txDepth++;
+        try {
+          const result = closure();
+          this.sql.exec(`RELEASE ${sp}`);
+          return result;
+        } catch (error) {
+          this.sql.exec(`ROLLBACK TO ${sp}`);
+          this.sql.exec(`RELEASE ${sp}`);
+          throw error;
+        } finally {
+          this.#txDepth--;
         }
-        return result;
       }
-
-      return closure();
+      // Outer call: hand off to the storage adapter so the DO
+      // runtime's transaction semantics apply.
+      this.#txDepth++;
+      try {
+        if (storage.transactionSync !== undefined) {
+          return storage.transactionSync(closure);
+        }
+        if (storage.transaction !== undefined) {
+          const result = storage.transaction(closure);
+          if (
+            result !== undefined &&
+            result !== null &&
+            typeof result === "object" &&
+            "then" in result
+          ) {
+            throw new Error("Durable Object storage adapter requires synchronous transactions");
+          }
+          return result;
+        }
+        return closure();
+      } finally {
+        this.#txDepth--;
+      }
     };
   }
 

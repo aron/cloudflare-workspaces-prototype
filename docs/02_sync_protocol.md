@@ -181,16 +181,16 @@ edited file) shows up exactly once on the wire. See
   rebuilds against the still-running `wsd` (or restarts it if needed).
   `pushRev` and `fetchRev` mean the catch-up is incremental, modulo
   whatever the container's deployment chose for its DB lifetime.
-- **Container crash mid-apply.** From the DO's perspective `push` is
-  ideally atomic on the receiver; the shipped `applyChanges` runs
-  per-mutation transactions today (not a single wrapping transaction),
-  so a crash mid-apply can leave the receiver partially applied.
-  Today's process-lifetime container DB sidesteps the issue trivially
-  — the process dies and the next push re-baselines from
-  `appliedPushRev = 0`. *Roadmap (`PLAN.md` → Important):* once an
-  on-disk container mirror lands, wrap apply in a single transaction
-  (or staging-then-rename equivalent) so the "atomic from the DO's
-  perspective" guarantee actually holds on the wire.
+- **Container crash mid-apply.** `push` is atomic from the DO's
+  perspective on the receiver: the server wraps the whole batch in a
+  single `db.transactionSync` via the synchronous `applyChangesSync`
+  helper. `Database.transactionSync` is reentrant via SQLite SAVEPOINTs
+  so the inner fs writes still get their own per-mutation atomicity
+  inside the outer transaction. A mid-stream failure (e.g. a missing
+  chunk in the assembly step) rolls back every entry the batch had
+  applied so far; the receiver never sees a partial push. The pull
+  path keeps the per-mutation model because the streaming batches
+  can't hold a synchronous transaction across network I/O.
 - **DO restart mid-pull.** `fetchRev` is single-write at end of stream
   today, so a DO restart mid-pull resumes from the previous `fetchRev`
   and re-fetches the entire in-flight batch. End state is correct

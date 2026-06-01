@@ -5,7 +5,7 @@
 // the DO. Same code on both ends; what differs is who calls whom.
 
 import {
-  applyChanges,
+  applyChangesSync,
   type ChangeEntry,
   coalesceChanges,
   currentRev,
@@ -83,9 +83,16 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     // leave pushRev untouched so the outbound sync loop
     // ships them upstream on the next tick.
     const isPeer = input.senderRev > 0;
-    await applyChanges(this.db, entries, new Map(), {
-      source: isPeer ? "upstream" : "local",
-      ...(isPeer ? { advanceFetchRev: input.senderRev } : {}),
+    // Wrap the whole batch in a single transactionSync so a
+    // mid-stream failure (e.g. a missing chunk in applyChangesSync's
+    // assembly step) rolls back every prior entry. Without this
+    // wrapper the receiver could be left with a subset of the
+    // pushed entries committed.
+    this.db.transactionSync(() => {
+      applyChangesSync(this.db, entries, new Map(), {
+        source: isPeer ? "upstream" : "local",
+        ...(isPeer ? { advanceFetchRev: input.senderRev } : {}),
+      });
     });
     return {
       rev: currentRev(this.db),

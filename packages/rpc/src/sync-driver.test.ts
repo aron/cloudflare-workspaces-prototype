@@ -1,9 +1,11 @@
 import {
+  type ChangeEntry,
   currentRev,
   Database,
   initializeSchema,
   readWatermark,
   SQLiteWorkspaceProvider,
+  stageBlob,
 } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it } from "vitest";
@@ -266,3 +268,65 @@ describe("sync driver — streaming pullOnce", () => {
     }
   });
 });
+
+describe("sync driver — push atomicity", () => {
+  it("rolls back the entire batch when applyChanges fails mid-stream", async () => {
+    // Construct a push with two file entries: one whose chunk bytes
+    // are staged, and one whose chunk hash is bogus so applyChanges
+    // throws while assembling the second file. Without atomicity the
+    // first file would land in vfs_nodes; with the push wrapped in a
+    // transactionSync, both should roll back.
+    const b = makePeer();
+    try {
+      const goodBytes = new TextEncoder().encode("good");
+      const goodHash = await sha256(goodBytes);
+      stageBlob(b.db, goodHash, goodBytes, 1);
+      const bogusHash = new Uint8Array(32);
+      bogusHash.fill(0xee);
+      const entries: ChangeEntry[] = [
+        {
+          kind: "file",
+          path: "/first.txt",
+          mode: 0o644,
+          mtime: 1,
+          size: goodBytes.byteLength,
+          chunks: [{ hash: goodHash, size: goodBytes.byteLength }],
+        },
+        {
+          kind: "file",
+          path: "/second.txt",
+          mode: 0o644,
+          mtime: 1,
+          size: 4,
+          chunks: [{ hash: bogusHash, size: 4 }],
+        },
+      ];
+      const changes = new ReadableStream<ChangeEntry>({
+        start(controller) {
+          for (const e of entries) controller.enqueue(e);
+          controller.close();
+        },
+      });
+      const beforeRev = currentRev(b.db);
+      // External orchestrator: senderRev = 0.
+      await expect(b.rpc.push({ senderRev: 0, changes })).rejects.toThrow(/missing object/i);
+      // Neither file should be present — the failure rolled back
+      // everything, not just the bad entry.
+      expect(fileEntries(b.db)).not.toContain("first.txt");
+      expect(fileEntries(b.db)).not.toContain("second.txt");
+      // currentRev must not have advanced. Without atomicity it
+      // would have, because /first.txt's writeFile bumped vfs_meta.rev
+      // before /second.txt's failure.
+      expect(currentRev(b.db)).toBe(beforeRev);
+    } finally {
+      b.close();
+    }
+  });
+});
+
+async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+  const { createHash } = await import("node:crypto");
+  const hash = createHash("sha256");
+  hash.update(bytes);
+  return new Uint8Array(hash.digest());
+}
