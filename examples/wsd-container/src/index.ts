@@ -123,7 +123,7 @@ export default {
           "",
           "  PUT  /c/<name>/file/<path>     write file",
           "  GET  /c/<name>/file/<path>     read file",
-          "  POST /c/<name>/exec            run a command (SSE result frame)",
+          "  POST /c/<name>/exec            run a command (JSON result)",
 
           "",
         ].join("\n"),
@@ -145,7 +145,7 @@ async function handleFile(
   const ws = await stub.getWorkspace();
 
   if (request.method === "PUT") {
-    const body = await request.arrayBuffer();
+    const body = new Uint8Array(await request.arrayBuffer());
     try {
       await ws.fs.writeFile(path, body);
       return new Response(null, { status: 204 });
@@ -156,7 +156,7 @@ async function handleFile(
 
   if (request.method === "GET") {
     try {
-      const stream = await ws.fs.readFile(path);
+      const stream = await ws.fs.readFile(path, {});
       return new Response(stream, {
         status: 200,
         headers: { "content-type": "application/octet-stream" },
@@ -194,13 +194,11 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   const stub = env.WSD.get(env.WSD.idFromName(name));
   const ws = await stub.getWorkspace();
   try {
-    const stream = await ws.shell.execStream(command, { cwd: body.cwd });
-    return new Response(stream, {
+    const handle = await ws.shell.exec(command, { cwd: body.cwd, encoding: "utf8" });
+    const result = await handle.result();
+    return new Response(JSON.stringify(result), {
       status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-      },
+      headers: { "content-type": "application/json" },
     });
   } catch (error) {
     return errorJSON(error, 500);

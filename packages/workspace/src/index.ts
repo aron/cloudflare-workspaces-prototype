@@ -25,9 +25,10 @@ export type {
 } from "./shell.js";
 export { WorkspaceShell } from "./shell.js";
 export {
+  WorkspaceExecHandleStub,
   type WorkspaceExecOptions,
   type WorkspaceExecResult,
-  WorkspaceFsStub,
+  WorkspaceFilesystemStub,
   WorkspaceShellStub,
   WorkspaceStub,
 } from "./stub.js";
