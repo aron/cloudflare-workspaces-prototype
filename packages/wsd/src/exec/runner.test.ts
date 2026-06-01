@@ -1,10 +1,16 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { test, before } = require("node:test");
 
-const { Database } = require("../../../../node_modules/@cloudflare/workspace-fs/dist/cjs/index.js");
-const {
-  SQLiteTestStorage,
-} = require("../../../../node_modules/@cloudflare/workspace-fs/dist/cjs/testing.js");
+// @cloudflare/workspace-fs is ESM-only; load it through a dynamic
+// import (this file runs as CommonJS because the wsd package is
+// declared "type": "commonjs").
+let Database: any;
+let SQLiteTestStorage: any;
+before(async () => {
+  ({ Database } = await import("@cloudflare/workspace-fs"));
+  ({ SQLiteTestStorage } = await import("@cloudflare/workspace-fs/testing"));
+});
+
 const { Runner } = require("../../dist/exec/index.js");
 
 type ExecEvent =
