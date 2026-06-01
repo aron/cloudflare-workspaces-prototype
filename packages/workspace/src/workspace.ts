@@ -116,12 +116,14 @@ export class Workspace {
   // can decide whether to tick again.
   async push(): Promise<number> {
     await this.ready();
-    return pushOnce(this.#db, this.#handle!.rpc.sync);
+    if (!this.#handle) throw new Error("Workspace not connected");
+    return pushOnce(this.#db, this.#handle.rpc.sync);
   }
 
   async pull(): Promise<number> {
     await this.ready();
-    return pullOnce(this.#db, this.#handle!.rpc.sync);
+    if (!this.#handle) throw new Error("Workspace not connected");
+    return pullOnce(this.#db, this.#handle.rpc.sync);
   }
 
   async close(): Promise<void> {
