@@ -12,8 +12,8 @@
   "containers": [
     {
       "class_name": "ContainerExample",
-      // Built from the local Dockerfile, which bakes in the wsd binary
-      // produced by `npm run build:bin --workspace @cloudflare/workspace-wsd`.
+      // Built from the local Dockerfile, which COPYs wsd from
+      // @cloudflare/workspace-wsd-linux-x64 (installed in a build stage).
       "image": "./Dockerfile",
       "max_instances": 5
     }

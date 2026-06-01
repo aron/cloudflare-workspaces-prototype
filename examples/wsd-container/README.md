@@ -76,12 +76,16 @@ POST /c/<name>/exec             { command | argv, cwd?, encoding? }
 Requires Docker.
 
 ```sh
-# Build the wsd SEA binary (one-time / after wsd changes).
-npm run build:bin --workspace @cloudflare/workspace-wsd
-
-# Boot the example. predev stages the binary into ./build/.
+# Boot the example. The container image's build stage installs the
+# wsd binary from @cloudflare/workspace-wsd-linux-x64 on npm; no
+# local SEA build needed.
 npm run dev --workspace @cloudflare/example-wsd-container
 ```
+
+If you're iterating on wsd itself, point the Dockerfile at a local
+build instead — swap the `FROM node:22-slim AS wsd ...` stage for
+a `COPY ../../artifacts/wsd/wsd-linux-x64 /usr/local/bin/wsd` and
+run `npm run build:bin --workspace @cloudflare/workspace-wsd` first.
 
 Smoke test:
 
@@ -109,7 +113,6 @@ examples/wsd-container/
   Dockerfile                debian + libfuse + wsd binary (ENTRYPOINT)
   wrangler.jsonc            Worker + DO + Container binding
   src/index.ts              Worker handler, DO (ContainerExample)
-  scripts/stage-wsd.mjs     copies wsd-linux-x64 into ./build/
 ```
 
 ## Known limitations / next steps
