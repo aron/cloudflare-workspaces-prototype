@@ -46,13 +46,18 @@ describeIfDocker("Workspace end-to-end against a real wsd container", () => {
     });
   });
 
-  it("stat returns a file entry; readFile on a missing path throws ENOENT", async () => {
+  it("stat returns the documented shape; missing paths throw ENOENT", async () => {
     await withWorkspace(url, async (ws) => {
       await ws.ready();
       await ws.fs.writeFile("/probe.txt", "data");
       const entry = await ws.fs.stat("/probe.txt");
-      expect(entry).toMatchObject({ kind: "file", path: "/probe.txt", size: 4 });
-      expect(await ws.fs.stat("/missing")).toBeNull();
+      expect(entry).toMatchObject({
+        name: "probe.txt",
+        size: 4,
+        isFile: true,
+        isDirectory: false,
+      });
+      await expect(ws.fs.stat("/missing")).rejects.toMatchObject({ code: "ENOENT" });
       await expect(ws.fs.readFile("/missing")).rejects.toMatchObject({ code: "ENOENT" });
     });
   });
