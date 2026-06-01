@@ -18,7 +18,7 @@
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
-import { CloudflareContainerBackend, Workspace } from "@cloudflare/workspace";
+import { CloudflareContainerBackend, Workspace, type WorkspaceStub } from "@cloudflare/workspace";
 
 export interface Env {
   WSD: DurableObjectNamespace<WsdContainer>;
@@ -78,36 +78,15 @@ export class WsdContainer extends DurableObject<Env> {
     this.#workspace = new Workspace({ backends: [this.#backend] });
   }
 
-  // ---- Worker-facing RPC methods --------------------------------
+  // ---- Worker-facing RPC surface --------------------------------
 
-  async do_writeFile(path: string, body: ArrayBuffer): Promise<void> {
+  // Returns an RpcTarget that the caller (Worker or another DO)
+  // uses to reach the Workspace. Methods on the returned stub
+  // round-trip back into this DO over Workers RPC; the actual
+  // SyncRPC + ShellRPC traffic stays on the wsd ↔ DO capnweb wire.
+  async getWorkspace(): Promise<WorkspaceStub> {
     await this.#workspace.ready();
-    await this.#workspace.fs.writeFile(path, new Uint8Array(body));
-  }
-
-  async do_readFile(path: string): Promise<ArrayBuffer> {
-    await this.#workspace.ready();
-    const bytes = await this.#workspace.fs.readFile(path);
-    // Copy into a fresh ArrayBuffer so the RPC layer can
-    // transfer it cleanly across the isolate boundary.
-    const out = new ArrayBuffer(bytes.byteLength);
-    new Uint8Array(out).set(bytes);
-    return out;
-  }
-
-  async do_execCollect(
-    command: string,
-    options: { cwd?: string; encoding?: "utf8" } = {},
-  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    await this.#workspace.ready();
-    const handle =
-      options.encoding === "utf8"
-        ? await this.#workspace.shell.exec(command, { encoding: "utf8", cwd: options.cwd })
-        : await this.#workspace.shell.exec(command, { cwd: options.cwd });
-    const result = await handle.result();
-    const stdout = typeof result.stdout === "string" ? result.stdout : decodeBytes(result.stdout);
-    const stderr = typeof result.stderr === "string" ? result.stderr : decodeBytes(result.stderr);
-    return { exitCode: result.exitCode, stdout, stderr };
+    return this.#workspace.stub();
   }
 
   // Forward raw HTTP into wsd. Used by the Worker's legacy
@@ -126,21 +105,6 @@ export class WsdContainer extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     return this.#backend.handleFetch(request);
   }
-}
-
-function decodeBytes(value: unknown): string {
-  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-  if (Array.isArray(value)) {
-    const total = value.reduce((acc, part) => acc + (part as Uint8Array).byteLength, 0);
-    const buf = new Uint8Array(total);
-    let off = 0;
-    for (const part of value as Uint8Array[]) {
-      buf.set(part, off);
-      off += part.byteLength;
-    }
-    return new TextDecoder().decode(buf);
-  }
-  return "";
 }
 
 // ---------------------------------------------------------------
@@ -200,11 +164,12 @@ async function handleFile(
   path: string,
 ): Promise<Response> {
   const stub = env.WSD.get(env.WSD.idFromName(name));
+  const ws = await stub.getWorkspace();
 
   if (request.method === "PUT") {
     const body = await request.arrayBuffer();
     try {
-      await stub.do_writeFile(path, body);
+      await ws.fs.writeFile(path, body);
       return new Response(null, { status: 204 });
     } catch (error) {
       return errorJson(error, 500);
@@ -213,8 +178,13 @@ async function handleFile(
 
   if (request.method === "GET") {
     try {
-      const body = await stub.do_readFile(path);
-      return new Response(body, {
+      const bytes = await ws.fs.readFile(path);
+      // Copy into a plain ArrayBuffer so the Response body init
+      // type accepts it (the RPC-returned Uint8Array carries a
+      // Disposable brand that confuses BodyInit's union).
+      const buf = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buf).set(bytes);
+      return new Response(buf, {
         status: 200,
         headers: { "content-type": "application/octet-stream" },
       });
@@ -249,10 +219,11 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   }
 
   const stub = env.WSD.get(env.WSD.idFromName(name));
+  const ws = await stub.getWorkspace();
   try {
-    const result = await stub.do_execCollect(command, {
+    const result = await ws.shell.exec(command, {
       cwd: body.cwd,
-      encoding: body.encoding,
+      encoding: "utf8",
     });
     const payload = `event: result\ndata: ${JSON.stringify(result)}\n\n`;
     return new Response(payload, {

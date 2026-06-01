@@ -39,9 +39,13 @@ client ─► Worker /c/<name>/{file,exec}
    `backend.handleFetch(req)`, which performs the WebSocket upgrade,
    resolves the in-flight `connect()`, and attaches a capnweb
    client session to the server-side socket.
-5. The DO exposes flat RPC methods (`do_writeFile`, `do_readFile`,
-   `do_execCollect`) that delegate to `this.#workspace.fs` /
-   `.shell`. The Worker's fetch handler parses paths and forwards.
+5. The DO exposes a single `getWorkspace()` RPC method that
+   returns a `WorkspaceStub` (an `RpcTarget` wrapping the inner
+   `Workspace`). The Worker's fetch handler calls
+   `await stub.getWorkspace()` once per request and then drives
+   `ws.fs.writeFile(...)` / `ws.fs.readFile(...)` /
+   `ws.shell.exec(...)` directly. Promise pipelining keeps the
+   nested-property pattern (`ws.fs.writeFile`) at one round trip.
 
 The DO extends the plain `DurableObject` class from
 `cloudflare:workers`. The container lifecycle plumbing all lives
