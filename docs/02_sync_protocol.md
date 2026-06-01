@@ -199,12 +199,17 @@ edited file) shows up exactly once on the wire. See
 - **DO restart.** Watermarks are persisted, so the new DO instance
   picks up where the old one left off. The container keeps `wsd`
   alive across the gap.
-- **Concurrent mutators.** *Planned invariant (`PLAN.md` → Important):*
-  the DO serializes mutating entry points (`exec`, `writeFile`, `mkdir`,
-  `rm`, `push`, `pull`) through a per-Workspace FIFO queue; pure reads
-  stay outside the queue. No FIFO is currently visible in
-  `packages/dofs/src/sync/*` or `packages/rpc/src/sync-driver.ts` —
-  this section describes the target, not what `main` enforces today.
+- **Concurrent mutators.** `Workspace.push()` and `Workspace.pull()`
+  go through a per-Workspace tail-promise FIFO. Two concurrent
+  callers queue — the second can't enter `pushOnce` / `pullOnce`
+  until the first has resolved or rejected. The shell exec bracket
+  drives `push()` / `pull()` through the same facade, so
+  `shell.exec()` calls participate in the FIFO automatically.
+  Rejections aren't contagious: a failed mutation surfaces its
+  error to its own caller without poisoning the queue for the next.
+  Pure reads on `Workspace.fs` bypass the FIFO entirely — they hit
+  the local SQLite store, which the DO runtime already serialises
+  internally through its input gates.
 
 ## Ignore lists
 

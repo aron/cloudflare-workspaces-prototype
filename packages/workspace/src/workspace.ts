@@ -45,6 +45,13 @@ export class Workspace {
   #handle: BackendHandle | undefined;
   #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
+  // FIFO that serializes mutating entry points (push, pull, and the
+  // shell exec bracket which goes through them). Reads bypass the
+  // queue entirely — they hit the local store directly through
+  // Workspace.fs. The queue is a single tail-promise: each new caller
+  // chains its work onto the tail and updates it. See docs/02 "Concurrent
+  // mutators".
+  #mutationTail: Promise<unknown> = Promise.resolve();
 
   constructor(options: WorkspaceOptions) {
     if (options.backends.length === 0) {
@@ -113,16 +120,35 @@ export class Workspace {
   //
   // Returns the number of entries transferred so a polling loop
   // can decide whether to tick again.
-  async push(): Promise<number> {
-    await this.ready();
-    if (!this.#handle) throw new Error("Workspace not connected");
-    return pushOnce(this.#db, this.#handle.rpc.sync);
+  push(): Promise<number> {
+    return this.#serialize(async () => {
+      await this.ready();
+      if (!this.#handle) throw new Error("Workspace not connected");
+      return pushOnce(this.#db, this.#handle.rpc.sync);
+    });
   }
 
-  async pull(): Promise<number> {
-    await this.ready();
-    if (!this.#handle) throw new Error("Workspace not connected");
-    return pullOnce(this.#db, this.#handle.rpc.sync);
+  pull(): Promise<number> {
+    return this.#serialize(async () => {
+      await this.ready();
+      if (!this.#handle) throw new Error("Workspace not connected");
+      return pullOnce(this.#db, this.#handle.rpc.sync);
+    });
+  }
+
+  // Tail-promise FIFO. Each call chains onto the existing tail so
+  // it can't start until every queued mutation ahead of it has
+  // resolved (or rejected). Rejections are not contagious: we swallow
+  // the rejection here so a failing mutation doesn't poison the rest
+  // of the queue — the caller still sees the original rejection via
+  // the returned promise.
+  #serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#mutationTail.then(fn, fn);
+    this.#mutationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   async close(): Promise<void> {

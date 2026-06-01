@@ -253,3 +253,103 @@ describe("Workspace.fs against the local store", () => {
     expect(bytes.byteLength).toBe(0);
   });
 });
+
+describe("Workspace mutation serialization", () => {
+  it("serializes concurrent push() / pull() through a per-Workspace FIFO", async () => {
+    // Build a fake SyncRPC that gates push and pull on releaser
+    // promises. Two concurrent push() calls on the same Workspace
+    // should queue: the second can't enter pushOnce until the first
+    // releases. Without the FIFO, both would be live at once.
+    const inFlight = { push: 0, pull: 0 };
+    const peakInFlight = { push: 0, pull: 0 };
+    let releasePush1: (() => void) | undefined;
+    let releasePush2: (() => void) | undefined;
+    let pushCallCount = 0;
+    const releases = [
+      new Promise<void>((r) => {
+        releasePush1 = r;
+      }),
+      new Promise<void>((r) => {
+        releasePush2 = r;
+      }),
+    ];
+    const rpc: import("@cloudflare/workspace-rpc").SyncRPC = {
+      ...fakeRpc(),
+      async push(input) {
+        inFlight.push++;
+        peakInFlight.push = Math.max(peakInFlight.push, inFlight.push);
+        const which = pushCallCount++;
+        await releases[which];
+        // Drain the changes stream so the wire shape is preserved.
+        const reader = input.changes.getReader();
+        try {
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        inFlight.push--;
+        return { rev: 0, appliedPushRev: input.senderRev };
+      },
+    };
+
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake", rpc)] });
+    await ws.ready();
+    await ws.fs.writeFile("/a.txt", "a");
+
+    // Fire two concurrent push() calls. Without the FIFO, both
+    // enter pushOnce simultaneously and peakInFlight.push hits 2.
+    const a = ws.push();
+    const b = ws.push();
+    // Let the event loop settle so any concurrent entries register.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(peakInFlight.push).toBe(1);
+    releasePush1?.();
+    await a;
+    releasePush2?.();
+    await b;
+    expect(peakInFlight.push).toBe(1);
+    void inFlight.pull;
+    void peakInFlight.pull;
+  });
+
+  it("reads bypass the FIFO", async () => {
+    // While a push() is held in flight, reads on the local store
+    // must still resolve. The FIFO only gates mutating entry points.
+    let releasePush: (() => void) | undefined;
+    const rpc: import("@cloudflare/workspace-rpc").SyncRPC = {
+      ...fakeRpc(),
+      async push(input) {
+        await new Promise<void>((r) => {
+          releasePush = r;
+        });
+        const reader = input.changes.getReader();
+        try {
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return { rev: 0, appliedPushRev: input.senderRev };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake", rpc)] });
+    await ws.ready();
+    await ws.fs.writeFile("/a.txt", "hello");
+    const push = ws.push();
+    // Wait a beat so push reaches the gated remote.push call.
+    await new Promise((r) => setTimeout(r, 20));
+    // Read while push is still in flight; must resolve fast.
+    const read = await Promise.race([
+      ws.fs.readFile("/a.txt", "utf8"),
+      new Promise<string>((_, reject) => setTimeout(() => reject(new Error("read blocked")), 100)),
+    ]);
+    expect(read).toBe("hello");
+    releasePush?.();
+    await push;
+  });
+});
