@@ -1,14 +1,19 @@
 // Host-side Workspace facade.
 //
-// Runs inside a Cloudflare Worker / Durable Object. Picks a
-// backend, holds its SyncRPC stub, and exposes a thin
-// fs-shaped API that the agent / DO author calls. The wire
-// underneath is the same SyncRPC the bidirectional sync loop
-// uses; the only difference is that reads on this side are
-// one-shot RPCs (readEntry + fetchObjects) instead of the
-// streaming sync loop's coalesceChanges + applyChanges.
+// Runs inside a Cloudflare Worker / Durable Object. Owns a local
+// workspace-fs Database (the host store) and a SyncRPC connection
+// to wsd. Filesystem operations on Workspace.fs mutate the local
+// store directly; sync between the host store and wsd is driven
+// explicitly via Workspace.push() / Workspace.pull() (TODO: not
+// yet wired — those land in a follow-up commit). The shell-side
+// pre-exec push / post-exec pull bracket already lives on
+// Workspace.shell.exec.
+//
+// This commit opens the local Database; subsequent commits
+// re-route Workspace.fs reads and writes through it.
 
-import type { ChangeEntry } from "@cloudflare/workspace-fs";
+import type { ChangeEntry, DurableObjectStorageLike } from "@cloudflare/workspace-fs";
+import { Database, initializeSchema } from "@cloudflare/workspace-fs";
 import type { SyncRPC } from "@cloudflare/workspace-rpc";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
@@ -16,12 +21,19 @@ import { WorkspaceShell } from "./shell.js";
 import { WorkspaceStub } from "./stub.js";
 
 export interface WorkspaceOptions {
+  // Local store backing this Workspace. In a Durable Object, pass
+  // `ctx.storage`; in tests, pass a SqliteTestStorage from
+  // @cloudflare/workspace-fs/testing. The constructor opens a
+  // Database against it and runs initializeSchema (idempotent).
+  storage: DurableObjectStorageLike;
+
   // Backends are tried in declared order. The first one whose
   // connect() resolves wins; the rest are not consulted.
   backends: WorkspaceBackend[];
 }
 
 export class Workspace {
+  readonly #db: Database;
   readonly #backends: WorkspaceBackend[];
   #handle: BackendHandle | undefined;
   #fs: WorkspaceFs | undefined;
@@ -32,7 +44,15 @@ export class Workspace {
     if (options.backends.length === 0) {
       throw new Error("Workspace requires at least one backend");
     }
+    this.#db = new Database(options.storage);
+    initializeSchema(this.#db, () => Date.now());
     this.#backends = options.backends.slice();
+  }
+
+  // Local store. Subsequent commits route Workspace.fs through
+  // this; for now it's exposed for testing and diagnostics.
+  get db(): Database {
+    return this.#db;
   }
 
   // Walk the backends in declared order. Caches the first
@@ -130,15 +150,19 @@ export class WorkspaceFs {
     return await this.#rpc.readEntry(path);
   }
 
-  // readFile reassembles a file from its chunk list.
-  // Two-trip protocol:
+  // readFile reassembles a file from its chunk list. Default
+  // return is a ReadableStream<Uint8Array> — callers pipe it
+  // straight into a Response body, a Blob, etc. The "utf8"
+  // overload drains and decodes for convenience.
+  //
+  // Two-trip protocol on the wire:
   //   1. readEntry(path)  → ChangeEntry with chunk hashes.
   //   2. fetchObjects(...) → chunk bytes by hash.
   // The chunk-hash dedup means a file we've seen before in
   // some other context is free on the wire.
-  readFile(path: string): Promise<Uint8Array>;
+  readFile(path: string): Promise<ReadableStream<Uint8Array>>;
   readFile(path: string, encoding: "utf8"): Promise<string>;
-  async readFile(path: string, encoding?: "utf8"): Promise<Uint8Array | string> {
+  async readFile(path: string, encoding?: "utf8"): Promise<ReadableStream<Uint8Array> | string> {
     const entry = await this.#rpc.readEntry(path);
     if (entry === null || entry.kind === "delete") {
       throw fsError("ENOENT", `no such file: ${path}`, path);
@@ -146,9 +170,11 @@ export class WorkspaceFs {
     if (entry.kind !== "file") {
       throw fsError("EISDIR", `not a file: ${path}`, path);
     }
-    const bytes = await this.#assembleChunks(entry.chunks);
-    if (encoding === "utf8") return new TextDecoder().decode(bytes);
-    return bytes;
+    const stream = this.#streamChunks(entry.chunks);
+    if (encoding === "utf8") {
+      return await new Response(stream).text();
+    }
+    return stream;
   }
 
   // writeFile drives the same wire shape the sync loop uses:
@@ -203,33 +229,55 @@ export class WorkspaceFs {
     await this.#rpc.push({ senderRev: 0, changes });
   }
 
-  async #assembleChunks(chunks: { hash: Uint8Array; size: number }[]): Promise<Uint8Array> {
-    if (chunks.length === 0) return new Uint8Array(0);
-    const hashes = chunks.map((c) => c.hash);
-    const bytesByHash = new Map<string, Uint8Array>();
-    const stream = await this.#rpc.fetchObjects(hashes);
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        bytesByHash.set(hex(value.hash), value.bytes);
-      }
-    } finally {
-      reader.releaseLock();
+  // Stream the file's chunk bytes in the order declared by
+  // entry.chunks. fetchObjects can return out of order (the wire
+  // delivers as hashes resolve), so we buffer late arrivals
+  // until the next expected chunk is in hand. Worst-case
+  // buffering is the size of one chunk per pending entry; for
+  // 512 KiB chunks and typical files that's a handful of MiB,
+  // not the full file.
+  #streamChunks(chunks: { hash: Uint8Array; size: number }[]): ReadableStream<Uint8Array> {
+    if (chunks.length === 0) {
+      return new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      });
     }
-    const total = chunks.reduce((acc, c) => acc + c.size, 0);
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      const bytes = bytesByHash.get(hex(c.hash));
-      if (bytes === undefined) {
-        throw fsError("EUNKNOWN_HASH", `chunk bytes missing for hash ${hex(c.hash)}`);
-      }
-      out.set(bytes, offset);
-      offset += bytes.byteLength;
-    }
-    return out;
+    const rpc = this.#rpc;
+    const expected = chunks.map((c) => hex(c.hash));
+    return new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const pending = new Map<string, Uint8Array>();
+        let cursor = 0;
+        const hashes = chunks.map((c) => c.hash);
+        const source = await rpc.fetchObjects(hashes);
+        const reader = source.getReader();
+        try {
+          while (cursor < expected.length) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            pending.set(hex(value.hash), value.bytes);
+            while (cursor < expected.length && pending.has(expected[cursor])) {
+              const key = expected[cursor];
+              const bytes = pending.get(key)!;
+              pending.delete(key);
+              controller.enqueue(bytes);
+              cursor++;
+            }
+          }
+          if (cursor < expected.length) {
+            controller.error(
+              fsError("EUNKNOWN_HASH", `chunk bytes missing for hash ${expected[cursor]}`),
+            );
+            return;
+          }
+          controller.close();
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    });
   }
 }
 

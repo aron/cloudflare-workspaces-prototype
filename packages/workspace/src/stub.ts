@@ -70,7 +70,7 @@ export class WorkspaceFsStub extends RpcTarget {
     await this.#ws.fs.writeFile(path, bytes);
   }
 
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string): Promise<ReadableStream<Uint8Array>> {
     return await this.#ws.fs.readFile(path);
   }
 
@@ -114,6 +114,7 @@ export class WorkspaceShellStub extends RpcTarget {
       stderr: result.stderr as WorkspaceExecResult<"utf8" | undefined>["stderr"],
     };
   }
+
 }
 
 // Top-level wrapper. Two sub-RpcTargets let callers use promise

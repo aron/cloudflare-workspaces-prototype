@@ -1,7 +1,12 @@
+import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
 import { describe, expect, it, vi } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { Workspace } from "./workspace.js";
+
+function makeStorage(): SQLiteTestStorage {
+  return new SQLiteTestStorage();
+}
 
 // In-process fakes. We never spawn anything from the package
 // code; the backend's only contract is "produce a SyncRPC
@@ -132,6 +137,7 @@ describe("Workspace backend fallback", () => {
   it("uses the first backend that connects", async () => {
     const second = makeBackend("second");
     const ws = new Workspace({
+      storage: makeStorage(),
       backends: [failingBackend("first", "no thanks"), second],
     });
     await ws.ready();
@@ -140,6 +146,7 @@ describe("Workspace backend fallback", () => {
 
   it("throws when every backend fails, surfacing each cause", async () => {
     const ws = new Workspace({
+      storage: makeStorage(),
       backends: [failingBackend("a", "boom"), failingBackend("b", "kaboom")],
     });
     await expect(ws.ready()).rejects.toThrow(/boom[\s\S]*kaboom/);
@@ -148,7 +155,7 @@ describe("Workspace backend fallback", () => {
   it("ready() is idempotent — subsequent calls reuse the same connection", async () => {
     const backend = makeBackend("only");
     const spy = vi.spyOn(backend, "connect");
-    const ws = new Workspace({ backends: [backend] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
     await ws.ready();
     await ws.ready();
     expect(spy).toHaveBeenCalledTimes(1);
@@ -167,38 +174,40 @@ describe("Workspace backend fallback", () => {
         };
       },
     };
-    const ws = new Workspace({ backends: [backend] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
     await ws.ready();
     await ws.close();
     expect(closed).toBe(1);
   });
 
   it("fs accessor throws before ready()", () => {
-    const ws = new Workspace({ backends: [makeBackend("only")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("only")] });
     expect(() => ws.fs).toThrow(/not connected/);
   });
 
   it("requires at least one backend", () => {
-    expect(() => new Workspace({ backends: [] })).toThrow(/at least one backend/);
+    expect(() => new Workspace({ storage: makeStorage(), backends: [] })).toThrow(
+      /at least one backend/,
+    );
   });
 });
 
 describe("WorkspaceFs against a fake SyncRPC", () => {
   it("writeFile then readFile round-trips bytes", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     await ws.fs.writeFile("/a.txt", "hello workspace");
     expect(await ws.fs.readFile("/a.txt", "utf8")).toBe("hello workspace");
   });
 
   it("writeFile chunks bytes and pushObjects ships them", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     // Two-chunk payload: 600 KiB > 512 KiB chunk size.
     const bytes = new Uint8Array(600 * 1024);
     for (let i = 0; i < bytes.byteLength; i++) bytes[i] = i & 0xff;
     await ws.fs.writeFile("/big.bin", bytes);
-    const back = (await ws.fs.readFile("/big.bin")) as Uint8Array;
+    const back = new Uint8Array(await new Response(await ws.fs.readFile("/big.bin")).arrayBuffer());
     expect(back.byteLength).toBe(bytes.byteLength);
     // Spot-check a few bytes; full equality elsewhere would
     // dominate the test runtime.
@@ -208,13 +217,13 @@ describe("WorkspaceFs against a fake SyncRPC", () => {
   });
 
   it("readFile throws ENOENT for an absent path", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     await expect(ws.fs.readFile("/missing.txt")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("stat returns the ChangeEntry shape for a file", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     await ws.fs.writeFile("/a.txt", "hi");
     const entry = await ws.fs.stat("/a.txt");
@@ -222,16 +231,18 @@ describe("WorkspaceFs against a fake SyncRPC", () => {
   });
 
   it("stat returns null for an absent path", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     expect(await ws.fs.stat("/missing")).toBeNull();
   });
 
   it("writeFile with empty content produces a zero-chunk entry", async () => {
-    const ws = new Workspace({ backends: [makeBackend("fake")] });
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     await ws.fs.writeFile("/empty.txt", "");
-    const bytes = (await ws.fs.readFile("/empty.txt")) as Uint8Array;
+    const bytes = new Uint8Array(
+      await new Response(await ws.fs.readFile("/empty.txt")).arrayBuffer(),
+    );
     expect(bytes.byteLength).toBe(0);
   });
 });
