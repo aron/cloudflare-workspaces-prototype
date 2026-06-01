@@ -184,7 +184,7 @@ describe("WireError propagation", () => {
     harness = undefined;
   });
 
-  it("preserves err.code across the wire for an unknown hash", async () => {
+  it("propagates the error message across the wire for an unknown hash", async () => {
     // fetchObjects() throws when asked for a hash the server
     // doesn't hold. The bytes never made it into vfs_blob_bytes,
     // so the server-side helper throws WorkspaceFsError with
