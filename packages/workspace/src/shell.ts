@@ -225,7 +225,7 @@ function pipeEvents<E extends ExecEncoding>(
           controller.enqueue(event as WorkspaceExecEvent<E>);
         }
       },
-      flush(controller) {
+      flush(_controller) {
         // Flush any trailing bytes the streaming decoder
         // held back. These are dropped on the floor today
         // — they'd land in an event with no seq attached.
@@ -235,7 +235,6 @@ function pipeEvents<E extends ExecEncoding>(
         // truncation.
         stdoutDec.decode();
         stderrDec.decode();
-        void controller;
       },
     }),
   );
