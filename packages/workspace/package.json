@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('node:fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type:'commonjs'}))\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.config.proxy.ts",
     "test:harness": "./test-harness/run-harness.sh",
     "bench:harness": "./test-harness/run-harness.sh bench"
   },
