@@ -10,7 +10,7 @@ import {
   createWorkspaceServer,
   serveHttpBatch,
 } from "@cloudflare/workspace-rpc/server";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
 import {
   createNodeVirtualFileSystem,
@@ -106,6 +106,23 @@ function createHTTPServer(
       return;
     }
 
+    // /connect — POST { url } where url is the http(s) base of an
+    // egress endpoint the host wants us to dial back into. We open a
+    // capnweb WebSocket session against `${url}/ws` and serve our RPC
+    // over it, exactly like /ws but with the carrier inverted (we
+    // dial out instead of accepting an inbound upgrade).
+    if (path === "/connect") {
+      if (request.method !== "POST") {
+        send(response, 405, "method not allowed\n", {
+          allow: "POST",
+          "content-type": "text/plain; charset=utf-8",
+        });
+        return;
+      }
+      void handleConnect(request, response, rpc);
+      return;
+    }
+
     if (request.method !== "GET" && request.method !== "HEAD") {
       send(response, 405, "method not allowed\n", {
         allow: "GET, HEAD",
@@ -180,6 +197,108 @@ async function closeServer(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+interface ConnectBody {
+  // Base URL of the egress endpoint. ws[s]:// or http[s]://; we
+  // normalise http(s) to ws(s) and append /ws.
+  url?: unknown;
+  // How long to poll the upstream /health before giving up.
+  // Defaults to 30s; the egress proxy is up at boot but the worker
+  // that hosts it may take a tick.
+  healthTimeoutMs?: unknown;
+}
+
+async function handleConnect(
+  request: IncomingMessage,
+  response: ServerResponse,
+  rpc: ReturnType<typeof createWorkspaceServer>,
+): Promise<void> {
+  let body: ConnectBody;
+  try {
+    body = await readJson<ConnectBody>(request);
+  } catch (error) {
+    send(response, 400, `invalid JSON body: ${(error as Error).message}\n`, {
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+
+  if (typeof body.url !== "string" || body.url.length === 0) {
+    send(response, 400, "missing 'url' in body\n", {
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+  const baseUrl = body.url.replace(/\/+$/, "");
+  const healthTimeoutMs =
+    typeof body.healthTimeoutMs === "number" && body.healthTimeoutMs > 0
+      ? body.healthTimeoutMs
+      : 30_000;
+
+  try {
+    await waitForHealth(baseUrl, healthTimeoutMs);
+  } catch (error) {
+    send(response, 502, `upstream /health unreachable: ${(error as Error).message}\n`, {
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+
+  const wsUrl = toWebSocketUrl(baseUrl) + "/ws";
+  const ws = new WebSocket(wsUrl);
+  ws.once("open", () => {
+    console.log(`/connect: attached RPC session to ${wsUrl}`);
+    acceptWebSocketSession(ws, rpc);
+  });
+  ws.once("error", (err) => {
+    console.error(`/connect: WebSocket error against ${wsUrl}:`, err.message);
+  });
+  send(response, 200, `${JSON.stringify({ ok: true, ws: wsUrl })}\n`, {
+    "content-type": "application/json; charset=utf-8",
+  });
+}
+
+async function readJson<T>(request: IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(chunk as Buffer);
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (text.length === 0) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function toWebSocketUrl(input: string): string {
+  if (input.startsWith("ws://") || input.startsWith("wss://")) return input;
+  if (input.startsWith("http://")) return `ws://${input.slice("http://".length)}`;
+  if (input.startsWith("https://")) return `wss://${input.slice("https://".length)}`;
+  throw new Error(`unsupported URL scheme: ${input}`);
+}
+
+async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const healthUrl = `${toHttpUrl(baseUrl)}/health`;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(healthUrl);
+      if (res.ok) return;
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `${healthUrl} not healthy within ${timeoutMs}ms: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
+}
+
+function toHttpUrl(input: string): string {
+  if (input.startsWith("ws://")) return `http://${input.slice("ws://".length)}`;
+  if (input.startsWith("wss://")) return `https://${input.slice("wss://".length)}`;
+  return input;
 }
 
 async function main(): Promise<void> {
