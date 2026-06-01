@@ -1,6 +1,5 @@
 // WorkspaceFilesystem — class wrapper that binds a Database and a
-// clock to the free fs/* functions, exposing the surface documented
-// in docs/04_filesystem_interface.md.
+// clock to the free fs/* functions.
 //
 // Every method here is a thin forward to the matching free
 // function. The class exists so callers (host-side Workspace,
@@ -8,9 +7,10 @@
 // through their code rather than passing (db, now) pairs into
 // every call.
 //
-// Free functions stay exported for callers that prefer the
-// stateless form — e.g. one-off ops in tests, or apply paths in
-// sync/* that operate on a Database directly.
+// Free functions remain exported for internal callers — the
+// apply paths in sync/* operate on a Database directly, and the
+// in-package tests skip the class wrapper when they only need a
+// single op.
 
 import type { Database } from "../storage.js";
 
