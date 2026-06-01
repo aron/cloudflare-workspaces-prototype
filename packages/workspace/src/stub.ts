@@ -37,7 +37,7 @@
 import type { ChangeEntry } from "@cloudflare/workspace-fs";
 import { RpcTarget } from "capnweb";
 
-import type { ExecResult } from "./shell.js";
+import type { ExecResult, WorkspaceExecEvent } from "./shell.js";
 import type { Workspace } from "./workspace.js";
 
 export interface WorkspaceExecOptions {
@@ -115,6 +115,36 @@ export class WorkspaceShellStub extends RpcTarget {
     };
   }
 
+  // Streaming exec. Returns a byte stream of Server-Sent Events:
+  // one `event: stdout|stderr|exit` frame per WorkspaceExecEvent,
+  // payload is a JSON object with the event fields. The Worker
+  // pipes the stream straight into a Response body — keeps the
+  // exec back-pressure end-to-end (Workers RPC propagates
+  // ReadableStream<Uint8Array>).
+  //
+  // Encoding-forced to utf8 so the JSON payload is string-shaped;
+  // callers wanting raw bytes can use `exec()` for now.
+  async execStream(
+    command: string,
+    options: { cwd?: string } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const handle = await this.#ws.shell.exec(command, {
+      cwd: options.cwd,
+      encoding: "utf8",
+    });
+    const encoder = new TextEncoder();
+    return handle.pipeThrough(
+      new TransformStream<WorkspaceExecEvent<"utf8">, Uint8Array>({
+        transform(event, controller) {
+          const data = JSON.stringify({
+            seq: event.seq,
+            value: event.value,
+          });
+          controller.enqueue(encoder.encode(`event: ${event.name}\ndata: ${data}\n\n`));
+        },
+      }),
+    );
+  }
 }
 
 // Top-level wrapper. Two sub-RpcTargets let callers use promise
