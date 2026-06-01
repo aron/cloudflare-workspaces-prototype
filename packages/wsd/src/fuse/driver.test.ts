@@ -230,16 +230,11 @@ test("write past the per-file cap returns EFBIG instead of growing unbounded", a
 test("FUSE write is visible through the backing VFS after release", async () => {
   // The production wsd-container example showed FUSE-written files
   // returning HTTP 200 / 0 bytes when read back via the RPC
-  // surface. Root cause hypothesis: makeFUSEOps keeps a per-file
-  // in-memory buffer (`files` Map) that .write() updates but
-  // .release()/.flush()/.fsync() never spill into the backing VFS.
-  // RPC readers go through the VFS, so they see the empty inode
-  // create()'d up front and miss every subsequent write.
-  //
-  // This test pins the contract: after a create + write + release
-  // sequence, the same path read through the VFS API returns the
-  // bytes that were written. Failing today; will turn green once
-  // the driver flushes its buffer on release (or write-through).
+  // surface. makeFUSEOps keeps a per-file in-memory buffer
+  // (`files` Map) that .write() updates; .release(), .flush(),
+  // and .fsync() spill that buffer into the backing VFS so
+  // anything reading through the VFS surface (capnweb pull,
+  // host-side @platformatic/vfs consumers) sees the bytes.
   const { vfs } = await createNodeVirtualFileSystem();
   const ops = makeFUSEOps(vfs);
 
@@ -269,4 +264,99 @@ test("FUSE write is visible through the backing VFS after release", async () => 
     "from-fuse\n",
     "FUSE writes must be flushed into the backing VFS for RPC reads to see them",
   );
+});
+
+test("FUSE truncate is visible through the backing VFS after fsync", async () => {
+  // truncate writes only to the in-memory buffer (entry.size,
+  // zero-fill via entry.buf). Without an explicit spill the VFS
+  // still reports the pre-truncate size, breaking sync-side stat.
+  // Pin the contract: after truncate + fsync, vfs.statSync reports
+  // the truncated size and vfs.readFileSync returns the truncated
+  // bytes.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  // Seed a file with content.
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/t.txt", 0o644, cb),
+  );
+  assert.equal(create.errno, 0);
+  const fh = create.result as number;
+  const payload = Buffer.from("original-content", "utf8");
+  await status((cb: (value: number) => void) =>
+    ops.write("/t.txt", fh, payload, payload.byteLength, 0, cb),
+  );
+  assert.equal(await status((cb) => ops.fsync("/t.txt", fh, 0, cb)), 0);
+  assert.equal(vfs.statSync("/t.txt").size, payload.byteLength);
+
+  // Shrink via truncate and re-sync.
+  assert.equal(await status((cb) => ops.truncate("/t.txt", 5, cb)), 0);
+  assert.equal(await status((cb) => ops.fsync("/t.txt", fh, 0, cb)), 0);
+
+  assert.equal(vfs.statSync("/t.txt").size, 5);
+  assert.equal(Buffer.from(vfs.readFileSync("/t.txt")).toString("utf8"), "origi");
+});
+
+test("FUSE rename carries the buffered bytes to the new path", async () => {
+  // rename() moves the entry in the `files` Map alongside the VFS
+  // rename. If only the VFS rename ran, a buffered-but-unflushed
+  // write would land on the old path's empty inode (now ENOENT)
+  // and the new path would read empty.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/old.txt", 0o644, cb),
+  );
+  assert.equal(create.errno, 0);
+  const fh = create.result as number;
+  const payload = Buffer.from("renamed-content", "utf8");
+  await status((cb: (value: number) => void) =>
+    ops.write("/old.txt", fh, payload, payload.byteLength, 0, cb),
+  );
+
+  // Rename before the buffer ever spills. The buffer entry moves
+  // with the file; fsync on the new path spills correctly.
+  assert.equal(await status((cb) => ops.rename("/old.txt", "/new.txt", cb)), 0);
+  assert.equal(await status((cb) => ops.fsync("/new.txt", fh, 0, cb)), 0);
+
+  assert.equal(Buffer.from(vfs.readFileSync("/new.txt")).toString("utf8"), "renamed-content");
+  // Old path is gone from both layers.
+  assert.throws(() => vfs.statSync("/old.txt"));
+});
+
+test("FUSE getattr size matches what readFileSync would return", async () => {
+  // getattr returns entry.size when the buffer is populated, so
+  // stat-after-write sees the new size even before flush. The VFS
+  // sees the pre-write inode size (0). After flush they have to
+  // agree, otherwise the buffer is silently masking a stale VFS
+  // state that an RPC reader would hit.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/g.txt", 0o644, cb),
+  );
+  assert.equal(create.errno, 0);
+  const fh = create.result as number;
+  const payload = Buffer.from("twelve-bytes", "utf8");
+  await status((cb: (value: number) => void) =>
+    ops.write("/g.txt", fh, payload, payload.byteLength, 0, cb),
+  );
+  // Buffer-only state: FUSE getattr leads, VFS lags. Documents the
+  // intentional window between write() and a flushing op.
+  const beforeFlush = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/g.txt", cb),
+  );
+  assert.equal((beforeFlush.result as { size: number }).size, 12);
+  assert.equal(vfs.statSync("/g.txt").size, 0);
+
+  // After flush both must agree — anything calling stat through
+  // the VFS (RPC, host-side platformatic/vfs) needs the truth.
+  assert.equal(await status((cb) => ops.fsync("/g.txt", fh, 0, cb)), 0);
+  const afterFlush = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/g.txt", cb),
+  );
+  assert.equal((afterFlush.result as { size: number }).size, 12);
+  assert.equal(vfs.statSync("/g.txt").size, 12);
 });

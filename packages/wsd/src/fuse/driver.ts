@@ -143,6 +143,31 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     return true;
   };
 
+  // Spill an in-memory file buffer into the backing VFS. The
+  // driver keeps writes in `files` for performance; the VFS only
+  // sees the empty inode create() registered up front. Anything
+  // that reads through the VFS surface (capnweb RPC's pullOnce,
+  // node:fs callers in tests, host-side @platformatic/vfs
+  // consumers) sees an empty file until this runs.
+  //
+  // Called from release/flush/fsync — the FUSE ops a well-behaved
+  // client uses to mark a write durable. write itself stays
+  // buffer-only so a burst of small writes doesn't re-chunk and
+  // re-hash on every syscall.
+  //
+  // Returns errno on failure so callers can surface it to the
+  // kernel; returns 0 on success or when there's nothing to do.
+  const flushEntry = (path: string): number => {
+    const entry = files.get(path);
+    if (entry === undefined) return 0;
+    try {
+      vfs.writeFileSync(path, entry.buf.subarray(0, entry.size));
+      return 0;
+    } catch (error) {
+      return toErrno(error);
+    }
+  };
+
   const warnedOperations = new Set<string>();
   const notImplemented = (operation: string): NotImplementedOperation => {
     return (...args: unknown[]) => {
@@ -285,9 +310,14 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
       cb(length);
     },
 
-    release(_path, fh, cb) {
+    release(path, fh, cb) {
       handles.delete(fh);
-      cb(0);
+      // Last chance to make the buffered writes durable in the
+      // VFS — the kernel won't call write() again on this fh.
+      // Multi-open is fine: the next release on a different fh
+      // pointing at the same buffer re-spills the same bytes,
+      // which writeFileSync handles idempotently.
+      cb(flushEntry(path));
     },
 
     releasedir(_path, fh, cb) {
@@ -295,8 +325,12 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
       cb(0);
     },
 
-    flush(_path, _fh, cb) {
-      cb(0);
+    flush(path, _fh, cb) {
+      // Linux close(2) drives this op once per close, before
+      // release. Spilling here means a process that close()s
+      // without unlink-ing sees its bytes through the VFS surface
+      // immediately, without waiting for the kernel to call release.
+      cb(flushEntry(path));
     },
 
     truncate(path, size, cb) {
@@ -415,8 +449,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
       cb(0);
     },
 
-    fsync(_path, _fh, _datasync, cb) {
-      cb(0);
+    fsync(path, _fh, _datasync, cb) {
+      // fsync(2) is the documented user-facing flush. Spill
+      // whatever's buffered so subsequent VFS reads see it.
+      cb(flushEntry(path));
     },
 
     fsyncdir(_path, _fh, _datasync, cb) {
