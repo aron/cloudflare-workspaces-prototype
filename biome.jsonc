@@ -10,12 +10,12 @@
       "**/*.cjs",
       "**/*.json",
       "**/*.jsonc",
-      "!**/node_modules/**",
-      "!**/node_modules.host-backup.*/**",
-      "!**/dist/**",
-      "!**/artifacts/**",
-      "!**/.devbox/**",
-      "!**/.venv/**",
+      "!**/node_modules",
+      "!**/node_modules.host-backup.*",
+      "!**/dist",
+      "!**/artifacts",
+      "!**/.devbox",
+      "!**/.venv",
       "!package-lock.json"
     ]
   },
@@ -26,8 +26,7 @@
     "indentWidth": 2,
     "lineWidth": 100
   },
-  // TODO: enable the linter once the existing tree is clean.
-  "linter": { "enabled": false },
+  "linter": { "enabled": true },
   "javascript": {
     "formatter": {
       "quoteStyle": "double",
