@@ -6,8 +6,7 @@ import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 import { buildManifest } from "../sync/manifests.js";
 
-// Fixed chunk size per docs/03_filesystem_schema.md and
-// docs/02_sync_protocol.md. Exported so tests can size inputs precisely
+// Fixed chunk size. Exported so tests can size inputs precisely
 // without hard-coding the magic number twice.
 export const CHUNK_SIZE = 512 * 1024;
 

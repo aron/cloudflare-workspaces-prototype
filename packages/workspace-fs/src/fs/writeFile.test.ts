@@ -7,9 +7,9 @@ import { resolveInode } from "./resolve.js";
 import { withDB } from "./with-db.js";
 import { CHUNK_SIZE, writeFile } from "./writeFile.js";
 
-// Reassemble a file's bytes by stitching its chunk rows together. The
-// real readFile lands as Task 4; this is a deliberately minimal helper
-// so writeFile tests can stand alone.
+// Reassemble a file's bytes by stitching its chunk rows together.
+// A deliberately minimal helper so writeFile tests can stand alone
+// without depending on readFile.
 function readBack(db: Database, path: string): Uint8Array {
   const node = resolveInode(db, path);
   if (node === null) throw new Error(`no such path: ${path}`);
