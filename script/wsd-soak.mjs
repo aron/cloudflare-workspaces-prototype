@@ -44,6 +44,20 @@ const WRITES_PER_S = Number(process.env.SOAK_WRITES_PER_S ?? 200);
 const PAYLOAD_B = Number(process.env.SOAK_PAYLOAD_B ?? 64);
 const SAMPLE_MS = Number(process.env.SOAK_SAMPLE_MS ?? 250);
 
+// SOAK_DISABLE_FUSE=1 skips the FUSE device/cap plumbing and
+// passes DISABLE_FUSE=1 into the container. Useful in
+// environments where /dev/fuse isn't exposed to the host
+// (e.g. running inside a sandbox container, or CI without
+// privileged docker). The sync wire still exercises the full
+// push/pull loop; only the FUSE mount on the container side is
+// skipped.
+const DISABLE_FUSE = process.env.SOAK_DISABLE_FUSE === "1" || !existsSync("/dev/fuse");
+
+// On Linux, host.docker.internal isn't resolved automatically;
+// we map it to the host-gateway address so B can reach A.
+// docker-desktop on macOS/Windows already provides this.
+const ADD_HOST_GATEWAY = process.platform === "linux";
+
 const IMAGE_TAG = "wsd-harness:libfuse2";
 
 if (!existsSync(BINARY)) {
@@ -75,23 +89,26 @@ RUN apt-get update >/dev/null && apt-get install -y --no-install-recommends \\
 }
 
 async function bootContainer(extraEnv = {}) {
-  const args = [
-    "run",
-    "--rm",
-    "-d",
-    "--platform",
-    "linux/amd64",
-    "--privileged",
-    "--device",
-    "/dev/fuse",
-    "--cap-add",
-    "SYS_ADMIN",
-    "--cap-add",
-    "MKNOD",
-    "--security-opt",
-    "apparmor=unconfined",
-    "--security-opt",
-    "seccomp=unconfined",
+  const args = ["run", "--rm", "-d", "--platform", "linux/amd64"];
+  if (!DISABLE_FUSE) {
+    args.push(
+      "--privileged",
+      "--device",
+      "/dev/fuse",
+      "--cap-add",
+      "SYS_ADMIN",
+      "--cap-add",
+      "MKNOD",
+      "--security-opt",
+      "apparmor=unconfined",
+      "--security-opt",
+      "seccomp=unconfined",
+    );
+  }
+  if (ADD_HOST_GATEWAY) {
+    args.push("--add-host", "host.docker.internal:host-gateway");
+  }
+  args.push(
     "-v",
     `${BINARY}:/usr/local/bin/wsd:ro`,
     "-p",
@@ -100,11 +117,15 @@ async function bootContainer(extraEnv = {}) {
     "PORT=8080",
     "-e",
     "MOUNT_POINT=/workspace",
-  ];
+  );
+  if (DISABLE_FUSE) {
+    args.push("-e", "DISABLE_FUSE=1");
+  }
   for (const [k, v] of Object.entries(extraEnv)) {
     args.push("-e", `${k}=${v}`);
   }
-  args.push(IMAGE_TAG, "/usr/local/bin/wsd");
+  const image = DISABLE_FUSE ? "debian:stable-slim" : IMAGE_TAG;
+  args.push(image, "/usr/local/bin/wsd");
   const { stdout } = await execFileP("docker", args);
   const cid = stdout.trim();
   const { stdout: portOut } = await execFileP("docker", ["port", cid, "8080/tcp"]);
@@ -160,7 +181,7 @@ function batchStub(url) {
 }
 
 async function fetchWatermarks(url) {
-  return await batchStub(url).watermarks();
+  return await batchStub(url).sync.watermarks();
 }
 
 // Build a payload-bytes Uint8Array filled with a deterministic
@@ -186,7 +207,7 @@ function wsStub(url) {
 // writes.
 async function pushOneWrite(stub, i, bytes) {
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  await stub.pushObjects(
+  await stub.sync.pushObjects(
     new ReadableStream({
       start(c) {
         c.enqueue({ hash, bytes });
@@ -194,7 +215,7 @@ async function pushOneWrite(stub, i, bytes) {
       },
     }),
   );
-  await stub.push({
+  await stub.sync.push({
     senderRev: 0,
     changes: new ReadableStream({
       start(c) {
@@ -213,7 +234,7 @@ async function pushOneWrite(stub, i, bytes) {
 }
 
 async function main() {
-  await ensureImage();
+  if (!DISABLE_FUSE) await ensureImage();
 
   process.stderr.write("booting A (sink) ...\n");
   const a = await bootContainer();
