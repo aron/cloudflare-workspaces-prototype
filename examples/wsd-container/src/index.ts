@@ -22,6 +22,7 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   CloudflareContainerBackend,
+  type DurableObjectStorageLike,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
@@ -66,7 +67,14 @@ export class WsdContainer extends DurableObject<Env> {
         props: { binding: "WSD", id: ctx.id.toString() },
       }),
     });
-    this.#workspace = new Workspace({ backends: [this.#backend] });
+    this.#workspace = new Workspace({
+      // ctx.storage's sql.exec returns a more-narrow row type
+      // than DurableObjectStorageLike declares; the runtime shape
+      // matches exactly. Cast through unknown to bypass the
+      // invariance check.
+      storage: ctx.storage as unknown as DurableObjectStorageLike,
+      backends: [this.#backend],
+    });
   }
 
   // ---- Worker-facing RPC surface --------------------------------
@@ -148,13 +156,8 @@ async function handleFile(
 
   if (request.method === "GET") {
     try {
-      const bytes = await ws.fs.readFile(path);
-      // Copy into a plain ArrayBuffer so the Response body init
-      // type accepts it (the RPC-returned Uint8Array carries a
-      // Disposable brand that confuses BodyInit's union).
-      const buf = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(buf).set(bytes);
-      return new Response(buf, {
+      const stream = await ws.fs.readFile(path);
+      return new Response(stream, {
         status: 200,
         headers: { "content-type": "application/octet-stream" },
       });
@@ -191,14 +194,13 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   const stub = env.WSD.get(env.WSD.idFromName(name));
   const ws = await stub.getWorkspace();
   try {
-    const result = await ws.shell.exec(command, {
-      cwd: body.cwd,
-      encoding: "utf8",
-    });
-    const payload = `event: result\ndata: ${JSON.stringify(result)}\n\n`;
-    return new Response(payload, {
+    const stream = await ws.shell.execStream(command, { cwd: body.cwd });
+    return new Response(stream, {
       status: 200,
-      headers: { "content-type": "text/event-stream" },
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      },
     });
   } catch (error) {
     return errorJSON(error, 500);
