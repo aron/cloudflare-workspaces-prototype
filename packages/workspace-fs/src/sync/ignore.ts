@@ -6,7 +6,7 @@
 // Matching is whole-segment: "node_modules" matches the segment
 // node_modules anywhere in the path but does not match
 // node_modules_old or my_node_modules. Patterns are plain strings,
-// not globs \u2014 docs/02 calls out the narrow surface
+// not globs — docs/02 calls out the narrow surface
 // deliberately; we can extend to globs later if a real case
 // demands it.
 

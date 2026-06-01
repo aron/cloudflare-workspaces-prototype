@@ -133,7 +133,7 @@ describe("applyChanges loopback suppression", () => {
 
       // Apply an entry as if it came from upstream. The local rev
       // counter bumps (writeFile bumps rev), but the source flag
-      // makes the helper advance pushRev to match \u2014 the bump
+      // makes the helper advance pushRev to match — the bump
       // looks like it was already pushed.
       await applyChanges(
         db,

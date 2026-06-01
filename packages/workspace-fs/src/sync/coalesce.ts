@@ -72,7 +72,7 @@ export async function* coalesceChanges(
 
   // Tombstones: each rm appends a row to vfs_changes with the
   // post-bump rev. We only emit a delete if the path has no live
-  // inode \u2014 materialiseChange already handles that, but we
+  // inode — materialiseChange already handles that, but we
   // double-check via the emitted set so a recreated path doesn't
   // get a redundant pass.
   const tombs = db.all<{ path: string }>(

@@ -15,7 +15,7 @@ export interface ResolvedInode {
 }
 
 export interface ResolveOptions {
-  // Default true. Pass false to land on a symlink itself \u2014 the
+  // Default true. Pass false to land on a symlink itself — the
   // lstat / readlink code paths rely on this. Loops are still
   // detected when following.
   followSymlinks?: boolean;
@@ -39,7 +39,7 @@ const MAX_SYMLINK_FOLLOWS = 40;
 
 // Walk vfs_dirents from ROOT_INODE down to `path`. Returns null when
 // any segment is missing, when an intermediate segment is a file
-// (which a real filesystem would surface as ENOTDIR \u2014 callers map
+// (which a real filesystem would surface as ENOTDIR — callers map
 // the `null` to the appropriate POSIX code), or when a final-segment
 // symlink dangles. Throws ELOOP when a cycle is detected.
 //

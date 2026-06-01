@@ -613,7 +613,7 @@ function notImplemented(method: string) {
 // @platformatic/vfs callers (and FUSE drivers built on top) consult
 // the full Node-style stat shape. Most fields don't map onto our
 // content-addressed store, so they get sensible constants. The fields
-// that do map \u2014 mode, size, mtime, ino \u2014 are populated for real.
+// that do map — mode, size, mtime, ino — are populated for real.
 
 interface StatsInputs {
   mode: number;

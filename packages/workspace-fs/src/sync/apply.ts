@@ -44,7 +44,7 @@ function hex(bytes: Uint8Array): string {
 // Drive a ChangeEntry stream against `db`, batching writes so peak
 // memory stays bounded and a crash mid-apply leaves the DB in a
 // consistent state. Each batch runs inside a single transactionSync
-// from the underlying FS helpers \u2014 mkdir, writeFile, symlink,
+// from the underlying FS helpers — mkdir, writeFile, symlink,
 // rm all wrap their own transactionSync, so a batch is in practice
 // a sequence of independently-committed mutations rather than one
 // fat transaction. The bounded-batch contract still holds because
@@ -86,7 +86,7 @@ export async function applyChanges(
       try {
         rm(db, entry.path, { recursive: true, force: true });
       } catch {
-        // Already gone is fine \u2014 idempotent apply.
+        // Already gone is fine — idempotent apply.
       }
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
@@ -179,7 +179,7 @@ export async function applyChanges(
 // Compare an entry against the local node graph. Returns true when
 // the entry would be a no-op apply: the manifest hash (files),
 // mode + symlink target (symlinks), or mode (dirs) already matches.
-// We deliberately skip mtime comparison \u2014 mtime is metadata
+// We deliberately skip mtime comparison — mtime is metadata
 // the source decides on, and re-applying it would still bump the
 // local rev counter for nothing. Receivers see eventual mtime
 // drift between peers; the wire stays quiet.

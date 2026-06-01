@@ -2,11 +2,11 @@ import type { Database } from "../storage.js";
 
 // Stream chunk bytes by hash. The receiver collects these into the
 // keyed map it uses when assembling files from ChangeEntry chunks.
-// Missing hashes throw \u2014 the caller is supposed to have probed
+// Missing hashes throw — the caller is supposed to have probed
 // hasObjects() first to avoid asking for what the sender doesn't have.
 //
-// The push direction (DO \u2192 container) and the fetch direction
-// (container \u2192 DO) both use this same shape; on the wire it is
+// The push direction (DO → container) and the fetch direction
+// (container → DO) both use this same shape; on the wire it is
 // fetchObjects on one side and pushObjects on the other. Both names
 // resolve to the same SQL.
 export async function* pushObjects(

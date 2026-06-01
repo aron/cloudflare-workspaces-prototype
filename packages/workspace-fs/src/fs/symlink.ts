@@ -4,7 +4,7 @@ import { incrementRev } from "../rev.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 
-// Create a symlink node. The target is stored as-is \u2014 it can be a
+// Create a symlink node. The target is stored as-is — it can be a
 // relative or absolute path, dangling or live. resolveInode follows
 // it transparently when callers walk through this entry.
 export function symlink(db: Database, target: string, path: string, now: () => number): void {
