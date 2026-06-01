@@ -10,6 +10,7 @@
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build:bin": "npm run build:bin --workspaces --if-present",
+    "build:all": "npm run build && npm run build:bin",
     "format": "biome format --write .",
     "format:check": "biome format ."
   },
