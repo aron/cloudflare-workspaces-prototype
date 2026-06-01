@@ -19,6 +19,7 @@ import {
   type FuseMount,
   mountFuse,
 } from "../fuse/index.js";
+import { installLogging } from "./logger.js";
 
 // The compiled-in default port. esbuild's `define` substitutes the
 // real value at SEA bundle time when WSD_DEFAULT_PORT is set on
@@ -315,6 +316,11 @@ function toHttpUrl(input: string): string {
 }
 
 async function main(): Promise<void> {
+  // Install logging + crash handlers first thing so any early throws
+  // (parsePort, parseMountPoint, detectFUSEBackend) still land in
+  // LOG_FILE when set.
+  const teardownLogging = installLogging(process.env.LOG_FILE);
+
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
   // DISABLE_FUSE=1 skips the FUSE mount entirely. The HTTP server +
@@ -402,6 +408,7 @@ async function main(): Promise<void> {
         console.error(error);
       }
     }
+    teardownLogging();
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
 

@@ -163,19 +163,25 @@ These are the variables `wsd` actually consumes (see
 | `DISABLE_FUSE` | unset | If set (e.g. `1`), skip FUSE entirely. The CF backend sets this because Cloudflare Containers doesn't expose `/dev/fuse` yet. |
 | `UPSTREAM_URL` | unset | If set, `wsd` starts a sync client against this URL to push/pull VFS revisions. |
 | `EXEC_LOG_MAX_BYTES` | runner default | Caps the per-exec stdout/stderr log retained in-memory. |
+| `LOG_FILE` | unset | If set, every `console.log` / `console.error` line and any `uncaughtException` / `unhandledRejection` is also appended to this file. Stdout/stderr behaviour is unchanged. |
 | `WSD_FUSE_BACKEND` | autodetect | Pin a specific FUSE backend instead of letting `detectFUSEBackend()` choose. |
 
-`LOG_FILE` is **not** consulted today; `wsd` logs to stdout/stderr
-via `console.log` / `console.error`. See "Failure handling" below.
+When `LOG_FILE` is set, `wsd` mirrors console output into the file in
+addition to stdout/stderr. See "Failure handling" below for the crash
+handlers that share the same logger.
 
 ## Failure handling
 
 Today:
 
-- `wsd` does not install `uncaughtException` or `unhandledRejection`
-  handlers. The only `process.exit` paths are the top-level
-  `main().catch` and the signal-based `shutdown()`.
-- Logs go to stdout/stderr only; there is no log-file rotation.
+- `wsd` installs `uncaughtException` and `unhandledRejection`
+  handlers via `installLogging()` (in `cli/logger.ts`). Each handler
+  writes a formatted entry to the same logger — `console.error` and,
+  if `LOG_FILE` is set, the file too — then calls `process.exit(1)`.
+- Logs go to stdout/stderr by default. When `LOG_FILE` is set, every
+  `console.log` / `console.error` line is also appended to that file
+  (open in `O_APPEND` mode, ISO-timestamped, `[info]` / `[error]`
+  prefixed). No rotation; the operator is expected to manage the file.
 - If `detectFUSEBackend()` returns `{ kind: "none" }` and
   `DISABLE_FUSE` is not set, `main()` throws and the process exits
   non-zero. **There is no `fuseActive=false` degraded mode and no
@@ -184,10 +190,6 @@ Today:
 
 **Planned** (tracked in `PLAN.md`):
 
-- Structured log file at a configurable path (likely reviving
-  `LOG_FILE`) plus `uncaughtException` / `unhandledRejection`
-  handlers that write a crash record and `process.exit(1)`. Stdout
-  alone is fine for a CLI but thin for a container daemon.
 - Soft-fail on FUSE-detect failure: the server still starts, exposes
   RPC, and reports `fuseActive=false` via `/__wsd/info`. Whether
   that includes a host-FS mirror for in-container writes is still

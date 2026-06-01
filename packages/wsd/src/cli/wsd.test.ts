@@ -46,6 +46,26 @@ test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
   assert.match(stderr, /EXEC_LOG_MAX_BYTES must be a positive integer/);
 });
 
+test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (t) => {
+  // Boot the daemon with LOG_FILE pointed at a temp file. The
+  // startup banner line on stdout should also show up in the file,
+  // proving the console patch landed and didn't replace the original
+  // writers.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-log-"));
+  const logFile = path.join(dir, "wsd.log");
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, {
+    port,
+    mountPoint,
+    env: { DISABLE_FUSE: "1", LOG_FILE: logFile },
+  });
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const contents = await fs.readFile(logFile, "utf8");
+  assert.match(contents, /\[info\] wsd listening on/);
+});
+
 test("wsd exposes file IO through the mounted filesystem", async (t) => {
   const backend = await detectFUSEBackend();
   if (backend.kind === "none") {
