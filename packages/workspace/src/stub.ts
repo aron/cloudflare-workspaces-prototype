@@ -128,12 +128,24 @@ export class WorkspaceShellStub extends RpcTarget {
 // (the Workers-RPC value carried between the DO and a Worker), so
 // the name doesn't clash.
 export class WorkspaceStub extends RpcTarget {
-  readonly fs: WorkspaceFsStub;
-  readonly shell: WorkspaceShellStub;
+  // Getters rather than instance properties so Workers RPC
+  // exposes them through the stub proxy. Plain readonly fields
+  // set in the constructor land as private isolate state and the
+  // proxy reports "method not implemented".
+  readonly #fs: WorkspaceFsStub;
+  readonly #shell: WorkspaceShellStub;
 
   constructor(ws: Workspace) {
     super();
-    this.fs = new WorkspaceFsStub(ws);
-    this.shell = new WorkspaceShellStub(ws);
+    this.#fs = new WorkspaceFsStub(ws);
+    this.#shell = new WorkspaceShellStub(ws);
+  }
+
+  get fs(): WorkspaceFsStub {
+    return this.#fs;
+  }
+
+  get shell(): WorkspaceShellStub {
+    return this.#shell;
   }
 }
