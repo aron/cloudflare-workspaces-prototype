@@ -14,7 +14,6 @@ import {
   fetchObjects,
   hasObjects,
   materialiseChange,
-  pushObjects,
   readWatermark,
   stageBlob,
 } from "@cloudflare/workspace-fs";

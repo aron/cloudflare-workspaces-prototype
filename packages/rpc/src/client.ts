@@ -77,11 +77,9 @@ export function createSyncClient(options: ClientOptions): SyncClient {
       // RpcPromise (thenable + property-access for pipelining) for
       // calls that return synchronously-pipelined values; we only
       // measure the awaited terminal call.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (...args: unknown[]) => {
         const start = Date.now();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = (value as any)(...args);
+        const result = (value as (...a: unknown[]) => unknown)(...args);
         // For non-thenable returns (streams), fire the event
         // immediately with ok=true. The caller may still throw
         // while reading the stream; observability for that path
