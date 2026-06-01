@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
-import { createSyncClient, type SyncClient } from "@cloudflare/workspace-rpc/client";
+import { createWorkspaceClient, type WorkspaceClient } from "@cloudflare/workspace-rpc/client";
 import {
   acceptWebSocketSession,
   createWorkspaceServer,
@@ -317,11 +317,13 @@ async function main(): Promise<void> {
   }
 
   const upstreamUrl = process.env.UPSTREAM_URL?.trim();
-  let upstreamClient: SyncClient | undefined;
+  let upstreamClient: WorkspaceClient | undefined;
   if (upstreamUrl !== undefined && upstreamUrl.length > 0) {
-    upstreamClient = createSyncClient({ url: upstreamUrl });
+    upstreamClient = createWorkspaceClient({ url: upstreamUrl });
   }
-  const { vfs, db, stopSync } = await createNodeVirtualFileSystem({ upstream: upstreamClient });
+  const { vfs, db, stopSync } = await createNodeVirtualFileSystem({
+    upstream: upstreamClient?.sync,
+  });
   const info: WSDInfo = { backend, mountPoint, port };
 
   let fuse: FuseMount | undefined;
