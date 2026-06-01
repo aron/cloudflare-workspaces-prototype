@@ -17,13 +17,6 @@ type StatusCallback = (errnoOrBytes: number) => void;
 type ResultCallback<T> = (errno: number, result: T) => void;
 type NotImplementedOperation = (...args: unknown[]) => void;
 
-export class NotImplementedError extends Error {
-  constructor(readonly operation: string) {
-    super(`FUSE operation not implemented: ${operation}`);
-    this.name = "NotImplementedError";
-  }
-}
-
 export interface FuseOps {
   init(cb?: StatusCallback): void;
   error: NotImplementedOperation;
@@ -137,6 +130,20 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     const next = Buffer.alloc(cap);
     entry.buf.copy(next, 0, 0, entry.size);
     entry.buf = next;
+  };
+
+  const warnedOperations = new Set<string>();
+  const notImplemented = (operation: string): NotImplementedOperation => {
+    return (...args: unknown[]) => {
+      if (!warnedOperations.has(operation)) {
+        warnedOperations.add(operation);
+        console.warn(`wsd: FUSE op ${operation} not implemented; returning ENOSYS`);
+      }
+      const cb = args[args.length - 1];
+      if (typeof cb === "function") {
+        (cb as (errno: number, ...rest: unknown[]) => void)(ERRNO.ENOSYS);
+      }
+    };
   };
 
   return {
@@ -498,20 +505,6 @@ export async function mountFuse(options: {
         });
       });
     },
-  };
-}
-
-const warnedOperations = new Set<string>();
-function notImplemented(operation: string): NotImplementedOperation {
-  return (...args: unknown[]) => {
-    if (!warnedOperations.has(operation)) {
-      warnedOperations.add(operation);
-      console.warn(`wsd: FUSE op ${operation} not implemented; returning ENOSYS`);
-    }
-    const cb = args[args.length - 1];
-    if (typeof cb === "function") {
-      (cb as (errno: number, ...rest: unknown[]) => void)(ERRNO.ENOSYS);
-    }
   };
 }
 

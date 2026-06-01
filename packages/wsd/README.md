@@ -26,7 +26,7 @@ Current filesystem support:
 
 - `@platformatic/vfs` in-memory filesystem provided by `@cloudflare/dofs`'s node provider.
 - FUSE operation adapter covering the full `fuse-native` operation surface.
-- Unsupported FUSE operations intentionally throw `NotImplementedError` for visibility.
+- Unsupported FUSE operations return `ENOSYS` to the kernel; the binding logs a one-shot warning per operation.
 - capnweb RPC over `/api` and `/ws` exposes the workspace database and an `exec` runner to clients.
 - Optional host/DO synchronization: when `UPSTREAM_URL` is set, `wsd` opens a `SyncClient` from `@cloudflare/workspace-rpc/client` against that URL and runs the sync loop in the background.
 - No on-disk persistence yet — the in-memory VFS is rebuilt on each start, with sync pulling state back from the upstream when configured.
