@@ -89,6 +89,47 @@ describe("SyncRPC over a real WebSocket", () => {
   });
 });
 
+describe("SyncRPC.readEntry over a real WebSocket", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("returns the entry for a path that exists", async () => {
+    harness = await startHarness();
+    const provider = new SQLiteWorkspaceProvider(harness.db, { now: () => 1234 });
+    provider.writeFileSync("/probe.txt", "data");
+
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const entry = await client.readEntry("/probe.txt");
+      expect(entry).not.toBeNull();
+      expect(entry?.path).toBe("/probe.txt");
+      expect(entry?.kind).toBe("file");
+      if (entry?.kind === "file") expect(entry.size).toBe(4);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("returns null over the wire for a missing path", async () => {
+    // SyncRPC.readEntry's documented contract is to resolve with
+    // null when the path doesn't exist. The local stat() path
+    // throws ENOENT; readEntry intentionally does not, because
+    // it's a probe used by the sync loop to decide whether to
+    // pull bytes. Pin the null behaviour over the wire.
+    harness = await startHarness();
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const entry = await client.readEntry("/missing.txt");
+      expect(entry).toBeNull();
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("SyncRPC push convergence", () => {
   let harness: Harness | undefined;
   afterEach(async () => {
