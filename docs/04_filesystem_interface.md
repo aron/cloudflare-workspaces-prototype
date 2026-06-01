@@ -1,12 +1,11 @@
 # 04. Filesystem Interface
 
-> [!IMPORTANT]
-> This document describes the **intended design** and has **diverged
-> from the current implementation** in the repository. Names,
-> signatures, and behaviours described here are targets, not what
-> `main` ships today. When in doubt, treat the code as authoritative
-> for what runs and this doc as authoritative for what we're moving
-> toward.
+> [!NOTE]
+> This document describes the public `Workspace.fs` surface and is kept
+> in step with the code in `@cloudflare/dofs`. A few spots are
+> explicitly flagged where the doc reflects an intended target (true
+> streaming `writeFile`, mount-layer error codes); everything else is
+> what ships today.
 
 `Workspace.fs` is the file API. It's inspired by `node:fs/promises` for
 familiarity — same method names, similar option shapes — but it's a much
@@ -68,7 +67,11 @@ writeFile(
 ): Promise<void>
 ```
 
-Accepts a stream, so uploads can be piped through without buffering.
+Accepts a stream so callers can supply uploads, R2 bodies, and `fetch`
+responses without an intermediate `arrayBuffer()`. Today the stream is
+drained into a single in-memory buffer before hashing and chunking;
+true streaming chunking is a roadmap item (see `PLAN.md` *Important*).
+The public signature won't change when that lands.
 
 ```ts
 // Text.
@@ -77,10 +80,10 @@ await fs.writeFile("/workspace/notes/todo.md", "- [ ] ship it\n");
 // Binary.
 await fs.writeFile("/workspace/data/blob.bin", new Uint8Array([1, 2, 3]));
 
-// Stream an HTTP upload straight to disk.
+// Supply an HTTP upload as a stream (buffered internally today).
 await fs.writeFile("/workspace/uploads/big.csv", request.body!);
 
-// Stream from an R2 object into the workspace.
+// Pipe an R2 object into the workspace.
 const obj = await env.BUCKET.get("imports/data.parquet");
 if (obj) await fs.writeFile("/workspace/imports/data.parquet", obj.body);
 
@@ -96,6 +99,10 @@ rm(path: string, options?: { recursive?: true; force?: true }): Promise<void>
 
 Replaces both `unlink` and `rmdir`. Pass `recursive: true` for non-empty
 directories; `force: true` silences `ENOENT`.
+
+> The `recursive?: true` / `force?: true` literal types are intentional
+> today and reject `false`. Widening to `boolean` for `node:fs/promises`
+> parity is tracked in `PLAN.md` (*TODO — code*).
 
 ```ts
 // Single file.
@@ -113,6 +120,8 @@ await fs.rm("/workspace/cache", { recursive: true, force: true });
 ```ts
 mkdir(path: string, options?: { recursive?: true; mode?: number }): Promise<void>
 ```
+
+Same literal-`true` caveat as `rm` — see the note above.
 
 ```ts
 await fs.mkdir("/workspace/notes");
@@ -153,6 +162,17 @@ stat(path: string): Promise<{
 }>
 ```
 
+`name` is the last segment of the canonicalized path. For the workspace
+root this is the empty string: `(await fs.stat("/")).name === ""`.
+
+`stat` follows symlinks transparently; there is no `lstat`. See the
+note on internal symlink support in the appendix.
+
+> When a parent path segment is itself a file, `stat` reports `ENOENT`
+> (because resolution returns `null` for that case) rather than
+> `ENOTDIR`. `mkdir` and `writeFile` raise `ENOTDIR` explicitly for the
+> same shape — see the error table.
+
 ```ts
 const s = await fs.stat("/workspace/build/out.wasm");
 console.log(`${s.size} bytes, modified ${new Date(s.mtime).toISOString()}`);
@@ -164,8 +184,17 @@ console.log(`${s.size} bytes, modified ${new Date(s.mtime).toISOString()}`);
 find(
   directory: string,
   pattern?:  string,           // simple glob (`*.ts`, `**/*.md`)
-): Promise<Array<{ path: string; type: "file" | "dir" }>>
+): Promise<Array<{ path; type: "file" | "dir" }>>
 ```
+
+Resolves `directory` first: throws `ENOENT` if the directory does not
+exist and `ENOTDIR` if `directory` points at a file. The glob is
+matched against each candidate's path **relative to `directory`**, not
+its absolute path — so `**/*.ts` under `/workspace/src` matches
+`a/b.ts`, not `/workspace/src/a/b.ts`.
+
+Only `*`, `**`, and `**/` are honored; `?`, character classes, and
+brace expansions are matched literally.
 
 ```ts
 // Every TypeScript file in the project.
@@ -181,8 +210,16 @@ const all = await fs.find("/workspace/notes");
 ls(prefix: string): Promise<string[]>
 ```
 
-Flat list of every file path that starts with `prefix`. Cheaper than
-`find` when you don't need the directory rows.
+Flat list of every file at or under `prefix`. The match is
+**segment-aware**, not pure string-prefix: `ls("/workspace/notes")`
+returns the file `/workspace/notes` (if it is a file) and every file
+under `/workspace/notes/…`, but never `/workspace/notes-archive/x`.
+
+Cheaper than `find` when you don't need the directory rows.
+
+`ls` does **not** validate the prefix — a missing path returns `[]`
+silently rather than throwing `ENOENT`. Use `stat` first if you need to
+distinguish "empty directory" from "no such directory".
 
 ```ts
 const paths = await fs.ls("/workspace/.agents/skills");
@@ -202,6 +239,17 @@ grep(
 ): Promise<{ path: string; line: number; text: string }[]>
 ```
 
+`pattern` is a **literal substring** — not a regex, not a glob.
+`ignoreCase` lowercases both sides before comparing.
+
+`path` may be a directory **or a single file**. Directory walks return
+matches in walk order. Each result row carries:
+
+- `path` — absolute path of the matching file.
+- `line` — 1-indexed line number within that file.
+- `text` — the entire matching line (without the trailing newline), not
+  just the matched substring.
+
 ```ts
 const hits = await fs.grep("TODO", "/workspace/src", { ignoreCase: true });
 for (const hit of hits) {
@@ -215,21 +263,22 @@ variant.
 ## Error handling
 
 Errors thrown by `fs` are POSIX-style — a `NodeJS.ErrnoException`-shaped
-object with a `code` property — so handlers from Node code port over
-directly.
+object with a `code` property (and a `path` property where it applies) —
+so handlers from Node code port over directly.
 
 | Code | When |
 | --- | --- |
-| `ENOENT` | Path does not exist and `force` is not true. |
+| `ENOENT` | Path does not exist and `force` is not true. Also raised by `stat` when a parent segment turns out to be a file. |
 | `ENOTEMPTY` | Path is a non-empty directory and `recursive` is not true. |
-| `ENOTDIR` | A parent path segment is a file. |
-| `EISDIR` | Expected a file, got a directory (e.g. `readFile` on a dir). |
+| `ENOTDIR` | A parent path segment is a file (raised explicitly by `mkdir` and `writeFile`; `find` raises it when its `directory` argument is a file). |
+| `EISDIR` | Expected a file, got a directory (e.g. `readFile` on a dir, `writeFile` on `/`). |
 | `EEXIST` | `mkdir` without `recursive: true` on an existing path. |
 | `EINVAL` | Invalid path or unsupported options. |
-| `EACCES` | Permission denied. |
+| `ELOOP` | Symlink traversal exceeded 40 hops. Thrown by the internal resolver when the `node:vfs` adapter wires up a cycle. |
 | `EPERM` | Operation is forbidden, e.g. deleting the workspace root. |
-| `EROFS` | Path is under a read-only mount. See [06. Mount Interface](./06_mount_interface.md). |
 | `EIO` | Backing storage failed unexpectedly. |
+| `EACCES` | *Reserved for future mount layer (see [06. Mount Interface](./06_mount_interface.md)).* No code path in `workspace-fs` currently throws it. |
+| `EROFS` | *Reserved for future mount layer (see [06. Mount Interface](./06_mount_interface.md)).* No code path in `workspace-fs` currently throws it. |
 
 ### Example: handle "file missing" and bubble everything else
 
@@ -248,9 +297,9 @@ async function readConfig(): Promise<Config> {
       );
       return seed;
     }
-    // Anything else (EIO, EROFS on a misconfigured mount, ...) is a real
-    // problem — let it surface so the agent's outer error handler logs
-    // it and the request fails loudly.
+    // Anything else (EIO, ...) is a real problem — let it surface so
+    // the agent's outer error handler logs it and the request fails
+    // loudly.
     throw err;
   }
 }
@@ -263,19 +312,6 @@ async function readConfig(): Promise<Config> {
 await this.workspace.fs.rm("/workspace/build", { recursive: true, force: true });
 ```
 
-### Example: write-through to a read-only mount
-
-```ts
-try {
-  await this.workspace.fs.writeFile("/workspace/.agents/skills/new.md", body);
-} catch (err) {
-  if ((err as NodeJS.ErrnoException).code === "EROFS") {
-    return new Response("Skills are read-only on this deployment.", { status: 403 });
-  }
-  throw err;
-}
-```
-
 ## Appendix: comparison with `node:fs/promises`
 
 For reference, here's the public surface of `node:fs/promises` and how it
@@ -284,25 +320,35 @@ maps to `Workspace.fs`:
 | `node:fs/promises` | `Workspace.fs` | Notes |
 | --- | --- | --- |
 | `readFile` | `readFile` | Stream by default; pass `"utf8"` for a string. |
-| `writeFile` | `writeFile` | Accepts `string`, `Uint8Array`, or `ReadableStream`. |
+| `writeFile` | `writeFile` | Accepts `string`, `Uint8Array`, or `ReadableStream`. Stream is buffered internally today. |
 | `appendFile` | — | Read, concat, write. Not a primitive. |
 | `mkdir` | `mkdir` | `{ recursive: true }` supported. |
 | `rmdir` | `rm` | One method for files and dirs (matches modern Node). |
 | `rm` | `rm` | `{ recursive: true }` for non-empty dirs. |
 | `unlink` | `rm` | Same. |
 | `readdir` | `readdir` | Always returns dirent-shaped entries. |
-| `stat` / `lstat` | `stat` | No symlink distinction — VFS has no symlinks. |
+| `stat` / `lstat` | `stat` | No `lstat`; `stat` follows symlinks. See note below. |
 | `truncate` | — | Read, slice, write. |
-| `chmod` | — | Pass `mode` to `writeFile` / `mkdir`. |
+| `chmod` | — | Pass `mode` to `writeFile` / `mkdir` at create time. There is no way to chmod an existing file without rewriting its bytes. |
 | `chown` | — | No ownership model. |
 | `utimes` | — | `mtime` is managed by the VFS. |
 | `cp` / `copyFile` | — | Read + write. |
 | `rename` | — | Read + write + delete. |
 | `realpath` | — | Paths are already canonical. |
-| `symlink` / `readlink` | — | No symlink support. |
-| `watch` | — | See [02. Sync Protocol](./02_sync_protocol.md) for the change stream. |
+| `symlink` / `readlink` | — | Not on the public surface; see note below. |
+| `watch` | — | Low-level primitive in `fs/watch.ts` (`createWatcher`, `createWatchAsyncIterable`, `WatchHandle`, `WatchOptions`); not exposed on the `WorkspaceFilesystem` class. |
 | `open` / `FileHandle` | — | Use streams instead. |
-| `glob` | `find` | Limited glob support. |
-| — | `grep` | Not in `node:fs`; included here for agents. |
-| — | `find` | Recursive directory walk with an optional pattern. |
-| — | `ls` | Flat list of file paths under a prefix. |
+| `glob` | `find` | Limited glob support (`*`, `**`, `**/` only). |
+| — | `grep` | Not in `node:fs`; included here for agents. Substring match. |
+| — | `find` | Recursive directory walk with an optional glob, relative-rooted. |
+| — | `ls` | Flat list of file paths under a directory (segment-aware). |
+
+### Note: symlinks
+
+Symlinks exist as an **internal primitive** used by the `node:vfs`
+adapter — the schema supports a `'symlink'` node type with a
+`link_target`, and the resolver in `fs/resolve.ts` follows them with a
+40-hop cap (throws `ELOOP` on overflow). They are **not** part of the
+public `WorkspaceFilesystem` surface: there are no `fs.symlink` or
+`fs.readlink` methods on `Workspace.fs`, and callers should treat all
+visible paths as if they pointed straight at real files.

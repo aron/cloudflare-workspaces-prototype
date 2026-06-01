@@ -1,12 +1,15 @@
 # 09. Tool Interface (Agents)
 
 > [!IMPORTANT]
-> This document describes the **intended design** and has **diverged
-> from the current implementation** in the repository. Names,
-> signatures, and behaviours described here are targets, not what
-> `main` ships today. When in doubt, treat the code as authoritative
-> for what runs and this doc as authoritative for what we're moving
-> toward.
+> The `@cloudflare/fs-tools` package described here is **not yet
+> implemented**. The substrate (`workspace.fs.*`, `workspace.shell.exec`)
+> is in place; only the AI-SDK wrappers and the `FileStore` abstraction
+> are missing. This doc remains the design target; implementation is
+> tracked in `PLAN.md` as an Important item.
+>
+> A sibling package `@cloudflare/git-tools` (clone / branch / diff) is
+> planned with the same shape and will be documented alongside this one
+> once both land.
 
 The `@cloudflare/fs-tools` package ships ready-made
 [AI SDK](https://github.com/vercel/ai) tools that drive a `Workspace`
@@ -35,7 +38,7 @@ Plus the low-level building blocks:
 ## Wiring up
 
 ```ts
-import { AIChatAgent } from "@cloudflare/ai-chat";
+import { AIChatAgent } from "@cloudflare/agents"; // TODO: confirm exact subpath, e.g. "@cloudflare/agents/ai-chat-agent"
 import { Workspace } from "@cloudflare/workspace";
 import {
   WorkspaceFileStore,
@@ -171,7 +174,7 @@ Schema:
 }
 ```
 
-Delegates to `Workspace.grep` (see
+Delegates to `workspace.fs.grep` (see
 [04. Filesystem Interface](./04_filesystem_interface.md#grep)). Runs
 container-side when a sandbox is available so big trees use ripgrep;
 falls back to the DO-side scan otherwise. Returns

@@ -1,25 +1,22 @@
 # 02. Sync Protocol
 
-> [!IMPORTANT]
-> This document describes the **intended design** of the sync protocol
-> and has **diverged from the current implementation** in the
-> repository. Naming, signatures, and behaviours described here are
-> targets, not what `main` ships today. When in doubt, treat the code
-> as authoritative for what runs and this doc as authoritative for
-> what we're moving toward.
+> [!NOTE]
+> This document tracks the shipped wire shape in `packages/dofs/src/sync/*`
+> and `packages/rpc/src/{interface,server,sync-driver}.ts`. A handful of
+> claims describe roadmap targets called out in `PLAN.md`; those are
+> marked inline. When code and doc disagree, code wins — file a fix
+> against whichever side is wrong.
 
 The workspace keeps two copies of the filesystem tree in sync:
 
 - **DO side** — a SQLite-backed VFS in the Durable Object (the source of
   truth across restarts). See [03. Filesystem Schema](./03_filesystem_schema.md).
-- **Container side** — an in-memory VFS exposed to the sandbox via a
-  FUSE mount at the configured workspace root.[^memory]
-
-[^memory]:
-    > [!NOTE]
-    > The container-side store is in-memory for the initial versions of
-    > the package. A future release will move to filesystem-backed
-    > storage so larger workspaces stop being bounded by container RAM.
+- **Container side** — a VFS exposed to the sandbox via a FUSE mount at
+  the configured workspace root. The container store is the same
+  `Database` abstraction used DO-side; whether it persists across
+  container restarts is a deployment choice (today's `wsd` runs against
+  a process-lifetime DB, so a container restart loses local state and
+  the next push from the DO re-baselines it).
 
 Sync is incremental and bidirectional. Each side carries a monotonic
 counter so neither has to send the whole tree to catch up.
@@ -43,30 +40,42 @@ A typical `exec()` round-trip:
    revision than the container has seen, **coalesced to one entry
    per path** (the latest state wins — five rewrites of the same
    path between execs cost one entry on the wire, not five). Bytes
-   are not inline; entries carry chunk hashes only. The container
-   calls `hasObjects` on the referenced hashes, the DO follows up
-   with `pushObjects` for the missing subset. The container
-   suppresses its own dirty-tracking while applying so deletes don't
-   bounce back.
+   are not inline; entries carry chunk hashes only. The **sender**
+   (the DO) calls `remote.hasObjects(...)` on the referenced hashes
+   and follows up with `remote.pushObjects(missing)` for the subset
+   the receiver doesn't already have. After the receiver applies
+   the batch, the DO advances `pushRev` past the rev it just sent
+   — but only when there were no unpushed local writes interleaved
+   in the meantime, so an apply that races a local mutation doesn't
+   strand the local write. This post-apply `pushRev` advancement
+   (introduced in `dc692c0`) is what keeps the container's own apply
+   from bouncing the same entries straight back on the next pull.
 2. **Hydrate.** Lazy-mount stubs the command might touch are fetched
    from their providers and included in the same push batch. See
    [06. Mount Interface](./06_mount_interface.md).
 3. **Exec.** The command runs. FUSE writes are captured by the
    in-container VFS as they happen, each stamped with a fresh revision.
-4. **Fetch.** The DO calls `fetchChanges(sinceRev = fetchRev)`. The
+4. **Fetch.** The DO calls `fetchChanges({ sinceRev: fetchRev })`. The
    container streams `ChangeEntry` records — one per touched path,
    per-file entries carrying `chunks: (hash, size)[]`. No bytes
-   inline. The DO consumes entries as they arrive so peak memory
-   stays bounded regardless of how much the exec touched.
+   inline.
 5. **Diff.** The DO unions all chunk hashes from the entry stream,
    probes its own `vfs_blobs` for which it already has, and calls
    `fetchObjects` for the missing subset.
-6. **Apply.** Entries + new objects land in the DO's SQLite **in
-   bounded transactions** (default cap: 64 MiB of new bytes or 1024
-   paths, whichever first). `fetchRev` advances per committed batch
-   so a crash mid-fetch resumes cleanly via `sinceRev = fetchRev` on
-   the next call. After the final batch the DO advances `fetchRev`
-   to the container's reported max revision.
+6. **Apply.** Entries + new objects land in the DO's SQLite. The
+   shipped `applyChanges` helper tracks `bytesInBatch` / `pathsInBatch`
+   counters against a 64 MiB / 1024-path cap, but the cap currently
+   only **resets the counters** — the real durability boundary is the
+   per-mutation `transactionSync` inside each `writeFile`/`mkdir`/`rm`/
+   `symlink`. `fetchRev` is written **once at the end of the stream**,
+   to the remote `currentRev` captured at the start of the pull. A
+   crash mid-fetch resumes from the previous `fetchRev` and re-fetches
+   the whole batch (the apply is idempotent, so the end state is
+   correct).
+   *Roadmap (`PLAN.md` → Important):* consume the entry stream as it
+   arrives instead of buffering, wrap each batch in a real transaction,
+   and commit `fetchRev` per batch so a DO restart mid-pull resumes
+   minimally.
 
 `writeFile` / `mkdir` / `rm` outside of `exec()` follow the same shape:
 step 1 is "this single change", steps 3–6 are skipped. `workspace.push()`
@@ -97,22 +106,32 @@ one name.
 | `fetchRev` | DO | Last container-side `rev` the DO has fetched. |
 | `currentRev` | DO | Latest `rev` stamped on a DO-side mutation. |
 | `currentRev` | Container | Latest `rev` stamped on a container-side mutation. |
-| `appliedPushRev` | Container | Largest DO `rev` the container has fully applied. Echoed on every push response and pull stream. |
+| `appliedPushRev` | Container | Largest DO `rev` the container has fully applied. Echoed on every **push** response. |
 
 The DO watermarks live in the `_vfs_watermark` table so they survive DO
-restarts. The container's revisions are in-memory only; if the container
-restarts, the next push from the DO is treated as an authoritative
-baseline.
+restarts. The container's watermarks live in the same `Database`
+abstraction; whether they survive a container restart is a deployment
+choice. Today's `wsd` runs against a process-lifetime DB, so a container
+restart loses local watermarks and the next push from the DO is treated
+as an authoritative baseline (the `senderRev === 0` branch below covers
+the symmetric case where an external orchestrator writes against a
+fresh receiver).
 
 ### Cross-side invariant
 
-Every `fetchChanges` and `push` response carries the container's
-current `appliedPushRev`. The DO asserts `appliedPushRev >= pushRev` on
-every response. The two sides never share a single clock, but echoing
-the largest applied DO rev makes the "container is caught up with the
-DO's pushes" invariant inspectable on the wire instead of load-bearing
-in-process state. A regression in the suppress-dirty-tracking apply path
-trips the assertion immediately rather than corrupting data silently.
+After every successful `push`, the response carries the container's
+current `appliedPushRev`. The DO asserts `appliedPushRev >= pushRev`
+before continuing. The two sides never share a single clock, but
+echoing the largest applied DO rev makes the "container is caught up
+with the DO's pushes" invariant inspectable on the wire instead of
+load-bearing in-process state. A regression in the post-apply
+`pushRev` advancement path (see step 1 above) trips the assertion
+immediately rather than corrupting data silently.
+
+*Revisit (`PLAN.md` → Revisit):* attach `appliedPushRev` to the
+`fetchChanges` response as well, and assert the same invariant on
+the pull path. Today the symmetric check is missing — `ChangeEntry`
+carries no `appliedPushRev` field and the pull path does no assertion.
 
 ## Wire shape
 
@@ -123,11 +142,30 @@ objects to the container, and *fetches* entries and objects back.
 
 | RPC | Direction | Returns | Notes |
 | --- | --- | --- | --- |
-| `push` | DO → container | `{ rev, appliedPushRev }` | Streams a coalesced batch of `ChangeEntry`. Container calls `hasObjects` on referenced hashes; DO follows up with `pushObjects` for the missing subset. |
-| `fetchChanges(sinceRev?, ignore?)` | container → DO | `ReadableStream<ChangeEntry>` | Streams one entry per touched path. For files, `chunks: (hash, size)[]` (no bytes inline); for dirs, metadata; for deletes, a tombstone. Each entry carries the container's `appliedPushRev`. |
-| `hasObjects(hashes[])` | either side probes the other | `Uint8Array[]` | Returns the subset of the input the receiver already holds. The git `have` line, batched. |
+| `push({ senderRev, changes })` | DO → container | `{ rev, appliedPushRev }` | Streams a coalesced batch of `ChangeEntry` via the `changes` `ReadableStream`. The sender then calls `hasObjects` on the referenced hashes and follows up with `pushObjects` for the missing subset. See the `senderRev` branches below. |
+| `fetchChanges({ sinceRev?, ignore? })` | container → DO | `ReadableStream<ChangeEntry>` | Streams one entry per touched path. For files, `chunks: (hash, size)[]` (no bytes inline); for dirs, metadata; for deletes, a tombstone. |
+| `hasObjects(hashes[])` | sender probes receiver | `Uint8Array[]` | Returns the subset of the input the receiver already holds. The git `have` line, batched. |
 | `fetchObjects(hashes[])` | container → DO | `ReadableStream<{ hash, bytes }>` | Streams chunk bytes by hash. The git `want`/pack response on the fetch path. |
 | `pushObjects(objects)` | DO → container | `void` | Streams chunk bytes by hash. The push-direction mirror of `fetchObjects`. |
+
+### `senderRev` semantics on `push`
+
+`push` is called by two kinds of writers and the `senderRev` field
+discriminates them (see commits `dc692c0` and `c95c74d` for the
+load-test rationale):
+
+- **`senderRev > 0` — sync peer.** A DO calling its container counterpart
+  (or vice versa). The receiver applies the batch as `upstream`,
+  advances its own `fetchRev` to `senderRev`, and on the *sender's*
+  side `pushRev` is advanced past the rev just shipped (gated on no
+  interleaved local writes — see step 1 above).
+- **`senderRev === 0` — external writer / fresh receiver.** Used by
+  external orchestrators (and as the implicit shape when a fresh
+  receiver has no watermarks yet). The receiver applies as `local`,
+  bumps its own `currentRev` per entry, and leaves its outbound
+  watermarks alone so the next sync loop ships the new entries
+  onward. Without this branch the receiver would silence its own
+  outbound sync after an external write — see `c95c74d`.
 
 Identical content at multiple paths (or unchanged chunks within an
 edited file) shows up exactly once on the wire. See
@@ -137,24 +175,33 @@ edited file) shows up exactly once on the wire. See
 
 - **Container restart mid-exec.** The DO's connection detects the
   closed WebSocket and self-destructs. The next call transparently
-  rebuilds against the still-running workspace-server (or restarts it
-  if needed). `pushRev` and `fetchRev` mean the catch-up is incremental.
-- **Container crash mid-apply.** `push` is atomic from the DO's
-  perspective. The container is permitted to lose all state on crash;
-  the next push treats the container as empty (`appliedPushRev = 0`).
-  Partial application must not survive a crash. Today the in-memory
-  VFS satisfies this trivially — the process dies and restarts empty.
-  A future on-disk container mirror will need a staging-dir-then-rename
-  or WAL to preserve the same invariant.
-- **DO restart mid-pull.** `fetchRev` advances per committed apply batch,
-  so the new DO instance resumes from the last durably-committed batch
-  via `fetchChanges(sinceRev = fetchRev)`.
+  rebuilds against the still-running `wsd` (or restarts it if needed).
+  `pushRev` and `fetchRev` mean the catch-up is incremental, modulo
+  whatever the container's deployment chose for its DB lifetime.
+- **Container crash mid-apply.** From the DO's perspective `push` is
+  ideally atomic on the receiver; the shipped `applyChanges` runs
+  per-mutation transactions today (not a single wrapping transaction),
+  so a crash mid-apply can leave the receiver partially applied.
+  Today's process-lifetime container DB sidesteps the issue trivially
+  — the process dies and the next push re-baselines from
+  `appliedPushRev = 0`. *Roadmap (`PLAN.md` → Important):* once an
+  on-disk container mirror lands, wrap apply in a single transaction
+  (or staging-then-rename equivalent) so the "atomic from the DO's
+  perspective" guarantee actually holds on the wire.
+- **DO restart mid-pull.** `fetchRev` is single-write at end of stream
+  today, so a DO restart mid-pull resumes from the previous `fetchRev`
+  and re-fetches the entire in-flight batch. End state is correct
+  (apply is idempotent). *Roadmap (`PLAN.md` → Important):* advance
+  `fetchRev` per committed batch so the resume is minimal.
 - **DO restart.** Watermarks are persisted, so the new DO instance
-  picks up where the old one left off. The container keeps the
-  workspace-server process alive across the gap.
-- **Concurrent mutators.** The DO serializes mutating entry points
-  (`exec`, `writeFile`, `mkdir`, `rm`, `push`, `pull`) through a per-
-  Workspace FIFO queue. Pure reads stay outside the queue.
+  picks up where the old one left off. The container keeps `wsd`
+  alive across the gap.
+- **Concurrent mutators.** *Planned invariant (`PLAN.md` → Important):*
+  the DO serializes mutating entry points (`exec`, `writeFile`, `mkdir`,
+  `rm`, `push`, `pull`) through a per-Workspace FIFO queue; pure reads
+  stay outside the queue. No FIFO is currently visible in
+  `packages/dofs/src/sync/*` or `packages/rpc/src/sync-driver.ts` —
+  this section describes the target, not what `main` enforces today.
 
 ## Ignore lists
 
@@ -166,8 +213,10 @@ directory of derived files: `node_modules`, `.next`, `target`,
 push tens of thousands of small files through the sync wire on the
 next pull.
 
-The default is `["node_modules"]`. Pass `[]` to disable, or your own
-list to extend.
+The default is `["node_modules"]`, applied server-side when `ignore` is
+omitted. A caller-supplied list **replaces** the default — it does not
+extend it. Pass `[]` to disable ignoring entirely, or pass your full
+list (including `"node_modules"` if you still want it) to customise.
 
 ### Ignored entries
 
@@ -217,8 +266,8 @@ needed; pure DO-side optimisation.
 ### Push backpressure
 
 A long-running exec can dirty container state faster than the DO can
-pull. Today the in-memory container VFS caps this by OOMing, which is
-a bad answer. Once a disk-backed container mirror lands the bound
+pull. Today's process-lifetime container VFS caps this by OOMing, which
+is a bad answer. Once a disk-backed container mirror lands the bound
 shifts to path count, but the same problem persists. Likely shape: a
 soft cap on the dirty set (say, 256 MiB pending bytes or 100k paths)
 above which FUSE write replies are delayed (real backpressure into the

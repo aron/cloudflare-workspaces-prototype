@@ -1,12 +1,12 @@
 # 03. Filesystem Schema
 
-> [!IMPORTANT]
-> This document describes the **intended design** and has **diverged
-> from the current implementation** in the repository. Names,
-> signatures, and behaviours described here are targets, not what
-> `main` ships today. When in doubt, treat the code as authoritative
-> for what runs and this doc as authoritative for what we're moving
-> toward.
+> [!NOTE]
+> This document describes the **target design** for the VFS schema.
+> The DDL blocks below — every table, column, index, default, and
+> check constraint — match what `main` ships today. A handful of
+> behaviours layered on top of the schema (manifest binary encoding,
+> `vfs_changes` pruning, `_vfs_mounts` usage) are forward-looking
+> and called out inline.
 
 The VFS lives in the Durable Object's SQLite. Every read and write
 ultimately hits one of these tables. All tables are prefixed with
@@ -54,6 +54,7 @@ CREATE TABLE vfs_nodes (
   manifest_hash BLOB,                                -- references vfs_manifests.hash
   link_target   TEXT                                 -- non-null when type = 'symlink'
 );
+CREATE INDEX vfs_nodes_by_rev ON vfs_nodes(rev);
 ```
 
 One row per live inode. `mount_root` records the mount this row
@@ -61,6 +62,11 @@ originated from, used for write-rejection and writable-mount mirroring.
 `stub_size` is non-null while the file is a lazy-mount stub whose
 bytes haven't been fetched yet — `stat()` reports it as the file size
 and the first read fetches the bytes.
+
+The `vfs_nodes_by_rev` index supports `coalesceChanges`'s
+`WHERE rev > sinceRev` scan over live inodes, which the sync protocol
+calls once per pull to enumerate everything modified since the last
+fetch watermark.
 
 There is no `ignored` column: ignored paths are entirely invisible to
 the DO-side filesystem API (see
@@ -131,9 +137,10 @@ lets the manifest pull resolve "which inodes share this blob" quickly.
 
 ```sql
 CREATE TABLE vfs_manifests (
-  hash    BLOB    PRIMARY KEY,    -- sha256(encoded)
-  size    INTEGER NOT NULL,        -- total file size in bytes
-  encoded BLOB    NOT NULL         -- 0x01 || repeated (32-byte hash || varint offset || varint size)
+  hash      BLOB    PRIMARY KEY,             -- sha256(encoded)
+  size      INTEGER NOT NULL,                -- total file size in bytes
+  encoded   BLOB    NOT NULL,                -- ordered chunk list (see below)
+  last_seen INTEGER NOT NULL DEFAULT 0       -- ms since epoch; touched on every ref (GC clock)
 );
 ```
 
@@ -141,6 +148,28 @@ A manifest is the ordered `(chunk hash, size)` list for one file. Files
 with identical content share a manifest hash (and thus avoid being
 re-uploaded over the sync wire). The `manifest_hash` column on
 `vfs_nodes` points here.
+
+`last_seen` is the manifest-side mirror of `vfs_blobs.last_seen`:
+`buildManifest()` refreshes it on every reference, and `gc()` uses it
+to sweep manifests with `last_seen < cutoff`. Storing it on
+`vfs_manifests` itself (rather than only on the referenced blob)
+matters because a manifest is also a blob, and the GC scan over
+manifests needs the clock directly addressable.
+
+**Encoding.** `encoded` is JSON today:
+
+```json
+{ "version": 1, "chunks": [{ "hash": "<hex>", "size": <n> }, ...] }
+```
+
+The planned phase-4 swap is the casync `.caidx` byte layout
+(`0x01 || repeated (32-byte hash || varint size)`), readable and
+debuggable in the JSON form first, then re-encoded for size. The
+swap is a behaviour change inside `buildManifest()` / `parseManifest()`
+— no schema change. One open question: the original sketch included a
+`varint offset` per chunk, but offsets are recoverable from a prefix
+sum of `size`, so the byte layout most likely should drop it.
+Resolve before the encoding swap lands.
 
 ### `vfs_changes` — tombstones
 
@@ -159,10 +188,15 @@ the incremental push to tell the container "this path is gone". A
 single mutation (e.g. `rm -r`) records one tombstone per removed
 path, all sharing the same `rev` — the bumped value at delete time.
 
-**Pruning.** Rows with `rev <= pushRev` are deleted in the same
-transaction that advances `pushRev` (see
-[02. Sync Protocol](./02_sync_protocol.md#watermarks)). The container
-has acknowledged them; no future pull needs to replay them.
+**Pruning** *(planned; not yet wired)*. The target behaviour is to
+delete rows with `rev <= pushRev` in the same transaction that
+advances `pushRev` (see
+[02. Sync Protocol](./02_sync_protocol.md#watermarks)) — the container
+has acknowledged them, no future pull needs to replay them. Today
+`writeWatermark` only updates `_vfs_watermark`; there is no
+`DELETE FROM vfs_changes` anywhere in the package, so the table grows
+unboundedly with delete activity. Cheap to add once the apply path
+becomes push-atomic; tracked in `PLAN.md`.
 
 ### `_vfs_watermark` — sync state
 
@@ -187,10 +221,13 @@ CREATE TABLE _vfs_mounts (
 );
 ```
 
-Tracks which mounts have been indexed. Once a mount is indexed (its
-directory tree has been listed and stub rows inserted into
-`vfs_nodes`), that fact is persisted so a DO reload doesn't
-re-list.
+*Planned; mount feature not yet implemented — see
+[06. Mount Interface](./06_mount_interface.md).* The schema seat is
+in place so the migration doesn't need to land alongside the mount
+runtime, but no code reads or writes this table yet. When mounts
+ship, the row will record that a mount root has been indexed (its
+directory tree listed and stub rows inserted into `vfs_nodes`) so a
+DO reload doesn't re-list.
 
 ## Invariants
 
@@ -212,11 +249,44 @@ re-list.
 
 ## Garbage collection
 
-`Workspace.gc(safetyWindowMs?)` sweeps `vfs_blobs` and
-`vfs_manifests` for rows with no live references and a `last_seen`
-older than the safety window (default conservative). Cascaded
-`vfs_blob_bytes` rows are deleted with their parent. It returns
+GC is exposed as a free function from the package's internal `fs/gc.ts`
+module, not as a method on the host workspace class:
+
+```ts
+import { gc } from "./fs/gc";
+
+const { manifestsFreed, blobsFreed } = gc(db, {
+  now: () => Date.now(),       // optional, injectable for tests
+  safetyWindowMs: 60_000,      // optional; conservative default
+});
+```
+
+It sweeps `vfs_blobs` and `vfs_manifests` for rows with no live
+references and a `last_seen` older than the safety window. Cascaded
+`vfs_blob_bytes` rows are deleted with their parent blob. Returns
 `{ manifestsFreed, blobsFreed }`.
+
+Maintainer decision: `gc()` stays internal for now. There is no
+`Workspace.gc()` on the public surface — agents don't drive collection
+directly, and the function shape (with an injectable `now`) is chosen
+for testability rather than as a public API. Revisit if a real caller
+needs to trigger collection explicitly.
+
+## Symlinks
+
+The schema seats for symlinks are already shipped: `vfs_nodes.type`
+accepts `'symlink'`, and `vfs_nodes.link_target TEXT` carries the
+link's target string. FS-layer support exists too — `fs/symlink.ts`
+and `fs/readlink.ts` implement the primitives, and `fs/resolve.ts`
+enforces an `ELOOP` cap during path resolution.
+
+Maintainer decision: symlinks stay an **internal-only** primitive,
+used by the `node:vfs` adapter to back constructs like `pnpm`'s
+`node_modules` layout or `node_modules/.bin`. They are not exposed
+on `WorkspaceFilesystem`; agent-facing code calling
+`workspace.fs.symlink(...)` or `workspace.fs.readlink(...)` is not
+supported, and the surface intentionally stops at file/dir
+operations. See doc 04 for the rationale.
 
 ## Future considerations
 
@@ -289,21 +359,13 @@ Files written under different strategies just don't share chunks with
 each other, which is the same behaviour as files written with
 different fixed chunk sizes today.
 
-### Symlinks and xattrs
+### Extended attributes
 
-The current `vfs_nodes` `type` is restricted to `'file' | 'dir'`,
-and there is no place to hang per-inode metadata beyond `mode` and
-`mtime`. Real tooling leans on both:
-
-- **Symlinks.** `pnpm`'s `node_modules` layout, `node_modules/.bin`,
-  many build outputs.
-- **Extended attributes.** `setcap`, macOS quarantine flags, some
-  language toolchains.
-
-A future iteration would add `'symlink'` to the `type` check and a
-`link_target TEXT` column on `vfs_nodes`, plus a separate
-`vfs_xattrs(inode, key, value)` table. Both are additive; neither
-is required for the initial agent workloads.
+The schema has no place to hang per-inode metadata beyond `mode` and
+`mtime`. Real tooling occasionally leans on xattrs: `setcap`, macOS
+quarantine flags, some language toolchains. A future iteration would
+add a separate `vfs_xattrs(inode, key, value)` table. Additive; not
+required for the initial agent workloads.
 
 ### Prior art and selective reuse
 
@@ -334,7 +396,7 @@ against. Mapping our tables onto AgentFS:
 | `fs_inode` | `vfs_nodes` | Same role. AgentFS carries `nlink`, `uid`/`gid`, `rdev`, separate `atime`/`mtime`/`ctime` with `_nsec` columns. We carry `mtime` only plus content-sync columns (`rev`, `mount_root`, `stub_size`, `manifest_hash`). |
 | `fs_dentry` | `vfs_dirents` | Same role. AgentFS adds a surrogate `id INTEGER PRIMARY KEY AUTOINCREMENT`; we use the composite `(parent_inode, name)` directly. |
 | `fs_data` | `vfs_chunks` + `vfs_blobs` + `vfs_blob_bytes` | **Fundamental divergence.** AgentFS stores chunks as `(ino, chunk_index)` rows with the bytes inline — no content addressing, no dedup. Our split into hash-keyed blob metadata, blob bytes, and an `inode`-keyed chunk map is what makes the sync protocol's incremental transfer work. |
-| `fs_symlink` | (not yet implemented) | AgentFS has a clean answer; our Future-considerations item should adopt the same `(ino, target)` shape. |
+| `fs_symlink` | `vfs_nodes.link_target` | We inline the target on the inode row rather than a side table; the data is the same. |
 | `fs_config` | `vfs_meta` | Same role. |
 | `fs_whiteout`, `fs_origin` | (no equivalent) | Overlay/COW semantics. Not needed today; potentially interesting if read-only mount overlays grow up. |
 | (no equivalent) | `vfs_manifests` | Content-addressed per-file chunk list; required by our sync protocol. |
@@ -360,13 +422,10 @@ problems than ours and don't fit our domain.
 Two concrete borrows, no runtime dependency:
 
 1. **Adopt AgentFS metadata fields where they cleanly map.** When
-   symlinks land (Future considerations → Symlinks and xattrs), use
-   AgentFS's `fs_symlink` shape — `(ino INTEGER PRIMARY KEY, target
-   TEXT NOT NULL)`. When xattrs land, use their pattern. When
-   nanosecond timestamps matter, mirror `*_nsec` columns rather than
-   inventing our own encoding. POSIX `mode` bit semantics, `nlink`,
-   `uid`/`gid`/`rdev`: align with their definitions even if we don't
-   surface every field today.
+   xattrs land, use their pattern. When nanosecond timestamps matter,
+   mirror `*_nsec` columns rather than inventing our own encoding.
+   POSIX `mode` bit semantics, `nlink`, `uid`/`gid`/`rdev`: align with
+   their definitions even if we don't surface every field today.
 2. **Document the divergence and the integration path.** A
    `vfs_*` workspace lives happily alongside an AgentFS database
    in the same DO storage (different prefixes), so an agent could

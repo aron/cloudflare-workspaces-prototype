@@ -1,103 +1,231 @@
 # 10. Project Layout
 
-> [!IMPORTANT]
-> This document describes the **intended design** and has **diverged
-> from the current implementation** in the repository. Names,
-> signatures, and behaviours described here are targets, not what
-> `main` ships today. When in doubt, treat the code as authoritative
-> for what runs and this doc as authoritative for what we're moving
-> toward.
+> NOTE: This doc reflects the real monorepo layout. Packages marked
+> **(planned)** are not yet implemented; see `PLAN.md`.
 
-The workspace ships as a monorepo. The package itself lives in
-`packages/workspace`; the agent-facing tooling sits alongside it.
+The workspace ships as a monorepo. Each published package lives under
+`packages/`; runnable examples sit under `examples/`. The repo-root
+`package.json` declares the workspaces glob:
+
+```json
+{
+  "workspaces": ["packages/*", "examples/*"]
+}
+```
 
 ```
 workspace/
 ├── packages/
-│   ├── workspace/         # @cloudflare/workspace — VFS + container sync
-│   ├── fs-tools/          # @cloudflare/fs-tools — AI SDK read/write/edit/grep/exec tools
-│   ├── git-tools/         # Git-related agent tools
-│   └── internal/          # Cross-package shared types and helpers
+│   ├── workspace/         # @cloudflare/workspace — DO-side facade, backends, proxy
+│   ├── vfs/               # @cloudflare/dofs — SQLite-backed VFS + sync
+│   ├── rpc/               # @cloudflare/workspace-rpc — capnweb wire interface
+│   ├── wsd/               # @cloudflare/workspace-wsd — in-container daemon (binary)
+│   ├── fs-tools/          # (planned) AI SDK file tools + FileStore
+│   └── git-tools/         # (planned) AI SDK git tools
+├── examples/
+│   └── wsd-container/     # Reference container image for the wsd daemon
 ├── docs/                  # This documentation set
-└── package.json           # Workspace root
+├── PLAN.md                # Implementation roadmap
+└── package.json           # Workspace root (workspaces: packages/*, examples/*)
 ```
 
-## `packages/workspace`
+### Folder rename history
 
-The production implementation of the package documented in this set.
+Two renames have landed:
+
+- `packages/workspace-rpc/` → `packages/rpc/` (folder only). The npm
+  package is still `@cloudflare/workspace-rpc`.
+- `packages/workspace-fs/` → `packages/dofs/`, and the npm package
+  was renamed `@cloudflare/workspace-fs` → `@cloudflare/dofs`.
+
+If you grep older history or other docs and find the old folder paths,
+they refer to the same code under the new names.
+
+## `packages/workspace/` — `@cloudflare/workspace`
+
+The DO-side facade. Owns the `Workspace` class, re-exports
+`WorkspaceFilesystem` from `@cloudflare/dofs`, exposes the
+`WorkspaceShell` surface, and selects between pluggable backends
+(real Cloudflare container vs. test backend). Also ships the
+`WorkspaceProxy` used by clients that want to talk to a workspace
+through an RPC stub.
 
 ```
 packages/workspace/
 ├── src/
-│   ├── index.ts                     # Public entrypoint: Workspace, mounts, types
-│   ├── workspace.ts                 # Workspace class — DO-side facade
-│   ├── vfs.ts                       # SQLite-backed VFS (schema, migrations, IO)
-│   ├── path.ts                      # Path parsing and canonicalization
-│   ├── serialize.ts                 # Per-Workspace FIFO mutex
-│   ├── pull-assembly.ts             # Manifest pull: hash union, byte assembly
-│   ├── container-connection.ts      # DO-side capnweb client
-│   ├── container-startup.ts         # workspace-server probe / start / wait logic
-│   ├── shared/                      # Wire types and ContainerRPC interface
-│   ├── mounts/                      # Built-in mount providers and the Mount API
-│   └── container-sandbox/           # Bundled into the published `ws.js`
-├── examples/                        # Minimal usage examples
-├── scripts/                         # Build pipeline (esbuild + tsc)
-└── package.json                     # Two exports: `.` and `/shared`
-```
-
-Tests live next to the source they cover — `vfs.ts` sits beside
-`vfs.test.ts`, `mounts/r2.ts` beside `mounts/r2.test.ts`, and so on.
-Cross-cutting integration tests that exercise multiple packages or
-require a sandbox harness live in `tests/` at the package root.
-
-### Build outputs
-
-`npm run build` produces, in `dist/`:
-
-- `index.js` + `.d.ts` — the DO-side entrypoint.
-- `ws.js` — the injected service. A single pre-built script, ready to
-  `COPY` into a sandbox image (see
-  [07. Injected Service](./07_injected_service.md)).
-- `shared.js` + `shared/index.d.ts` — wire types and `ContainerRPC`.
-
-## `packages/fs-tools`
-
-AI SDK tools (`read`, `write`, `edit`, `grep`, `exec`) plus the
-`FileStore` abstraction the file-shaped ones drive. See
-[09. Tool Interface (Agents)](./09_tool_interface.md).
-
-```
-packages/fs-tools/
-├── src/        # tools, stores, diff helpers (tests live alongside)
+│   ├── index.ts                     # Public entrypoint
+│   ├── workspace.ts                 # Workspace facade
+│   ├── shell.ts                     # WorkspaceShell
+│   ├── backend.ts                   # Backend interface
+│   ├── backends/
+│   │   ├── cloudflare-container.ts  # Production backend
+│   │   └── test.ts                  # In-process test backend
+│   ├── proxy.ts                     # WorkspaceProxy
+│   ├── proxy-stub.ts                # Client-side stub plumbing
+│   ├── stub.ts                      # DO stub helpers
+│   ├── test-harness-worker.ts       # Worker entrypoint for the harness
+│   └── test-harness/                # Integration test wiring
+├── tsconfig.json
+├── tsconfig.build.json              # ESM build (extends ./tsconfig.json)
+├── tsconfig.cjs.json                # CJS build
 └── package.json
 ```
 
-## `packages/git-tools`
+Build: dual ESM + CJS via two `tsc` invocations
+(`tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json`). The
+`package.json` declares a single `.` export resolving to
+`dist/cjs/index.js` (CJS) with ESM types alongside. There is no
+`ws.js` or `shared.js` — the injected service is the separate `wsd`
+package, and shared wire types live in `@cloudflare/workspace-rpc`.
 
-Git-related agent tools (clone, branch inspection, diff). Same shape
-as `fs-tools` — `src/` with tests alongside.
+## `packages/dofs/` — `@cloudflare/dofs`
 
-## `packages/internal`
+SQLite-backed virtual filesystem. Holds the schema, sync primitives,
+and the filesystem verbs that everything else builds on. See doc 04
+for the surface, and docs 02–03 for sync semantics.
 
-Cross-package types and helpers used by the other packages. Not
-published; treat it as an implementation detail of the monorepo.
+```
+packages/dofs/
+├── src/
+│   ├── index.ts                     # Public entrypoint (`.` export)
+│   ├── provider.ts                  # VFS provider
+│   ├── path.ts                      # Canonicalization, parsing
+│   ├── rev.ts                       # Revision / version helpers
+│   ├── errors.ts                    # Typed errors
+│   ├── storage.ts                   # SQLite storage layer
+│   ├── types.ts                     # Shared VFS types
+│   ├── testing.ts                   # `./testing` export
+│   ├── testing-recording.ts         # Recording test harness
+│   ├── gc.ts                        # Garbage collection helper
+│   ├── fs/                          # fs verbs: readFile, writeFile, ls,
+│   │                                #   find, grep, stat, rm, mkdir,
+│   │                                #   readdir, symlink, readlink,
+│   │                                #   watch, resolve, filesystem
+│   ├── schema/                      # core schema + sync schema
+│   └── sync/                        # manifests, changes, push, fetch,
+│                                    #   apply, watermarks, blobs,
+│                                    #   coalesce, ignore, invariant
+├── tsconfig.json
+├── tsconfig.build.json
+└── package.json                     # exports: `.`, `./testing`
+```
+
+Exports resolve to `dist/index.js` and `dist/testing.js`.
+
+## `packages/rpc/` — `@cloudflare/workspace-rpc`
+
+The capnweb wire interface that joins DO-side and container-side
+processes. `WorkspaceRPC` is the union of the sync and shell
+interfaces. Client and server stubs are published as separate
+subpath exports, and the sync driver wires the VFS to the wire.
+
+```
+packages/rpc/
+├── src/
+│   ├── interface.ts                 # WorkspaceRPC = sync + shell
+│   ├── client.ts                    # Client stub (`./client`)
+│   ├── server.ts                    # Server stub (`./server`)
+│   ├── sync-driver.ts               # Sync driver (`./driver`)
+│   ├── wire.test.ts                 # Wire round-trip tests
+│   └── index.ts                     # `.` export
+├── tsconfig.json
+├── tsconfig.build.json
+└── package.json                     # exports: `.`, `./server`, `./client`, `./driver`
+```
+
+## `packages/wsd/` — `@cloudflare/workspace-wsd`
+
+The in-container daemon. Built as a single-file native binary named
+`wsd` that runs inside the sandbox container. It owns the FUSE
+mount, the exec runner, and dials back to the DO over WebSocket via
+the `rpc` package. (Replaces the historical `ws.js` injected script;
+see doc 07.)
+
+
+```
+packages/wsd/
+├── src/
+│   ├── cli/
+│   │   └── wsd.ts                   # CLI entry
+│   ├── fuse/
+│   │   ├── driver.ts
+│   │   ├── backend.ts
+│   │   ├── vfs.ts
+│   │   ├── fuse-native.d.ts         # fuse-native typings
+│   │   └── index.ts
+│   └── exec/
+│       ├── runner.ts
+│       ├── schema.ts
+│       ├── types.ts
+│       ├── log.ts
+│       └── index.ts
+├── scripts/
+│   ├── build.mjs                    # → dist/cli/wsd.cjs
+│   ├── build-bin.mjs                # SEA driver
+│   └── sea/
+│       └── bundle.mjs               # esbuild → SEA bundle
+├── artifacts/
+│   └── wsd/
+│       ├── wsd-linux-x64
+│       └── wsd-macos-x64
+├── tsconfig.json
+└── package.json
+```
+
+Build pipeline: `scripts/build.mjs` emits `dist/cli/wsd.cjs`;
+`scripts/build-bin.mjs` together with `scripts/sea/bundle.mjs`
+produces the Node SEA single-file binary at
+`artifacts/wsd/wsd-{linux,macos}-x64`.
+
+## `packages/fs-tools/` — **(planned)**
+
+AI SDK tools (`read`, `write`, `edit`, `grep`, `exec`) plus the
+`FileStore` abstraction the file-shaped ones drive. See
+[09. Tool Interface (Agents)](./09_tool_interface.md). Not
+implemented yet; tracked in `PLAN.md`.
+
+## `packages/git-tools/` — **(planned)**
+
+Sibling of `fs-tools` for git workflows (clone, branch inspection,
+diff). Not implemented yet; tracked in `PLAN.md`.
+
+## Examples
+
+Runnable examples live at the repo root, not inside any package:
+
+```
+examples/
+└── wsd-container/        # Reference container image for wsd
+```
+
+The root `package.json` includes `examples/*` in its workspaces glob
+so each example can declare its own dependencies and scripts.
 
 ## Testing
 
-- **Unit tests.** `vitest`, with tests living alongside the source
-  they cover (`foo.ts` next to `foo.test.ts`).
-- **Integration tests.** Cross-package and sandbox-driven scenarios
-  live in each package's `tests/` directory. End-to-end coverage uses
-  a dedicated harness that boots a real sandbox container and exercises
-  the full DO ↔ container round-trip.
+- **Unit tests live next to source.** Every package follows the
+  `foo.ts` + `foo.test.ts` convention. There is no top-level
+  `tests/` directory anywhere in the repo.
+- **Integration / harness tests** for the workspace package live in
+  `packages/workspace/test-harness/`:
+  - `end-to-end.test.ts` — DO ↔ container round-trip
+  - `shell.test.ts` — shell surface against a real backend
+  - `load.bench.ts` — load / soak benchmark
+  - `run-harness.sh` — driver script
+  - `vitest.config.harness.ts` — bespoke vitest config for the harness
 
 ## Tooling
 
-- **TypeScript.** `tsc` is the source of truth for types and the
-  build. Every package has a `tsconfig.json` extending the workspace
-  root config.
-- **Biome.** Linting and formatting are handled by
-  [Biome](https://biomejs.dev/) (`biome check`, `biome format`). No
-  ESLint, no Prettier. The root config is shared across every package.
-- **esbuild.** Used to produce the single-file `ws.js` bundle for the
-  injected service. Application bundling is left to consumers.
+- **TypeScript.** Each package has its own `tsconfig.json` — there
+  is no shared root config. Per-package `tsconfig.build.json` files
+  extend `./tsconfig.json` to configure the build output.
+- **Biome.** Both linter and formatter are enabled in `biome.jsonc`
+  at the repo root (`biome check` covers lint + format; `biome
+  format` formats only). No ESLint, no Prettier. The linter was
+  previously disabled; it was turned back on per `PLAN.md`.
+- **esbuild.** Used by `packages/wsd/scripts/sea/bundle.mjs` to
+  produce the single-file `wsd` SEA bundle. Application bundling is
+  left to consumers.
+- **vitest.** Drives unit tests in every package. `wsd` additionally
+  uses `node --experimental-strip-types --test` for some scripts
+  given its native-binary nature.

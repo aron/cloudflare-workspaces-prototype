@@ -1,32 +1,31 @@
 # 08. Capnweb Interface
 
-> [!IMPORTANT]
-> This document describes the **intended design** of the capnweb wire
-> interface and has **diverged from the current implementation** in
-> the repository. RPC names, type names (`ChangeEntry`, `hasObjects`,
-> `fetchObjects`, `pushObjects`, `push`, `fetchChanges`), and the
-> unification of push/fetch on a single `ChangeEntry` type are
-> targets, not what `main` ships today. When in doubt, treat the code
-> as authoritative for what runs and this doc as authoritative for
-> what we're moving toward.
+> [!NOTE]
+> This doc now reflects shipped code in `packages/rpc/`. Items marked
+> **(planned)** are roadmap targets tracked in `PLAN.md`.
 
 [capnweb](https://github.com/cloudflare/capnweb) is the RPC framing used
-between the Durable Object and the in-container workspace-server. The
-wire format is text JSON over a single WebSocket. The interface served
-is `ContainerRPC`, defined in `src/shared/index.ts` and consumed by both
-sides.
+between the Durable Object and the in-container `wsd` workspace-server.
+The wire format is text JSON over a single WebSocket (with an HTTP-batch
+alternative). The interface served is `WorkspaceRPC`, defined in
+`packages/rpc/src/interface.ts` and consumed by both sides.
 
 ## Transport
 
 - **Carrier.** One long-lived WebSocket per Workspace. The DO opens it
-  with an HTTP request to the workspace-server's `/rpc` endpoint
-  (default port 4567) carrying a `Connection: Upgrade` header. See
-  [07. Injected Service](./07_injected_service.md) for the boot
-  sequence.
-- **Framing.** capnweb text frames. Binary frames are rejected — the
-  server fails the session loudly on the first binary message.
-- **Streams.** `ReadableStream<Uint8Array>` is a first-class capnweb
-  value, used for the bulk-pull blob and the `exec` event stream.
+  against the workspace-server's `/ws` endpoint, with `/api` available
+  as an HTTP-batch alternative (single POST per call) for callers that
+  can't hold a socket. Default port is `45678`; it will become a
+  build-time variable so hosts can pin a non-default port. The stale
+  `/rpc` comment at `packages/rpc/src/client.ts:18` is scheduled for
+  cleanup (PLAN.md TODO-code).
+- **Framing.** capnweb text frames. Binary frames are unsupported.
+  **(planned)** the server will fail the session loudly on the first
+  binary message (PLAN.md TODO-code); today the behaviour is
+  unspecified.
+- **Streams.** `ReadableStream<…>` is a first-class capnweb value, used
+  for `ChangeEntry` batches, object transfers, and the `exec` event
+  stream.
 - **Reconnect.** On close or error the DO-side connection
   self-destructs synchronously from the event handler. The next RPC
   call transparently rebuilds against the still-running
@@ -34,97 +33,163 @@ sides.
 
 The DO uses a deferred transport so the RPC stub can be created before
 the WebSocket upgrade completes — queued sends flush as soon as the
-socket is ready. Mirrors the pattern from `@cloudflare/sandbox`'s
-`ContainerControlConnection`.
+socket is ready.
 
-## `ContainerRPC`
+## `WorkspaceRPC`
+
+The wire surface is split into two halves composed under one root stub:
 
 ```ts
-interface ContainerRPC {
-  // Full snapshot of the container's tree. Used as a baseline only when
-  // the DO has no watermark (e.g. fresh sandbox).
-  snapshot(): Promise<{ entries: VFSEntry[]; rev: number }>;
+export interface WorkspaceRPC {
+  sync:  SyncRPC;
+  shell: ShellRPC;
+}
+```
 
+Both halves live in `packages/rpc/src/interface.ts`. The split keeps the
+sync surface independently testable from process supervision while the
+wire still exposes a single stable stub. Host-side callers reach each
+half via `.sync` / `.shell`.
+
+### `SyncRPC`
+
+```ts
+interface SyncRPC {
   // DO → container. Stream a coalesced batch of changes. Bytes are
   // not inline: the DO sends ChangeEntry records with chunk hashes,
-  // the container calls back via hasObjects / asks for the missing
-  // bytes through pushObjects. Returns the container's new rev and
-  // its appliedPushRev once the batch is durably applied.
-  push(changes: ReadableStream<ChangeEntry>):
-    Promise<{ rev: number; appliedPushRev: number }>;
+  // the receiver calls back via hasObjects / pushObjects for the
+  // missing subset. Returns the receiver's new rev plus the
+  // appliedPushRev it stamped for this batch.
+  push(input: {
+    senderRev: number;
+    changes:   ReadableStream<ChangeEntry>;
+  }): Promise<{ rev: number; appliedPushRev: number }>;
 
-  // Container → DO. Stream every ChangeEntry with rev > sinceRev.
+  // Container ← DO. Stream every ChangeEntry with rev > sinceRev.
   // Per-file entries carry (hash, size) chunk lists; no bytes inline.
-  // Caller follows up with hasObjects / fetchObjects for the chunks
-  // it doesn't already have. Each entry carries the container's
-  // current appliedPushRev.
-  fetchChanges(sinceRev?: number, ignore?: string[]):
-    ReadableStream<ChangeEntry>;
+  fetchChanges(input: {
+    sinceRev?: number;
+    ignore?:   string[];
+  }): ReadableStream<ChangeEntry>;
 
-  // Probe which object hashes the receiver has. Same semantics in
-  // both directions: git's `have` line, batched. Returns the subset
-  // of the input the receiver already holds.
+  // Cheap scalar. Captured by the puller before draining
+  // fetchChanges so the watermark it advances to is consistent
+  // with what the stream actually carried. (planned) collapse
+  // into fetchChanges returning { rev, stream } to drop the
+  // extra round-trip — see the TODO at
+  // packages/rpc/src/interface.ts:48-54.
+  currentRev(): Promise<number>;
+
+  // Diagnostic surface for soak tests, dashboards, and the agent
+  // when it wants to wait for the wire to drain. pushRev /
+  // fetchRev only move when the receiver is acting as a sync
+  // peer; otherwise they sit at 0.
+  watermarks(): Promise<{
+    currentRev: number;
+    pushRev:    number;
+    fetchRev:   number;
+  }>;
+
+  // Materialise a single path as a ChangeEntry without driving
+  // the full fetchChanges stream. Returns null when the path
+  // doesn't exist and hasn't been tombstoned. Used by
+  // interactive readers.
+  readEntry(path: string): Promise<ChangeEntry | null>;
+
+  // Git's `have` line, batched. Returns the subset of the input
+  // the receiver already holds.
   hasObjects(hashes: Uint8Array[]): Promise<Uint8Array[]>;
 
-  // Container → DO direction of object transfer. Stream bytes for
-  // a set of chunk hashes in request order. Throws EUNKNOWN_HASH if
-  // any hash is unknown — callers must dedupe and probe first.
+  // Container → DO direction of object transfer. Throws
+  // EUNKNOWN_HASH if any hash is unknown — callers must dedupe
+  // and probe first. (planned: today the code returns an empty
+  // payload for missing hashes; see PLAN.md TODO-code for
+  // EUNKNOWN_HASH via createWorkspaceError.)
   fetchObjects(hashes: Uint8Array[]):
     ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>;
 
-  // DO → container direction of object transfer. The DO streams the
-  // bytes the container reported missing (via hasObjects) during a
-  // push. Pushed objects are addressable immediately by hash.
-  pushObjects(objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>):
-    Promise<void>;
+  // DO → container direction of object transfer. Accepts a
+  // ReadableStream of { hash, bytes } pairs (not an array) so
+  // the DO can interleave object reads with the wire send and
+  // keep peak memory bounded.
+  pushObjects(
+    objects: ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>
+  ): Promise<void>;
+}
+```
 
-  // Start a command. Returns a handle whose `events` stream yields
-  // stdout / stderr / exit frames as they happen. The stream is the
-  // single source of truth — there is no buffered-return variant.
-  // The handle's id can be passed to `getExec` to reattach to the same
-  // run after a reconnect. See 05_shell_interface.md for the host-side
-  // shape.
+`ChangeEntry` is defined in `packages/dofs/src/sync/changes.ts`. Schema
+column references match [03. Filesystem Schema](./03_filesystem_schema.md).
+
+#### Rev-0 baseline (no separate snapshot)
+
+There is no dedicated `snapshot()` RPC. A fresh DO with no watermark
+calls `fetchChanges({ sinceRev: 0 })`, which streams every live entry
+plus any tombstones the receiver has retained. Treating the baseline as
+a degenerate fetch keeps the wire shape minimal: the same pull path
+covers both cold-start replication and incremental catch-up.
+
+#### Push semantics: peer vs external
+
+`push` distinguishes two callers via `senderRev`:
+
+- **`senderRev > 0` — sync peer.** The sender is replicating its own
+  log forward. The receiver advances `fetchRev` to `senderRev` once
+  the batch settles, echoes it back as `appliedPushRev`, and uses
+  that value to silence the loopback (the next `fetchChanges` from
+  the peer won't replay these entries back at it).
+- **`senderRev === 0` — external orchestrator.** The sender doesn't
+  have a rev space of its own (an agent, a CI script, a one-shot
+  writer). The receiver applies the batch as ordinary local writes,
+  stamps fresh local revs, and leaves `pushRev` untouched.
+
+See SUMMARY §0 'Investigation notes' (commits dc692c0, c95c74d,
+69be34f, aea0f5e, dec176b) for how this shape settled.
+
+### `ShellRPC`
+
+```ts
+interface ShellRPC {
+  // Spawn a command. Returns a handle whose `events` stream
+  // yields stdout / stderr / exit frames. The stream is the
+  // single source of truth — there is no buffered-return
+  // variant. The handle's id can be passed to getExec to
+  // reattach after a reconnect.
   exec(input: {
-    command:   string;
-    cwd?:      string;
-    id?:       string;
-  }): Promise<{
-    id:     string;
-    events: ReadableStream<ExecEvent>;
-  }>;
+    command: string;
+    cwd?:    string;
+    id?:     string;
+  }): Promise<{ id: string; events: ReadableStream<ExecEvent> }>;
 
-  // Reattach to an in-flight or recently-completed exec by id. Pass the
-  // `seq` of the last event the caller already saw to resume from that
-  // point; omit to receive every event from the start of the run; pass
-  // `"tail"` to receive only events produced after the call.
+  // Reattach to an in-flight or recently-completed exec by id.
+  // Pass `after` to resume from a known seq; "tail" yields only
+  // future events; omit to receive every event from the start.
   getExec(input: {
     id:      string;
     after?:  number | "tail";
-  }): Promise<{
-    id:     string;
-    events: ReadableStream<ExecEvent>;
-  }>;
+  }): Promise<{ id: string; events: ReadableStream<ExecEvent> }>;
 
   // Signal a running exec. No-op once the process has exited.
   killExec(input: {
     id:      string;
     signal?: "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP";
   }): Promise<void>;
+
+  // Release the event log for a completed exec. Future getExec
+  // on the same id throws ENOENT.
+  disposeExec(input: { id: string }): Promise<void>;
 }
 
-// All payloads on the wire are binary. The host-side `Workspace.shell`
-// converts to `string` when the caller passes `encoding: "utf8"`. Every
-// event carries a monotonic `seq` (per exec id) so callers can resume
-// from a known point after a disconnect.
 type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
   | { id: string; seq: number; name: "stderr"; value: Uint8Array }
   | { id: string; seq: number; name: "exit";   value: number };
 ```
 
-`VFSEntry` and `ChangeEntry` are defined in
-`src/shared/index.ts`. The schema column references match
-[03. Filesystem Schema](./03_filesystem_schema.md).
+All payloads on the wire are binary. The host-side `Workspace.shell`
+converts to `string` when the caller passes `encoding: "utf8"`. Every
+event carries a monotonic `seq` (per exec id) so callers can resume
+from a known point after a disconnect.
 
 ## Push and fetch semantics
 
@@ -132,69 +197,80 @@ Push and fetch are symmetric. The same `ChangeEntry` shape moves in
 both directions, and the same `hasObjects` probe runs against both
 ends:
 
-- **Push (DO → container).** The DO streams `ChangeEntry` records,
-  the container calls `hasObjects` on the chunk hashes referenced,
-  the DO follows up with `pushObjects` for the missing subset, the
-  container applies the batch and returns `{ rev, appliedPushRev }`.
-- **Fetch (container → DO).** The container streams `ChangeEntry`
-  records, the DO accumulates chunk hashes, calls `hasObjects` on
-  itself (cheap, local) to find what it already has, then calls
-  `fetchObjects` for the rest.
+- **Push (DO → container).** The DO calls `push({ senderRev, changes })`
+  streaming `ChangeEntry` records, the container calls `hasObjects` on
+  the chunk hashes referenced, the DO follows up with `pushObjects`
+  (itself a stream) for the missing subset, the container applies the
+  batch and returns `{ rev, appliedPushRev }`.
+- **Fetch (container → DO).** The DO calls `currentRev()` to capture
+  the target watermark, then `fetchChanges({ sinceRev })` to stream
+  `ChangeEntry` records, accumulates chunk hashes, calls `hasObjects`
+  on itself (cheap, local) to find what it already has, then calls
+  `fetchObjects` for the rest. The extra `currentRev()` round-trip is
+  noted at `packages/rpc/src/sync-driver.ts:46` and is the motivation
+  for the planned `fetchChanges → { rev, stream }` collapse.
 
 | Aspect | Value |
 | --- | --- |
-| Round-trips per fetch | 1 streaming `fetchChanges` + 1 `hasObjects` + 1 streaming `fetchObjects` (only if any hashes are missing) |
-| Round-trips per push | 1 streaming `push` + 1 `hasObjects` (server-driven) + 1 streaming `pushObjects` (only if any hashes are missing) |
+| Round-trips per fetch | 1 `currentRev` + 1 streaming `fetchChanges` + 1 `hasObjects` + 1 streaming `fetchObjects` (only if any hashes are missing) |
+| Round-trips per push | 1 streaming `push` (carries `senderRev`) + 1 `hasObjects` (server-driven) + 1 streaming `pushObjects` (only if any hashes are missing) |
 | Bytes inline in `ChangeEntry` | None — entries carry chunk hashes only |
+| Object transfer shape | `ReadableStream<{ hash, bytes }>` in both directions |
 | Dedup | Global, content-addressed by `sha256(chunk)`. Applies in both directions. |
 
-Identical content at multiple paths costs exactly one entry on the
-wire and zero object-fetch round-trips if the receiver already has
-the blob from a previous push or fetch. Streaming both the change
-list and the object transfer keeps peak memory bounded on both sides
-regardless of how much was touched. See
+Identical content at multiple paths costs exactly one entry on the wire
+and zero object-fetch round-trips if the receiver already has the blob.
+Streaming both the change list and the object transfer keeps peak
+memory bounded on both sides regardless of how much was touched. See
 [02. Sync Protocol](./02_sync_protocol.md) for how this composes into
 the push/fetch cycle.
+
+### Per-Workspace FIFO mutation queue (planned)
+
+**(planned, PLAN.md Important).** Mutating calls (`push`, `pushObjects`,
+`exec` start, `killExec`, `disposeExec`) against a single Workspace
+will be serialised through a FIFO queue so that concurrent peers can't
+interleave half-applied batches. Read-only calls (`fetchChanges`,
+`fetchObjects`, `hasObjects`, `currentRev`, `watermarks`, `readEntry`,
+`getExec`) bypass the queue.
 
 ## Backpressure on the exec stream
 
 `exec` and `getExec` return a `ReadableStream<ExecEvent>` whose
-consumer-side backpressure is propagated all the way to the spawned
-process. The runner inside the container maintains a fixed-size ring
-buffer per stream (default 4 MiB for stdout, 4 MiB for stderr). When
-a consumer is behind and a buffer is full, the runner stops
-`read()`ing the child's pipes; kernel pipe pressure then blocks the
-child on `write`. Chatty commands self-regulate the same way they
-would under a slow `tee` or `less` on a normal shell.
+consumer-side backpressure propagates all the way to the spawned
+process via the kernel pipe. The runner uses WHATWG pull-based
+backpressure end-to-end — there is no in-process ring buffer. When the
+consumer stops pulling, the runner stops `read()`ing the child's
+stdout/stderr; the kernel pipe fills and the child blocks on `write`.
+Chatty commands self-regulate the same way they would under a slow
+`tee` or `less` on a normal shell.
 
-Callers that need to throttle without relying on the stream's pull
-semantics can use `pause()` / `resume()` on the host-side exec handle
-(see [05. Shell Interface](./05_shell_interface.md)).
+See SUMMARY §0 (commit 89b4717) for why we landed on pull-based
+backpressure rather than the originally-planned in-memory ring.
+
+**(planned, PLAN.md TODO-code)** the host-side exec handle will grow
+`pause()` / `resume()` for callers that want to throttle without
+relying on stream-pull semantics. See
+[05. Shell Interface](./05_shell_interface.md).
 
 ## Stream replay and durability
 
-The server keeps the full event log for each exec, keyed by `id`, so
-`getExec({ id, after })` can resume from any `seq` the caller has
-already observed. Retention is bounded:
+Every `ExecEvent` is written straight to the SQLite-backed
+`wsd_exec_events` table (`packages/wsd/src/exec/log.ts`). `getExec({
+id, after })` resumes by selecting rows with `seq > after`. There is no
+separate in-memory log and no file spill — SQLite is the durable
+substrate.
 
-- The log is kept until the DO acknowledges the `exit` event via
-  `ackExec(id)`, **or** until a TTL after exit (default 5 minutes),
-  **or** until the total log size for one exec exceeds the per-exec
-  cap (default 16 MiB). Whichever comes first wins.
-- Once the in-memory portion of the log crosses a smaller threshold
-  (default 1 MiB), the server spills older events to a local file so
-  long-running execs stay reattachable within the size cap.
-- If the log has been evicted, `getExec` rejects with
-  `ELOG_TRUNCATED` (see error codes below). Callers must be prepared
-  for this and restart the exec if they need a clean replay.
+Retention is bounded:
 
-```ts
-interface ContainerRPC {
-  // Release the event log for a completed exec. The DO is expected
-  // to call this once it has durably consumed the events.
-  ackExec(input: { id: string }): Promise<void>;
-}
-```
+- The log is kept until the DO calls `disposeExec(id)`, **or** until a
+  TTL after exit (default 5 minutes), **or** until the total log size
+  for one exec exceeds the per-exec cap (default 16 MiB). Whichever
+  comes first wins. These are retention bounds on the durable log, not
+  backpressure thresholds — the kernel pipe handles backpressure.
+- If the log has been evicted, `getExec` rejects with `ELOG_TRUNCATED`
+  (see error codes below). Callers must be prepared for this and
+  restart the exec if they need a clean replay.
 
 ## Error model
 
@@ -202,8 +278,17 @@ Errors thrown over the wire carry a structured code so callers can
 branch without string-matching:
 
 ```ts
+type WireErrorCode =
+  | "ENOENT"
+  | "EUNKNOWN_HASH"
+  | "ESHUTDOWN"
+  | "EAUTH"
+  | "EPROTOCOL"
+  | "EEXEC_BUSY"
+  | "ELOG_TRUNCATED";
+
 type WireError = {
-  code:    string;   // see table below
+  code:    WireErrorCode;
   message: string;
   detail?: unknown;
 };
@@ -211,22 +296,35 @@ type WireError = {
 
 | Code | Meaning |
 | --- | --- |
-| `ENOENT` | Path does not exist on the DO side (covers ignored paths, which are invisible to `Workspace.fs`). |
-| `EUNKNOWN_HASH` | `fetchObjects` or `pushObjects` referenced a hash the receiver has no record of. |
+| `ENOENT` | Path does not exist on the receiver (covers ignored paths, which are invisible to `Workspace.fs`), or `getExec` / `disposeExec` referenced an unknown id. |
+| `EUNKNOWN_HASH` | **(reserved, planned)** `fetchObjects` or `pushObjects` referenced a hash the receiver has no record of. Reserved in `WireErrorCode` but not raised today; `pushObjects` should throw it via `createWorkspaceError` (PLAN.md TODO-code). |
+| `EEXEC_BUSY` | `exec` was called with an `id` that's already in use by a live run. |
 | `ELOG_TRUNCATED` | `getExec` resume point is older than the retained log. |
-| `ESHUTDOWN` | Server is shutting down; reconnect after the next boot. |
-| `EAUTH` | Handshake auth failed (see [07. Injected Service](./07_injected_service.md)). |
-| `EPROTOCOL` | Wire framing or version mismatch. |
+| `ESHUTDOWN` | **(reserved)** Server is shutting down; reconnect after the next boot. Not raised today. |
+| `EAUTH` | **(reserved)** Handshake auth failed. Not raised today — the handshake is unauthenticated; see [07. Injected Service](./07_injected_service.md). |
+| `EPROTOCOL` | **(reserved)** Wire framing or version mismatch. Not raised today. |
 
-The host-side capnweb adapter rethrows as `WorkspaceError` preserving
-`code`, so application code can `if (err.code === "ENOENT")` rather
-than parse messages.
+The host-side capnweb adapter rethrows as `WorkspaceError`. Today
+capnweb forwards own-enumerable properties verbatim, and
+`workspace-fs/errors.ts` only enumerates fs codes (not wire codes), so
+the wire `code` survives by accident on fs errors but is **not yet
+guaranteed** for sync / shell errors. Making the typed rethrow with
+`code` preservation a contract is a `code-fix` target (PLAN.md
+TODO-code).
 
 ## Observability
 
-The host-side `Workspace` accepts an optional `onRpcEvent` callback
-fired once per RPC with `{ rpc, durationMs, bytesIn, bytesOut, ok,
-code? }`. Server-side, structured records land in `LOG_FILE` (see
+The host-side `createSyncClient` accepts an optional `onRPCEvent`
+callback fired once per RPC with `{ rpc, durationMs, ok, code? }`.
+
+- The composite `createWorkspaceClient` does **not** accept
+  `onRPCEvent` today.
+- The host `Workspace` class has **no** `onRpcEvent` option today.
+- Frame-size metrics (`bytesIn` / `bytesOut`) are **(planned,
+  PLAN.md Revisit)** — capnweb does not currently surface per-call
+  frame sizes through its stub API, so the hook can't fill them in.
+
+Server-side, structured records land in `LOG_FILE` (see
 [07. Injected Service](./07_injected_service.md)). Neither side bakes
 in a tracing dependency — the callback is the integration point for
 OpenTelemetry, Workers Analytics Engine, or whatever the host Worker
