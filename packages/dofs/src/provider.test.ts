@@ -131,6 +131,75 @@ describe("SQLiteWorkspaceProvider — implemented methods", () => {
   });
 });
 
+describe("SQLiteWorkspaceProvider — renameSync overwrite matrix", () => {
+  it("file → existing file overwrites atomically", async () => {
+    await withProvider((p) => {
+      p.writeFileSync("/src", "new");
+      p.writeFileSync("/dst", "old");
+      p.renameSync("/src", "/dst");
+      expect(p.existsSync("/src")).toBe(false);
+      expect(p.readFileSync("/dst", "utf8")).toBe("new");
+    });
+  });
+
+  it("dir → existing non-empty dir throws ENOTEMPTY", async () => {
+    await withProvider((p) => {
+      p.mkdirSync("/src", {});
+      p.mkdirSync("/dst", {});
+      p.writeFileSync("/dst/inside", "x");
+      expect(() => p.renameSync("/src", "/dst")).toThrowError(
+        expect.objectContaining({ code: "ENOTEMPTY" }),
+      );
+      // Both directories survive the failed rename.
+      expect(p.existsSync("/src")).toBe(true);
+      expect(p.existsSync("/dst/inside")).toBe(true);
+    });
+  });
+
+  it("dir → existing empty dir succeeds", async () => {
+    await withProvider((p) => {
+      p.mkdirSync("/src", {});
+      p.writeFileSync("/src/inside", "x");
+      p.mkdirSync("/dst", {});
+      p.renameSync("/src", "/dst");
+      expect(p.existsSync("/src")).toBe(false);
+      expect(p.readFileSync("/dst/inside", "utf8")).toBe("x");
+    });
+  });
+
+  it("source missing throws ENOENT", async () => {
+    await withProvider((p) => {
+      expect(() => p.renameSync("/missing", "/dst")).toThrowError(
+        expect.objectContaining({ code: "ENOENT" }),
+      );
+    });
+  });
+
+  it("rename onto root throws EINVAL", async () => {
+    await withProvider((p) => {
+      p.writeFileSync("/src", "x");
+      expect(() => p.renameSync("/src", "/")).toThrowError(
+        expect.objectContaining({ code: "EINVAL" }),
+      );
+    });
+  });
+
+  it("rename into a missing parent throws ENOENT", async () => {
+    await withProvider((p) => {
+      p.writeFileSync("/src", "x");
+      expect(() => p.renameSync("/src", "/no-such-dir/dst")).toThrowError(
+        expect.objectContaining({ code: "ENOENT" }),
+      );
+    });
+  });
+
+  // TODO: renaming a symlink should move the link itself, not the
+  // target. Today renameSync uses resolveInode() with the default
+  // followSymlinks: true, so a rename on a symlink actually moves the
+  // pointed-at file. Pin this once renameSync grows an
+  // lresolveInode-style call (see provider.ts:248).
+});
+
 describe("SQLiteWorkspaceProvider — unimplemented surface (stubs)", () => {
   it.each([
     ["appendFileSync", (p: SQLiteWorkspaceProvider) => p.appendFileSync("/x", "y")],
