@@ -2,16 +2,16 @@
 // The DO exists solely so vitest-pool-workers can hand a real
 // DurableObjectStorage instance to test callbacks via
 // runInDurableObject(). The DO doesn't expose any externally useful
-// surface; it's a test-only artefact and ships under src/testing/ so
-// it's outside the package's public exports.
+// surface; it lives under tests/ so it stays outside the package's
+// public exports.
 
 import { DurableObject } from "cloudflare:workers";
 
 export interface TestBindings {
-  TEST_DO: DurableObjectNamespace;
+  TestStorage: DurableObjectNamespace;
 }
 
-export class TestStorageDO extends DurableObject<TestBindings> {
+export class TestStorage extends DurableObject<TestBindings> {
   // No methods of our own; tests reach in via runInDurableObject() and
   // use this.ctx.storage directly.
 }

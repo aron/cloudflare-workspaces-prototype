@@ -1,20 +1,20 @@
 {
   // Test-only worker. Not deployed.
   "name": "workspace-fs-tests",
-  "main": "src/testing/worker.ts",
-  "compatibility_date": "2025-05-01",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-05-26",
   "durable_objects": {
     "bindings": [
       {
-        "name": "TEST_DO",
-        "class_name": "TestStorageDO"
+        "name": "TestStorage",
+        "class_name": "TestStorage"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestStorageDO"]
+      "new_sqlite_classes": ["TestStorage"]
     }
   ]
 }

@@ -6,7 +6,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { initializeSchema } from "../schema/index.js";
 import { Database } from "../storage.js";
-import type { TestBindings } from "../testing/worker.js";
+import type { TestBindings } from "../../tests/worker.js";
 
 export interface WithDBOptions {
   now?: () => number;
@@ -15,8 +15,8 @@ export interface WithDBOptions {
 // Each call gets a fresh DO instance so tests don't bleed into each
 // other. newUniqueId() gives a name that never collides between runs.
 function freshStub() {
-  const id = (env as unknown as TestBindings).TEST_DO.newUniqueId();
-  return (env as unknown as TestBindings).TEST_DO.get(id);
+  const id = (env as unknown as TestBindings).TestStorage.newUniqueId();
+  return (env as unknown as TestBindings).TestStorage.get(id);
 }
 
 export async function withDB<T>(
