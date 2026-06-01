@@ -86,12 +86,29 @@ module.exports = { beforeMount: noop, beforeUnmount: noop, configure: noop, unco
     },
   };
 
+  // WSD_DEFAULT_PORT lets a build pipeline stamp the compiled-in
+  // port without editing source. Runtime PORT env still wins.
+  const buildPortEnv = process.env.WSD_DEFAULT_PORT;
+  const buildPort =
+    buildPortEnv === undefined || buildPortEnv === "" ? undefined : Number(buildPortEnv);
+  if (
+    buildPort !== undefined &&
+    (!Number.isInteger(buildPort) || buildPort < 0 || buildPort > 65_535)
+  ) {
+    throw new Error(
+      `WSD_DEFAULT_PORT must be an integer between 0 and 65535, got ${JSON.stringify(buildPortEnv)}`,
+    );
+  }
+
   await build({
     entryPoints: [resolve(wsdRoot, "dist/cli/wsd.cjs")],
     bundle: true,
     platform: "node",
     target: "node22",
     format: "esm",
+    define: {
+      __WSD_BUILD_DEFAULT_PORT__: buildPort === undefined ? "undefined" : String(buildPort),
+    },
     // wsd is compiled to CJS, so esbuild walks it via the `require`
     // condition. Add `import` to that list so dofs and workspace-rpc
     // (ESM-only after the SEA migration) still resolve via their exports map.

@@ -20,7 +20,14 @@ import {
   mountFuse,
 } from "../fuse/index.js";
 
-const DEFAULT_PORT = 45678;
+// The compiled-in default port. esbuild's `define` substitutes the
+// real value at SEA bundle time when WSD_DEFAULT_PORT is set on
+// the build host; tsc-only builds keep the literal 45678 below.
+// Runtime `PORT` env still wins over this default.
+declare const __WSD_BUILD_DEFAULT_PORT__: number | undefined;
+const BUILD_DEFAULT_PORT: number | undefined =
+  typeof __WSD_BUILD_DEFAULT_PORT__ === "number" ? __WSD_BUILD_DEFAULT_PORT__ : undefined;
+const DEFAULT_PORT = BUILD_DEFAULT_PORT ?? 45678;
 const DEFAULT_MOUNT_POINT = "/workspace";
 const HOST = "0.0.0.0";
 
