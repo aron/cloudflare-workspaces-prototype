@@ -20,19 +20,28 @@ client ─► Worker /c/<name>/{file,exec}
 
 1. The DO boots the Container; the Container's entrypoint is the
    `wsd` SEA binary.
-2. wsd reaches the Worker through the **outbound egress proxy**
-   (`http://workspace.internal`, intercepted by
-   `WsdContainer.outboundByHost`).
+2. wsd reaches the Worker through the container's **outbound
+   interception** (`ctx.container.interceptOutboundHttp("workspace.internal",
+   …)`). The DO registers a `WsdEgress` `WorkerEntrypoint` as the
+   handler; wsd's outbound HTTP to `http://workspace.internal`
+   lands there.
 3. The DO POSTs `/connect` into wsd with
    `{ url: "http://workspace.internal" }`. wsd polls
    `workspace.internal/health`, then dials
    `ws://workspace.internal/ws`.
-4. The outbound handler forwards the upgrade to the DO's `fetch()`;
-   the DO accepts the WebSocket and runs a **capnweb client
-   session** over it, getting a typed `WorkspaceRPC` stub.
+4. `WsdEgress.fetch` forwards the upgrade to the DO's `fetch()` via
+   the DO binding (`env.WSD.get(idFromString(ctx.props.doId))`); the
+   DO accepts the WebSocket and runs a **capnweb client session**
+   over it, getting a typed `WorkspaceRPC` stub.
 5. The DO wraps the stub in a `Workspace` instance from
    `@cloudflare/workspace`. The Worker calls into the DO via RPC
    methods; the DO drives the stub.
+
+The DO extends the plain `DurableObject` class from
+`cloudflare:workers` and drives the container via `ctx.container`
+directly — no `@cloudflare/containers` helper. Boot, port-readiness
+polling, outbound interception, and exit monitoring are all explicit
+in `src/index.ts`.
 
 FUSE is currently disabled (`DISABLE_FUSE=1`) — Cloudflare Containers
 don't expose `/dev/fuse`. That means `exec`'d commands see the
