@@ -5,7 +5,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import { TestBackend, Workspace } from "../index.js";
+import { withWorkspace } from "./with-workspace.js";
 
 interface HarnessEnv {
   WSD_HARNESS_URL: string;
@@ -16,8 +16,7 @@ const describeIfDocker = url.length > 0 ? describe : describe.skip;
 
 describeIfDocker("Workspace.shell against a real wsd container", () => {
   it("exec captures stdout and exit code (utf8)", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const handle = await ws.shell.exec("echo hello && exit 7", {
         encoding: "utf8",
@@ -26,27 +25,21 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       expect(stdout).toBe("hello\n");
       expect(stderr).toBe("");
       expect(exitCode).toBe(7);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("exec captures stdout as Uint8Array by default", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const handle = await ws.shell.exec("printf bytes");
       const { stdout } = await handle.result();
       expect(stdout).toBeInstanceOf(Uint8Array);
       expect(new TextDecoder().decode(stdout as Uint8Array)).toBe("bytes");
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("kill terminates a running command (SIGTERM → 143)", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const handle = await ws.shell.exec("sleep 30", {
         id: "killme",
@@ -55,14 +48,11 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       await handle.kill();
       const { exitCode } = await handle.result();
       expect(exitCode).toBe(143);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("get() replays a finished run by seq cursor", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const first = await ws.shell.exec("printf 'a\\nb\\nc\\n'", {
         id: "replay",
@@ -78,14 +68,11 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       const again = await reattach.result();
       expect(again.stdout).toBe(original.stdout);
       expect(again.exitCode).toBe(original.exitCode);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("streaming iteration sees stdout chunks in order", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const handle = await ws.shell.exec("printf one; printf two; printf three", {
         encoding: "utf8",
@@ -105,14 +92,11 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       }
       expect(chunks.join("")).toBe("onetwothree");
       expect(exitCode).toBe(0);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("exec result.pulled counts wsd revs that landed during the run", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       // Touch wsd via the FUSE mount so currentRev advances
       // during the exec. Each `touch` is one applyChanges round
@@ -128,21 +112,16 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       // here) could push it higher, so we assert the floor, not
       // an exact count.
       expect(result.pulled).toBeGreaterThanOrEqual(3);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 
   it("exec result.pulled is 0 for a command that does not touch the VFS", async () => {
-    const ws = new Workspace({ backends: [new TestBackend({ url })] });
-    try {
+    await withWorkspace(url, async (ws) => {
       await ws.ready();
       const handle = await ws.shell.exec("echo cheap", { encoding: "utf8" });
       const result = await handle.result();
       expect(result.exitCode).toBe(0);
       expect(result.pulled).toBe(0);
-    } finally {
-      await ws.close();
-    }
+    });
   });
 });

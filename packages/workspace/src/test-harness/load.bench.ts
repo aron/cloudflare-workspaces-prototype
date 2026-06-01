@@ -11,7 +11,7 @@
 import { env } from "cloudflare:test";
 import { bench, describe } from "vitest";
 
-import { TestBackend, Workspace } from "../index.js";
+import { withWorkspace } from "./with-workspace.js";
 
 interface HarnessEnv {
   WSD_HARNESS_URL: string;
@@ -29,14 +29,11 @@ describeIfDocker("end-to-end — small file round-trip", () => {
   bench(
     "writeFile + readFile (16 bytes)",
     async () => {
-      const ws = new Workspace({ backends: [new TestBackend({ url })] });
-      try {
+      await withWorkspace(url, async (ws) => {
         await ws.ready();
         await ws.fs.writeFile("/probe.txt", "abcdefghijklmnop");
         await ws.fs.readFile("/probe.txt", "utf8");
-      } finally {
-        await ws.close();
-      }
+      });
     },
     { iterations: 20 },
   );
@@ -44,16 +41,13 @@ describeIfDocker("end-to-end — small file round-trip", () => {
   bench(
     "writeFile + readFile (1 MiB, single chunk under CHUNK_SIZE)",
     async () => {
-      const ws = new Workspace({ backends: [new TestBackend({ url })] });
-      try {
+      await withWorkspace(url, async (ws) => {
         await ws.ready();
         const bytes = new Uint8Array(1024 * 1024);
         for (let i = 0; i < bytes.byteLength; i += 4096) bytes[i] = (i * 31) & 0xff;
         await ws.fs.writeFile("/probe.bin", bytes);
         await ws.fs.readFile("/probe.bin");
-      } finally {
-        await ws.close();
-      }
+      });
     },
     { iterations: 10 },
   );
@@ -63,16 +57,13 @@ describeIfDocker("end-to-end — multi-chunk file", () => {
   bench(
     "writeFile + readFile (4 MiB, 8 chunks)",
     async () => {
-      const ws = new Workspace({ backends: [new TestBackend({ url })] });
-      try {
+      await withWorkspace(url, async (ws) => {
         await ws.ready();
         const bytes = new Uint8Array(4 * 1024 * 1024);
         for (let i = 0; i < bytes.byteLength; i += 4096) bytes[i] = (i * 31) & 0xff;
         await ws.fs.writeFile("/big.bin", bytes);
         await ws.fs.readFile("/big.bin");
-      } finally {
-        await ws.close();
-      }
+      });
     },
     { iterations: 5 },
   );
@@ -80,15 +71,12 @@ describeIfDocker("end-to-end — multi-chunk file", () => {
   bench(
     "writeFile only (4 MiB, 8 chunks) — push-side cost",
     async () => {
-      const ws = new Workspace({ backends: [new TestBackend({ url })] });
-      try {
+      await withWorkspace(url, async (ws) => {
         await ws.ready();
         const bytes = new Uint8Array(4 * 1024 * 1024);
         for (let i = 0; i < bytes.byteLength; i += 4096) bytes[i] = (i * 31) & 0xff;
         await ws.fs.writeFile("/write-only.bin", bytes);
-      } finally {
-        await ws.close();
-      }
+      });
     },
     { iterations: 5 },
   );
@@ -98,15 +86,12 @@ describeIfDocker("end-to-end — burst writes", () => {
   bench(
     "100 small writes (sequential, distinct paths)",
     async () => {
-      const ws = new Workspace({ backends: [new TestBackend({ url })] });
-      try {
+      await withWorkspace(url, async (ws) => {
         await ws.ready();
         for (let i = 0; i < 100; i++) {
           await ws.fs.writeFile(`/burst_${i}.txt`, `iteration ${i}`);
         }
-      } finally {
-        await ws.close();
-      }
+      });
     },
     { iterations: 5 },
   );
