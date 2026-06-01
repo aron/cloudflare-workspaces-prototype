@@ -137,7 +137,6 @@ describe("CloudflareContainerBackend", () => {
     expect(options.env?.PORT).toBe("9000");
     // Defaults still flow through.
     expect(options.env?.MOUNT_POINT).toBe("/workspace");
-    expect(options.env?.DISABLE_FUSE).toBe("1");
   });
 
   test("connect() throws when /connect returns non-2xx", async () => {

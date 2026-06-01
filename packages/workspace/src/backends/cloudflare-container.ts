@@ -72,7 +72,7 @@ export interface CloudflareContainerBackendOptions {
   containerPort?: number;
 
   // Environment variables passed to ctx.container.start(). Merged
-  // onto sane defaults (PORT, MOUNT_POINT, DISABLE_FUSE).
+  // onto sane defaults (PORT, MOUNT_POINT).
   containerEnv?: Record<string, string>;
 
   // Total time the backend waits for: container port to open,
@@ -208,7 +208,6 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       env: {
         PORT: String(this.#options.containerPort),
         MOUNT_POINT: "/workspace",
-        DISABLE_FUSE: "1",
         ...this.#options.containerEnv,
       },
     });
