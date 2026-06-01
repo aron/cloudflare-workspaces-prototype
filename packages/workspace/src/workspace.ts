@@ -3,18 +3,19 @@
 // Runs inside a Cloudflare Worker / Durable Object. Owns a local
 // workspace-fs Database (the host store) and a SyncRPC connection
 // to wsd. Filesystem operations on Workspace.fs mutate the local
-// store directly; sync between the host store and wsd is driven
-// explicitly via Workspace.push() / Workspace.pull() (TODO: not
-// yet wired — those land in a follow-up commit). The shell-side
-// pre-exec push / post-exec pull bracket already lives on
-// Workspace.shell.exec.
-//
-// This commit opens the local Database; subsequent commits
-// re-route Workspace.fs reads and writes through it.
+// store directly via the WorkspaceFilesystem class from
+// @cloudflare/workspace-fs; sync between the host store and wsd
+// is driven explicitly via Workspace.push() / Workspace.pull()
+// (TODO: not yet wired — those land in a follow-up commit). The
+// shell-side pre-exec push / post-exec pull bracket already lives
+// on Workspace.shell.exec.
 
-import type { ChangeEntry, DurableObjectStorageLike } from "@cloudflare/workspace-fs";
-import { Database, initializeSchema } from "@cloudflare/workspace-fs";
-import type { SyncRPC } from "@cloudflare/workspace-rpc";
+import {
+  Database,
+  type DurableObjectStorageLike,
+  initializeSchema,
+  WorkspaceFilesystem,
+} from "@cloudflare/workspace-fs";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { WorkspaceShell } from "./shell.js";
@@ -22,7 +23,7 @@ import { WorkspaceStub } from "./stub.js";
 
 export interface WorkspaceOptions {
   // Local store backing this Workspace. In a Durable Object, pass
-  // `ctx.storage`; in tests, pass a SqliteTestStorage from
+  // `ctx.storage`; in tests, pass a SQLiteTestStorage from
   // @cloudflare/workspace-fs/testing. The constructor opens a
   // Database against it and runs initializeSchema (idempotent).
   storage: DurableObjectStorageLike;
@@ -30,13 +31,18 @@ export interface WorkspaceOptions {
   // Backends are tried in declared order. The first one whose
   // connect() resolves wins; the rest are not consulted.
   backends: WorkspaceBackend[];
+
+  // Clock used for mtime / last_seen on local FS writes. Defaults
+  // to Date.now. Override for deterministic tests.
+  now?: () => number;
 }
 
 export class Workspace {
   readonly #db: Database;
+  readonly #fs: WorkspaceFilesystem;
   readonly #backends: WorkspaceBackend[];
+  readonly #now: () => number;
   #handle: BackendHandle | undefined;
-  #fs: WorkspaceFs | undefined;
   #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
 
@@ -44,34 +50,23 @@ export class Workspace {
     if (options.backends.length === 0) {
       throw new Error("Workspace requires at least one backend");
     }
+    this.#now = options.now ?? Date.now;
     this.#db = new Database(options.storage);
-    initializeSchema(this.#db, () => Date.now());
+    initializeSchema(this.#db, this.#now);
+    this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
     this.#backends = options.backends.slice();
   }
 
-  // Local store. Subsequent commits route Workspace.fs through
-  // this; for now it's exposed for testing and diagnostics.
+  // Local store. Exposed for tests / diagnostics and for the
+  // sync helpers that take a Database directly.
   get db(): Database {
     return this.#db;
   }
 
-  // Walk the backends in declared order. Caches the first
-  // successful BackendHandle so subsequent .fs / .close calls
-  // reuse it. ready() is idempotent; multiple callers share
-  // the same in-flight connection attempt.
-  ready(): Promise<void> {
-    if (this.#readyPromise) return this.#readyPromise;
-    this.#readyPromise = this.#connect();
-    return this.#readyPromise;
-  }
-
-  // Filesystem facade. Throws if called before ready() resolves.
-  // The getter avoids a separate construction step in the
-  // common pattern `await ws.ready(); ws.fs.writeFile(...)`.
-  get fs(): WorkspaceFs {
-    if (!this.#fs) {
-      throw new Error("Workspace not connected — await ready() first");
-    }
+  // Filesystem facade — the documented Workspace.fs surface from
+  // docs/04. Available immediately; doesn't need ready() because
+  // reads and writes hit the local store, not the wire.
+  get fs(): WorkspaceFilesystem {
     return this.#fs;
   }
 
@@ -83,16 +78,25 @@ export class Workspace {
     return this.#shell;
   }
 
+  // Walk the backends in declared order. Caches the first
+  // successful BackendHandle so subsequent .shell / .close calls
+  // reuse it. ready() is idempotent; multiple callers share
+  // the same in-flight connection attempt.
+  ready(): Promise<void> {
+    if (this.#readyPromise) return this.#readyPromise;
+    this.#readyPromise = this.#connect();
+    return this.#readyPromise;
+  }
+
   // Wrap this workspace in a WorkspaceStub so it can be handed
   // across the Workers-RPC boundary (e.g. returned from a DO RPC
   // method). The stub is a lazy RpcTarget — it doesn't own any
   // resources itself; it just delegates back to this workspace.
   // Throws if called before ready() resolves, because the inner
-  // .fs / .shell getters do.
+  // .shell getter does.
   stub(): WorkspaceStub {
-    // Touch .fs and .shell so the not-connected error surfaces
-    // here rather than on the first RPC method call.
-    void this.fs;
+    // Touch .shell so the not-connected error surfaces here
+    // rather than on the first RPC method call.
     void this.shell;
     return new WorkspaceStub(this);
   }
@@ -103,7 +107,6 @@ export class Workspace {
         await this.#handle.close();
       } finally {
         this.#handle = undefined;
-        this.#fs = undefined;
         this.#shell = undefined;
         this.#readyPromise = undefined;
       }
@@ -116,7 +119,6 @@ export class Workspace {
       try {
         const handle = await backend.connect();
         this.#handle = handle;
-        this.#fs = new WorkspaceFs(handle.rpc.sync);
         this.#shell = new WorkspaceShell(handle.rpc);
         return;
       } catch (error) {
@@ -130,205 +132,4 @@ export class Workspace {
       .join("\n");
     throw new Error(`Workspace: no backend reachable\n${summary}`);
   }
-}
-
-// File-shaped facade over the SyncRPC stub. v1 carries the
-// minimum surface the agent needs: writeFile, readFile, stat.
-// readdir, rm, mkdir, and friends slot in as the call sites
-// surface; the wire already has the primitives.
-export class WorkspaceFs {
-  readonly #rpc: SyncRPC;
-
-  constructor(rpc: SyncRPC) {
-    this.#rpc = rpc;
-  }
-
-  // Stat is the cheapest read: materialiseChange covers files,
-  // dirs, and symlinks. Returns null when the path doesn't
-  // exist (the caller decides whether that's an error).
-  async stat(path: string): Promise<ChangeEntry | null> {
-    return await this.#rpc.readEntry(path);
-  }
-
-  // readFile reassembles a file from its chunk list. Default
-  // return is a ReadableStream<Uint8Array> — callers pipe it
-  // straight into a Response body, a Blob, etc. The "utf8"
-  // overload drains and decodes for convenience.
-  //
-  // Two-trip protocol on the wire:
-  //   1. readEntry(path)  → ChangeEntry with chunk hashes.
-  //   2. fetchObjects(...) → chunk bytes by hash.
-  // The chunk-hash dedup means a file we've seen before in
-  // some other context is free on the wire.
-  readFile(path: string): Promise<ReadableStream<Uint8Array>>;
-  readFile(path: string, encoding: "utf8"): Promise<string>;
-  async readFile(path: string, encoding?: "utf8"): Promise<ReadableStream<Uint8Array> | string> {
-    const entry = await this.#rpc.readEntry(path);
-    if (entry === null || entry.kind === "delete") {
-      throw fsError("ENOENT", `no such file: ${path}`, path);
-    }
-    if (entry.kind !== "file") {
-      throw fsError("EISDIR", `not a file: ${path}`, path);
-    }
-    const stream = this.#streamChunks(entry.chunks);
-    if (encoding === "utf8") {
-      return await new Response(stream).text();
-    }
-    return stream;
-  }
-
-  // writeFile drives the same wire shape the sync loop uses:
-  // ship the chunk bytes via pushObjects, then push a single
-  // ChangeEntry through push(). The remote applies and echoes
-  // back appliedPushRev; we don't assert it here because the
-  // Workspace doesn't track its own pushRev counter — the
-  // single push() call IS the source of truth.
-  async writeFile(
-    path: string,
-    content: string | Uint8Array,
-    options: { mode?: number } = {},
-  ): Promise<void> {
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    const mode = options.mode ?? 0o644;
-    const chunks = await chunksOf(bytes);
-
-    // Stage the chunks remotely first. The peer's pushObjects
-    // lands them in vfs_blob_bytes; the subsequent push()
-    // applies the entry and looks up the bytes by hash.
-    if (chunks.length > 0) {
-      const objects = new ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>({
-        start(controller) {
-          for (const c of chunks) controller.enqueue({ hash: c.hash, bytes: c.bytes });
-          controller.close();
-        },
-      });
-      await this.#rpc.pushObjects(objects);
-    }
-
-    const entry: ChangeEntry = {
-      kind: "file",
-      path,
-      mode,
-      mtime: Date.now(),
-      size: bytes.byteLength,
-      chunks: chunks.map((c) => ({ hash: c.hash, size: c.bytes.byteLength })),
-    };
-    const changes = new ReadableStream<ChangeEntry>({
-      start(controller) {
-        controller.enqueue(entry);
-        controller.close();
-      },
-    });
-    // senderRev: 0 marks the Workspace as an external
-    // writer (not a sync peer with its own rev space).
-    // The server treats the entries as local writes —
-    // its outbound sync loop will ship them upstream on
-    // the next tick. A sync peer would pass its own
-    // currentRev here so loopback suppression kicks in;
-    // the Workspace doesn't have one to share.
-    await this.#rpc.push({ senderRev: 0, changes });
-  }
-
-  // Stream the file's chunk bytes in the order declared by
-  // entry.chunks. fetchObjects can return out of order (the wire
-  // delivers as hashes resolve), so we buffer late arrivals
-  // until the next expected chunk is in hand. Worst-case
-  // buffering is the size of one chunk per pending entry; for
-  // 512 KiB chunks and typical files that's a handful of MiB,
-  // not the full file.
-  #streamChunks(chunks: { hash: Uint8Array; size: number }[]): ReadableStream<Uint8Array> {
-    if (chunks.length === 0) {
-      return new ReadableStream({
-        start(controller) {
-          controller.close();
-        },
-      });
-    }
-    const rpc = this.#rpc;
-    const expected = chunks.map((c) => hex(c.hash));
-    return new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const pending = new Map<string, Uint8Array>();
-        let cursor = 0;
-        const hashes = chunks.map((c) => c.hash);
-        const source = await rpc.fetchObjects(hashes);
-        const reader = source.getReader();
-        try {
-          while (cursor < expected.length) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            pending.set(hex(value.hash), value.bytes);
-            while (cursor < expected.length && pending.has(expected[cursor])) {
-              const key = expected[cursor];
-              const bytes = pending.get(key)!;
-              pending.delete(key);
-              controller.enqueue(bytes);
-              cursor++;
-            }
-          }
-          if (cursor < expected.length) {
-            controller.error(
-              fsError("EUNKNOWN_HASH", `chunk bytes missing for hash ${expected[cursor]}`),
-            );
-            return;
-          }
-          controller.close();
-        } finally {
-          reader.releaseLock();
-        }
-      },
-    });
-  }
-}
-
-// 512 KiB chunks — same as workspace-fs's writeFile. Keeping
-// the constant in sync would be nicer but the workspace-fs
-// constant isn't re-exported; cheap to redeclare here.
-const CHUNK_SIZE = 512 * 1024;
-
-async function chunksOf(bytes: Uint8Array): Promise<{ hash: Uint8Array; bytes: Uint8Array }[]> {
-  const out: { hash: Uint8Array; bytes: Uint8Array }[] = [];
-  for (let offset = 0; offset < bytes.byteLength; offset += CHUNK_SIZE) {
-    const end = Math.min(offset + CHUNK_SIZE, bytes.byteLength);
-    const slice = bytes.subarray(offset, end);
-    const hash = await sha256(slice);
-    out.push({ hash, bytes: slice });
-  }
-  // Empty input gets zero chunks; the caller emits a file
-  // entry with size 0 and the read path returns an empty
-  // Uint8Array. Same as workspace-fs.
-  return out;
-}
-
-async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  // crypto.subtle is the only universally-available hash
-  // implementation: present in workerd, node 22+, and
-  // browsers. Avoids dragging node:crypto into a workerd
-  // bundle.
-  // Workers types declare digest as accepting BufferSource but reject
-  // a Uint8Array view onto a non-strict ArrayBuffer. Slice into a
-  // fresh ArrayBuffer to satisfy the signature; the cost is one
-  // copy per chunk hash, dwarfed by the network round-trip.
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  const buf = await crypto.subtle.digest("SHA-256", copy.buffer as ArrayBuffer);
-  return new Uint8Array(buf);
-}
-
-function hex(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.byteLength; i++) s += bytes[i].toString(16).padStart(2, "0");
-  return s;
-}
-
-interface FsError extends Error {
-  code: string;
-  path?: string;
-}
-
-function fsError(code: string, message: string, path?: string): FsError {
-  const err = new Error(message) as FsError;
-  err.code = code;
-  if (path !== undefined) err.path = path;
-  return err;
 }

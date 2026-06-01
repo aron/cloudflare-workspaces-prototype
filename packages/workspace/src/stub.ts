@@ -34,7 +34,7 @@
 // under both workerd and node (tests, type-only consumers), while
 // `cloudflare:workers` only resolves under workerd.
 
-import type { ChangeEntry } from "@cloudflare/workspace-fs";
+import type { WorkspaceStatResult } from "@cloudflare/workspace-fs";
 import { RpcTarget } from "capnweb";
 
 import type { ExecResult, WorkspaceExecEvent } from "./shell.js";
@@ -74,7 +74,7 @@ export class WorkspaceFsStub extends RpcTarget {
     return await this.#ws.fs.readFile(path);
   }
 
-  async stat(path: string): Promise<ChangeEntry | null> {
+  async stat(path: string): Promise<WorkspaceStatResult> {
     return await this.#ws.fs.stat(path);
   }
 }

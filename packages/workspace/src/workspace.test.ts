@@ -180,9 +180,14 @@ describe("Workspace backend fallback", () => {
     expect(closed).toBe(1);
   });
 
-  it("fs accessor throws before ready()", () => {
+  it("shell accessor throws before ready()", () => {
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("only")] });
-    expect(() => ws.fs).toThrow(/not connected/);
+    expect(() => ws.shell).toThrow(/not connected/);
+  });
+
+  it("fs accessor is available immediately — no ready() needed", () => {
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("only")] });
+    expect(ws.fs).toBeDefined();
   });
 
   it("requires at least one backend", () => {
@@ -192,7 +197,7 @@ describe("Workspace backend fallback", () => {
   });
 });
 
-describe("WorkspaceFs against a fake SyncRPC", () => {
+describe("Workspace.fs against the local store", () => {
   it("writeFile then readFile round-trips bytes", async () => {
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
@@ -200,7 +205,7 @@ describe("WorkspaceFs against a fake SyncRPC", () => {
     expect(await ws.fs.readFile("/a.txt", "utf8")).toBe("hello workspace");
   });
 
-  it("writeFile chunks bytes and pushObjects ships them", async () => {
+  it("writeFile chunks a > 512 KiB payload and readFile reassembles it", async () => {
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     // Two-chunk payload: 600 KiB > 512 KiB chunk size.
@@ -222,18 +227,20 @@ describe("WorkspaceFs against a fake SyncRPC", () => {
     await expect(ws.fs.readFile("/missing.txt")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("stat returns the ChangeEntry shape for a file", async () => {
+  it("stat returns the documented shape for a file", async () => {
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
     await ws.fs.writeFile("/a.txt", "hi");
-    const entry = await ws.fs.stat("/a.txt");
-    expect(entry).toMatchObject({ kind: "file", path: "/a.txt", size: 2 });
+    const s = await ws.fs.stat("/a.txt");
+    expect(s).toMatchObject({ name: "a.txt", size: 2, isFile: true, isDirectory: false });
+    expect(typeof s.mode).toBe("number");
+    expect(typeof s.mtime).toBe("number");
   });
 
-  it("stat returns null for an absent path", async () => {
+  it("stat throws ENOENT for an absent path", async () => {
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
     await ws.ready();
-    expect(await ws.fs.stat("/missing")).toBeNull();
+    await expect(ws.fs.stat("/missing")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("writeFile with empty content produces a zero-chunk entry", async () => {

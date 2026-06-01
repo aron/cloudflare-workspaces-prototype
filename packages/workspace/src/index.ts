@@ -31,4 +31,4 @@ export {
   WorkspaceShellStub,
   WorkspaceStub,
 } from "./stub.js";
-export { Workspace, WorkspaceFs, type WorkspaceOptions } from "./workspace.js";
+export { Workspace, type WorkspaceOptions } from "./workspace.js";
