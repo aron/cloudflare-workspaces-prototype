@@ -40,7 +40,7 @@ function pathOf(db: Database, inode: number): string | null {
 // Capnweb stream without holding the whole delta in memory.
 export interface CoalesceOptions {
   // Path-segment patterns to drop before yielding. The wire never
-  // carries entries under an ignored segment; see docs/02.
+  // carries entries under an ignored segment.
   ignore?: string[];
 }
 
