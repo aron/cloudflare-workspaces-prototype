@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@cloudflare/workspace-fs": "*",
-    "@cloudflare/workspace-rpc": "*"
+    "@cloudflare/workspace-rpc": "*",
+    "capnweb": "^0.8.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.10",

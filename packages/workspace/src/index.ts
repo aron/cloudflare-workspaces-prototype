@@ -7,6 +7,10 @@
 // two CloudflareSandboxBackend flavours land in Phase 7.5.
 
 export type { BackendHandle, WorkspaceBackend } from "./backend.js";
+export {
+  CloudflareContainerBackend,
+  type CloudflareContainerBackendOptions,
+} from "./backends/cloudflare-container.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
 export type {
   ExecEncoding,
