@@ -1,10 +1,12 @@
+/// <reference types="@cloudflare/workers-types/experimental" />
+
 // Example Worker + container-enabled Durable Object running wsd.
 //
 // The DO is a thin shell over CloudflareContainerBackend: it picks
 // the container (this.ctx.container) and the egress fetcher
-// (ctx.exports.WsdEgress with the DO id in props), forwards
-// /ws upgrades to backend.handleFetch(), and otherwise just calls
-// into a single Workspace instance.
+// (ctx.exports.WorkspaceProxy bound to this DO instance), forwards
+// /health and /ws back to itself / the backend, and otherwise just
+// calls into a single Workspace instance.
 //
 // Wire shape:
 //
@@ -14,40 +16,35 @@
 //        WsdContainer DO ──► Container ──► wsd (:8080)
 //              ▲                                │
 //              │  ws://workspace.internal/ws    │
-//              └─── capnweb session ◄───────────┘
+//              └─── capnweb session ◀─────────────┘
 
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 
-import { CloudflareContainerBackend, Workspace, type WorkspaceStub } from "@cloudflare/workspace";
+import {
+  CloudflareContainerBackend,
+  Workspace,
+  WorkspaceProxy,
+  type WorkspaceStub,
+} from "@cloudflare/workspace";
+
+// Re-export so the runtime can build a loopback binding for the
+// container egress (ctx.exports.WorkspaceProxy below). The class
+// itself lives in @cloudflare/workspace; the re-export is what
+// puts it in the worker's top-level module graph.
+export { WorkspaceProxy };
 
 export interface Env {
   WSD: DurableObjectNamespace<WsdContainer>;
 }
 
-// ---------------------------------------------------------------
-// Egress entrypoint: registered with the container as the outbound
-// handler for http://workspace.internal. wsd reaches the DO
-// through this. ctx.props carries the owning DO's id so /ws
-// upgrades route to the right instance.
-// ---------------------------------------------------------------
-export class WsdEgress extends WorkerEntrypoint<Env, { doId: string }> {
-  override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/ws") {
-      const ns = this.env.WSD;
-      const stub = ns.get(ns.idFromString(this.ctx.props.doId));
-      return stub.fetch(request);
+// Declare the worker's top-level exports so ctx.exports is typed.
+// Without this the access below requires an `as unknown as { ... }`
+// cast.
+declare global {
+  namespace Cloudflare {
+    interface GlobalProps {
+      mainModule: { WorkspaceProxy: typeof WorkspaceProxy };
     }
-    // The backend's connect() POSTs to wsd's /connect, which
-    // then polls /health on the egress host before dialling
-    // the WebSocket. Answer here so wsd knows the egress is
-    // reachable.
-    if (url.pathname === "/health") {
-      return new Response("ok\n", {
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-    return new Response("not found", { status: 404 });
   }
 }
 
@@ -65,14 +62,8 @@ export class WsdContainer extends DurableObject<Env> {
     }
     this.#backend = new CloudflareContainerBackend({
       container: () => ctx.container!,
-      // ctx.exports is per-isolate, so the DO has to build
-      // the egress fetcher itself and hand it to the backend.
-      egress: (
-        ctx as unknown as {
-          exports: { WsdEgress: (init: { props: { doId: string } }) => Fetcher };
-        }
-      ).exports.WsdEgress({
-        props: { doId: ctx.id.toString() },
+      egress: ctx.exports.WorkspaceProxy({
+        props: { binding: "WSD", id: ctx.id.toString() },
       }),
     });
     this.#workspace = new Workspace({ backends: [this.#backend] });
@@ -151,7 +142,7 @@ async function handleFile(
       await ws.fs.writeFile(path, body);
       return new Response(null, { status: 204 });
     } catch (error) {
-      return errorJson(error, 500);
+      return errorJSON(error, 500);
     }
   }
 
@@ -169,8 +160,8 @@ async function handleFile(
       });
     } catch (error) {
       const code = (error as { code?: string }).code;
-      if (code === "ENOENT") return errorJson(error, 404);
-      return errorJson(error, 500);
+      if (code === "ENOENT") return errorJSON(error, 404);
+      return errorJSON(error, 500);
     }
   }
 
@@ -185,7 +176,7 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   try {
     body = (await request.json()) as ExecRequest;
   } catch {
-    return errorJson(new Error("invalid JSON body"), 400);
+    return errorJSON(new Error("invalid JSON body"), 400);
   }
 
   let command: string;
@@ -194,7 +185,7 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   } else if (Array.isArray(body.argv) && body.argv.length > 0) {
     command = body.argv.map(shellQuote).join(" ");
   } else {
-    return errorJson(new Error("must provide command or argv"), 400);
+    return errorJSON(new Error("must provide command or argv"), 400);
   }
 
   const stub = env.WSD.get(env.WSD.idFromName(name));
@@ -210,11 +201,11 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
       headers: { "content-type": "text/event-stream" },
     });
   } catch (error) {
-    return errorJson(error, 500);
+    return errorJSON(error, 500);
   }
 }
 
-function errorJson(error: unknown, status: number): Response {
+function errorJSON(error: unknown, status: number): Response {
   const message = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: string }).code;
   return new Response(JSON.stringify({ error: message, code }), {

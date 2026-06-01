@@ -1,6 +1,18 @@
+import { resolve } from "node:path";
+
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // proxy.ts imports cloudflare:workers (WorkerEntrypoint),
+      // which doesn't resolve under the node runner. Tests don't
+      // need the real class — the package is workerd-only at
+      // runtime — so alias to a throwing stub for any test that
+      // incidentally pulls it through the import graph.
+      "./proxy.js": resolve(__dirname, "src/proxy-stub.ts"),
+    },
+  },
   test: {
     globals: true,
     include: ["src/**/*.test.ts"],

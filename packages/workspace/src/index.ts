@@ -12,6 +12,7 @@ export {
   type CloudflareContainerBackendOptions,
 } from "./backends/cloudflare-container.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";
 export type {
   ExecEncoding,
   ExecHandle,
