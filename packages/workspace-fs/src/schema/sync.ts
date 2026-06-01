@@ -16,6 +16,13 @@ export const SYNC_STATEMENTS = [
     op   TEXT    NOT NULL CHECK(op IN ('delete'))
   )`,
   `CREATE INDEX IF NOT EXISTS vfs_changes_by_rev ON vfs_changes(rev)`,
+  // changes.ts looks up the latest op for a path via
+  // `WHERE path = ? ORDER BY id DESC LIMIT 1`. Without the index
+  // SQLite falls back to a full scan; with (path, id DESC) the
+  // lookup is O(log n) and the ORDER BY drains straight from the
+  // index. Used on every recordDelete and on every push-tick that
+  // processes tombstones.
+  `CREATE INDEX IF NOT EXISTS vfs_changes_by_path ON vfs_changes(path, id DESC)`,
   `CREATE TABLE IF NOT EXISTS _vfs_watermark (
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL

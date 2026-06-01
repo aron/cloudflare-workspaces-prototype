@@ -28,6 +28,13 @@ export const CORE_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS vfs_dirents_by_child ON vfs_dirents(child_inode)`,
   `CREATE INDEX IF NOT EXISTS vfs_nodes_by_rev ON vfs_nodes(rev)`,
+  // gc/manifests checks every manifest row against vfs_nodes via a
+  // correlated NOT EXISTS (manifest_hash = ?). Without this index
+  // gc full-scans vfs_nodes per candidate manifest — O(N×M).
+  // Partial because the column is null on every dir and symlink
+  // node, and on files until they get their first content write.
+  `CREATE INDEX IF NOT EXISTS vfs_nodes_by_manifest_hash
+    ON vfs_nodes(manifest_hash) WHERE manifest_hash IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS vfs_blobs (
     hash      BLOB    PRIMARY KEY,
     size      INTEGER NOT NULL,
