@@ -82,7 +82,7 @@ export class Workspace {
         const handle = await backend.connect();
         this.#handle = handle;
         this.#fs = new WorkspaceFs(handle.rpc.sync);
-        this.#shell = new WorkspaceShell(handle.rpc.shell);
+        this.#shell = new WorkspaceShell(handle.rpc);
         return;
       } catch (error) {
         errors.push({ id: backend.id, error });

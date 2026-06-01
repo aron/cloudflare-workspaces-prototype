@@ -109,4 +109,40 @@ describeIfDocker("Workspace.shell against a real wsd container", () => {
       await ws.close();
     }
   });
+
+  it("exec result.pulled counts wsd revs that landed during the run", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      // Touch wsd via the FUSE mount so currentRev advances
+      // during the exec. Each `touch` is one applyChanges round
+      // on the server, which bumps the rev exactly once.
+      const handle = await ws.shell.exec(
+        "touch /workspace/bracket-a && touch /workspace/bracket-b && touch /workspace/bracket-c",
+        { encoding: "utf8" },
+      );
+      const result = await handle.result();
+      expect(result.exitCode).toBe(0);
+      expect(result.pushed).toBe(0);
+      // At least one rev per touch. Concurrent host activity (none
+      // here) could push it higher, so we assert the floor, not
+      // an exact count.
+      expect(result.pulled).toBeGreaterThanOrEqual(3);
+    } finally {
+      await ws.close();
+    }
+  });
+
+  it("exec result.pulled is 0 for a command that does not touch the VFS", async () => {
+    const ws = new Workspace({ backends: [new TestBackend({ url })] });
+    try {
+      await ws.ready();
+      const handle = await ws.shell.exec("echo cheap", { encoding: "utf8" });
+      const result = await handle.result();
+      expect(result.exitCode).toBe(0);
+      expect(result.pulled).toBe(0);
+    } finally {
+      await ws.close();
+    }
+  });
 });
