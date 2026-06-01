@@ -14,8 +14,6 @@ export function recordDelete(db: Database, rev: number, path: string): void {
 // and the container fetches them back. Bytes are never inline:
 // file entries carry chunk hashes and the receiver does its own
 // hasObjects probe + fetchObjects pull for the bytes it lacks.
-//
-// See docs/02_sync_protocol.md for the wire shape.
 export type ChangeEntry =
   | {
       kind: "file";
