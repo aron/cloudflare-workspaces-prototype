@@ -5,7 +5,7 @@ import { resolveInode } from "../fs/resolve.js";
 import { withDB, withTwoDBs } from "../fs/with-db.js";
 import { writeFile } from "../fs/writeFile.js";
 import { applyChanges } from "./apply.js";
-import { type ChangeEntry } from "./changes.js";
+import type { ChangeEntry } from "./changes.js";
 import { coalesceChanges } from "./coalesce.js";
 import { fetchObjects } from "./fetch.js";
 import { writeWatermark } from "./watermarks.js";
