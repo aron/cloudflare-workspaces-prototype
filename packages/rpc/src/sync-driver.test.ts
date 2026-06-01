@@ -41,6 +41,41 @@ describe("sync driver — pullOnce", () => {
       const applied = await pullOnce(b.db, a.rpc);
       expect(applied).toBe(1);
       expect(fileEntries(b.db)).toContain("hello.txt");
+      // Asserting the bytes arrived, not just the dirent. The
+      // production wsd-container example had a path where pullOnce
+      // returned 1 (entry materialised) but the file's chunks were
+      // empty on the receiver — RPC reads landed HTTP 200 / 0 bytes.
+      const providerB = new SQLiteWorkspaceProvider(b.db, { now: () => 1 });
+      expect(providerB.readFileSync("/hello.txt", "utf8")).toBe("hello");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("pulls bytes written through the fd table (FUSE-shaped write)", async () => {
+    // Mirrors the FUSE path: openSync + writeSync + closeSync rather
+    // than the whole-file writeFileSync above. Both go through
+    // writeFileSyncImpl internally and should bump vfs_nodes.rev
+    // identically; this test pins that pull semantics survive the
+    // positional-write flow that FUSE uses.
+    const a = makePeer();
+    const b = makePeer();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      const fd = providerA.openSync("/fuse.txt", "w");
+      const payload = Buffer.from("from-fuse\n", "utf8");
+      providerA.writeSync(fd, payload, 0, payload.byteLength, null);
+      providerA.closeSync(fd);
+
+      const applied = await pullOnce(b.db, a.rpc);
+      expect(applied).toBe(1);
+      expect(fileEntries(b.db)).toContain("fuse.txt");
+
+      // The production bug: the dirent transferred but readback was
+      // empty. Assert byte equality, not just dirent presence.
+      const providerB = new SQLiteWorkspaceProvider(b.db, { now: () => 1 });
+      expect(providerB.readFileSync("/fuse.txt", "utf8")).toBe("from-fuse\n");
     } finally {
       a.close();
       b.close();

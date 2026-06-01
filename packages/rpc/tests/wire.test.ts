@@ -216,6 +216,73 @@ describe("SyncRPC push convergence", () => {
   });
 });
 
+describe("SyncRPC pull convergence", () => {
+  // Reproduces the FUSE → RPC direction observed broken in the
+  // production wsd-container example: an exec'd command writes a
+  // file through FUSE on the wsd side, and the host's
+  // pullOnce(b, wsdRpc) is supposed to bring the bytes back. The
+  // bug surfaced as HTTP 200 / 0 bytes on the subsequent RPC read,
+  // suggesting the dirent transferred but the chunks didn't.
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("client pulls a file written via writeFileSync on the server", async () => {
+    harness = await startHarness();
+    const provider = new SQLiteWorkspaceProvider(harness.db, { now: () => 1500 });
+    provider.writeFileSync("/whole.txt", "whole-file write");
+
+    // Receiver DB — the host's local store in the production setup.
+    const recvStorage = new SQLiteTestStorage();
+    const recvDb = new Database(recvStorage);
+    initializeSchema(recvDb, () => 2000);
+
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const { pullOnce } = await import("../src/sync-driver.js");
+      const applied = await pullOnce(recvDb, client);
+      expect(applied).toBeGreaterThan(0);
+      const recvProvider = new SQLiteWorkspaceProvider(recvDb, { now: () => 2500 });
+      expect(recvProvider.readFileSync("/whole.txt", "utf8")).toBe("whole-file write");
+    } finally {
+      await client.close();
+      recvStorage.close();
+    }
+  });
+
+  it("client pulls a file written via the fd table (FUSE-shaped writeSync)", async () => {
+    // Mirror the production scenario: openSync + writeSync +
+    // closeSync rather than the whole-file writeFileSync. FUSE's
+    // backing platformatic/vfs adapter drives the provider through
+    // this path. If the bytes don't make it across, this is where
+    // the production HTTP 200 / 0 bytes shape reproduces.
+    harness = await startHarness();
+    const provider = new SQLiteWorkspaceProvider(harness.db, { now: () => 1500 });
+    const fd = provider.openSync("/from-fuse.txt", "w");
+    const payload = Buffer.from("from-fuse\n", "utf8");
+    provider.writeSync(fd, payload, 0, payload.byteLength, null);
+    provider.closeSync(fd);
+
+    const recvStorage = new SQLiteTestStorage();
+    const recvDb = new Database(recvStorage);
+    initializeSchema(recvDb, () => 2000);
+
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const { pullOnce } = await import("../src/sync-driver.js");
+      const applied = await pullOnce(recvDb, client);
+      expect(applied).toBeGreaterThan(0);
+      const recvProvider = new SQLiteWorkspaceProvider(recvDb, { now: () => 2500 });
+      expect(recvProvider.readFileSync("/from-fuse.txt", "utf8")).toBe("from-fuse\n");
+    } finally {
+      await client.close();
+      recvStorage.close();
+    }
+  });
+});
+
 import { createWorkspaceError } from "@cloudflare/dofs";
 
 describe("WireError propagation", () => {
