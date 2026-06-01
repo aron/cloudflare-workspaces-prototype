@@ -8,7 +8,7 @@
 //
 // All scenarios run two SQLite-backed VFSes in-process,
 // driving the driver against direct stubs (no WebSocket).
-// That isolates the workspace-fs + workspace-rpc cost from
+// That isolates the dofs + workspace-rpc cost from
 // docker / FUSE / capnweb framing. The wsd harness covers
 // the integration cost separately.
 
@@ -18,8 +18,8 @@ import {
   initializeSchema,
   readWatermark,
   SQLiteWorkspaceProvider,
-} from "@cloudflare/workspace-fs";
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+} from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { bench, describe } from "vitest";
 
 import { createSyncServer } from "./server.js";

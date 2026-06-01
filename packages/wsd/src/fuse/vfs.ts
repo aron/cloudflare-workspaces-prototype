@@ -1,5 +1,5 @@
-import { Database, initializeSchema, SQLiteWorkspaceProvider } from "@cloudflare/workspace-fs";
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+import { Database, initializeSchema, SQLiteWorkspaceProvider } from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import type { SyncRPC } from "@cloudflare/workspace-rpc";
 import { pullOnce, tick } from "@cloudflare/workspace-rpc/driver";
 import { create, type VirtualFileSystem, VirtualProvider } from "@platformatic/vfs";
@@ -8,16 +8,16 @@ export type NodeVirtualFileSystem = VirtualFileSystem;
 
 // @platformatic/vfs's create() guards on `provider instanceof
 // VirtualProvider` and silently falls back to MemoryProvider when
-// the check fails. workspace-fs's SQLiteWorkspaceProvider can't
+// the check fails. dofs's SQLiteWorkspaceProvider can't
 // extend VirtualProvider directly without dragging the node-only
 // @platformatic/vfs dependency into the workerd-targeted package,
 // so we glue them together here.
 //
-// The subclass forwards every method to the workspace-fs provider
+// The subclass forwards every method to the dofs provider
 // instance held in its constructor. We can't use Object.assign or
 // setPrototypeOf at the seam because @platformatic/vfs's
 // VirtualFileSystem reads getters (readonly, supportsSymlinks,
-// supportsWatch) off the provider that the workspace-fs class
+// supportsWatch) off the provider that the dofs class
 // declares as instance properties; the wrapping pattern lets us
 // pass those through cleanly without re-implementing the data
 // model.
@@ -31,7 +31,7 @@ class SQLiteVirtualProvider extends VirtualProvider {
   }
 
   // VirtualProvider's static getters return false by default; the
-  // workspace-fs provider declares the real values as instance
+  // dofs provider declares the real values as instance
   // properties. Re-expose them on this wrapper.
   override get readonly(): boolean {
     return this.inner.readonly;
@@ -46,7 +46,7 @@ class SQLiteVirtualProvider extends VirtualProvider {
 
 // Wire forwarding methods on the prototype. Doing this in a loop
 // outside the class body keeps the (large) method list out of the
-// readable surface. Every method on the workspace-fs provider that
+// readable surface. Every method on the dofs provider that
 // VirtualProvider declares is forwarded; the rest still throw the
 // VirtualProvider default ENOSYS.
 const FORWARDED_METHODS = [
@@ -129,7 +129,7 @@ export interface CreateOptions {
 export interface NodeVfsHandle {
   // @platformatic/vfs filesystem the FUSE driver consumes.
   vfs: NodeVirtualFileSystem;
-  // workspace-fs Database backing the same store. Exposed so the
+  // dofs Database backing the same store. Exposed so the
   // CLI can construct a createSyncServer(db) and serve the local
   // store to upstream callers over capnweb.
   db: Database;

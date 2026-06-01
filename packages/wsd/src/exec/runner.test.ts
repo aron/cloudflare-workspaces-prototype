@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const { test, before } = require("node:test");
 
-// @cloudflare/workspace-fs is ESM-only; load it through a dynamic
+// @cloudflare/dofs is ESM-only; load it through a dynamic
 // import (this file runs as CommonJS because the wsd package is
 // declared "type": "commonjs").
 import type { Database as DatabaseT } from "@cloudflare/workspace-fs";
@@ -11,8 +11,8 @@ import type { Runner as RunnerT } from "../../src/exec/runner.js";
 let Database: typeof DatabaseT;
 let SQLiteTestStorage: typeof SQLiteTestStorageT;
 before(async () => {
-  ({ Database } = await import("@cloudflare/workspace-fs"));
-  ({ SQLiteTestStorage } = await import("@cloudflare/workspace-fs/testing"));
+  ({ Database } = await import("@cloudflare/dofs"));
+  ({ SQLiteTestStorage } = await import("@cloudflare/dofs/testing"));
 });
 
 const { Runner } = require("../../dist/exec/index.js") as {

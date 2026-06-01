@@ -19,7 +19,7 @@
     "bench:harness": "./test-harness/run-harness.sh bench"
   },
   "dependencies": {
-    "@cloudflare/workspace-fs": "*",
+    "@cloudflare/dofs": "*",
     "@cloudflare/workspace-rpc": "*",
     "capnweb": "^0.8.0"
   },

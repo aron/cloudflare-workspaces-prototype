@@ -53,7 +53,7 @@ import type {
   WorkspaceStatResult,
   WriteFileContent,
   WriteFileOptions,
-} from "@cloudflare/workspace-fs";
+} from "@cloudflare/dofs";
 import { RpcTarget } from "capnweb";
 
 import type { ExecResult } from "./shell.js";

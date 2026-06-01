@@ -1,10 +1,10 @@
 // Host-side Workspace facade.
 //
 // Runs inside a Cloudflare Worker / Durable Object. Owns a local
-// workspace-fs Database (the host store) and a SyncRPC connection
+// dofs Database (the host store) and a SyncRPC connection
 // to wsd. Filesystem operations on Workspace.fs mutate the local
 // store directly via the WorkspaceFilesystem class from
-// @cloudflare/workspace-fs; sync between the host store and wsd
+// @cloudflare/dofs; sync between the host store and wsd
 // is driven explicitly via Workspace.push() / Workspace.pull()
 // (TODO: not yet wired — those land in a follow-up commit). The
 // shell-side pre-exec push / post-exec pull bracket already lives
@@ -15,7 +15,7 @@ import {
   type DurableObjectStorageLike,
   initializeSchema,
   WorkspaceFilesystem,
-} from "@cloudflare/workspace-fs";
+} from "@cloudflare/dofs";
 import { pullOnce, pushOnce } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
@@ -25,7 +25,7 @@ import { WorkspaceStub } from "./stub.js";
 export interface WorkspaceOptions {
   // Local store backing this Workspace. In a Durable Object, pass
   // `ctx.storage`; in tests, pass a SQLiteTestStorage from
-  // @cloudflare/workspace-fs/testing. The constructor opens a
+  // @cloudflare/dofs/testing. The constructor opens a
   // Database against it and runs initializeSchema (idempotent).
   storage: DurableObjectStorageLike;
 

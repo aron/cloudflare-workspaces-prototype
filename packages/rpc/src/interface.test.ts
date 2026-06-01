@@ -17,7 +17,7 @@ import type { WireErrorCode } from "./interface.js";
 // map covers every WireErrorCode in the union.
 const COVERAGE: Record<WireErrorCode, string> = {
   ENOENT:
-    "workspace-fs:fs/stat throws ENOENT for a missing path; wsd:runner throws on get() of unknown id.",
+    "dofs:fs/stat throws ENOENT for a missing path; wsd:runner throws on get() of unknown id.",
   EUNKNOWN_HASH: "workspace:WorkspaceFs#assembleChunks throws when fetchObjects skipped a hash.",
   ESHUTDOWN:
     "TBD — wsd shutdown path will raise this when the runner refuses new exec after disposeAll.",

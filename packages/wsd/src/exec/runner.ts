@@ -18,7 +18,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-import type { Database } from "@cloudflare/workspace-fs";
+import type { Database } from "@cloudflare/dofs";
 
 import { createLog, type EventLog, openLog } from "./log.js";
 import { clearExecState, initializeExecSchema } from "./schema.js";

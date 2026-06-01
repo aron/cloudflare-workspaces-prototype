@@ -20,6 +20,6 @@ export class TestStorage extends DurableObject<TestBindings> {
 // We don't route any traffic through it.
 export default {
   async fetch(): Promise<Response> {
-    return new Response("workspace-fs test worker", { status: 200 });
+    return new Response("dofs test worker", { status: 200 });
   },
 } satisfies ExportedHandler<TestBindings>;

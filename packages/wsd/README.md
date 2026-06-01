@@ -24,7 +24,7 @@ All other paths and methods return `404`/`405` with a `text/plain` body.
 
 Current filesystem support:
 
-- `@platformatic/vfs` in-memory filesystem provided by `@cloudflare/workspace-fs`'s node provider.
+- `@platformatic/vfs` in-memory filesystem provided by `@cloudflare/dofs`'s node provider.
 - FUSE operation adapter covering the full `fuse-native` operation surface.
 - Unsupported FUSE operations intentionally throw `NotImplementedError` for visibility.
 - capnweb RPC over `/api` and `/ws` exposes the workspace database and an `exec` runner to clients.

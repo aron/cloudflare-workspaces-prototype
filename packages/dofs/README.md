@@ -1,4 +1,4 @@
-# `@cloudflare/workspace-fs`
+# `@cloudflare/dofs`
 
 Durable Object SQLite-backed virtual filesystem for Cloudflare Workspace.
 
@@ -12,7 +12,7 @@ This package exposes a JavaScript module, not a CLI. It bundles three layers tha
 Minimal DO-side usage — initialize the schema; the `Database` becomes the handle every other helper takes:
 
 ```ts
-import { Database, initializeSchema } from "@cloudflare/workspace-fs";
+import { Database, initializeSchema } from "@cloudflare/dofs";
 
 export class WorkspaceDO extends DurableObject {
   private readonly db: Database;

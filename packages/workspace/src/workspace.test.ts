@@ -1,4 +1,4 @@
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it, vi } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";

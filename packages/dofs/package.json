@@ -1,5 +1,5 @@
 {
-  "name": "@cloudflare/workspace-fs",
+  "name": "@cloudflare/dofs",
   "version": "0.0.0",
   "private": true,
   "type": "module",

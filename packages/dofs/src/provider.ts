@@ -1,5 +1,5 @@
 // SQLiteWorkspaceProvider — a @platformatic/vfs VirtualProvider backed
-// by the workspace-fs SQLite store.
+// by the dofs SQLite store.
 //
 // Every method on VirtualProvider is declared. Methods we already have
 // synchronous building blocks for delegate to the existing fs/ helpers;

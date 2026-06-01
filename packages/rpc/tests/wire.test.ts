@@ -9,8 +9,8 @@ import {
   initializeSchema,
   ROOT_INODE,
   SQLiteWorkspaceProvider,
-} from "@cloudflare/workspace-fs";
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+} from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 
@@ -149,7 +149,7 @@ describe("SyncRPC push convergence", () => {
         });
         // Use senderDb's currentRev as senderRev — we're
         // simulating a sync peer, not an external orchestrator.
-        const { currentRev } = await import("@cloudflare/workspace-fs");
+        const { currentRev } = await import("@cloudflare/dofs");
         const result = await client.push({ senderRev: currentRev(senderDb), changes });
         expect(result.rev).toBeGreaterThan(0);
 
@@ -175,7 +175,7 @@ describe("SyncRPC push convergence", () => {
   });
 });
 
-import { createWorkspaceError } from "@cloudflare/workspace-fs";
+import { createWorkspaceError } from "@cloudflare/dofs";
 
 describe("WireError propagation", () => {
   let harness: Harness | undefined;
@@ -251,7 +251,7 @@ describe("WireError propagation", () => {
   });
 });
 
-import { assertAppliedPushRev } from "@cloudflare/workspace-fs";
+import { assertAppliedPushRev } from "@cloudflare/dofs";
 
 describe("cross-side invariant", () => {
   let harness: Harness | undefined;
@@ -347,7 +347,7 @@ describe("push semantics — external vs sync peer", () => {
 
   it("push with senderRev=0 (external orchestrator) leaves pushRev alone so the outbound sync loop can ship the entry", async () => {
     harness = await startHarness();
-    const { coalesceChanges, currentRev, readWatermark } = await import("@cloudflare/workspace-fs");
+    const { coalesceChanges, currentRev, readWatermark } = await import("@cloudflare/dofs");
     const client = createSyncClient({ url: harness.url });
     try {
       // Stage one chunk + push one entry as if we were an
@@ -399,7 +399,7 @@ describe("push semantics — external vs sync peer", () => {
 
   it("push with senderRev>0 (sync peer) advances pushRev to silence loopback", async () => {
     harness = await startHarness();
-    const { currentRev, readWatermark, writeWatermark } = await import("@cloudflare/workspace-fs");
+    const { currentRev, readWatermark, writeWatermark } = await import("@cloudflare/dofs");
     const client = createSyncClient({ url: harness.url });
     try {
       // Seed pushRev at the current point so the F1 guard

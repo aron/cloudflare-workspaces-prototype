@@ -25,13 +25,13 @@ npm test
 For a single package:
 
 ```bash
-npm test --workspace @cloudflare/workspace-fs
+npm test --workspace @cloudflare/dofs
 ```
 
 For a single test file inside a package:
 
 ```bash
-npm test --workspace @cloudflare/workspace-fs -- src/path/to/file.test.ts
+npm test --workspace @cloudflare/dofs -- src/path/to/file.test.ts
 ```
 
 ## Commits
@@ -46,5 +46,5 @@ npm test --workspace @cloudflare/workspace-fs -- src/path/to/file.test.ts
 ## Plan
 
 `PLAN.md` at the repo root is the implementation roadmap for
-`packages/workspace-fs`. When you complete a task, update the relevant
+`packages/dofs`. When you complete a task, update the relevant
 status bullets in the package's README and check the task off the plan.

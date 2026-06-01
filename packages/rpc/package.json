@@ -28,7 +28,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cloudflare/workspace-fs": "*",
+    "@cloudflare/dofs": "*",
     "capnweb": "^0.8.0"
   },
   "devDependencies": {

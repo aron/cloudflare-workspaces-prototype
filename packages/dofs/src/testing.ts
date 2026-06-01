@@ -5,10 +5,10 @@
 //
 // This module imports node:sqlite at the top level and therefore
 // cannot be loaded under workerd. RecordingStorage — the
-// pure-JS fixture that also lives in workspace-fs's testing surface
+// pure-JS fixture that also lives in dofs's testing surface
 // — has moved to ./testing-recording.ts so it can be imported
 // from workerd-runnable tests. We re-export it here so existing
-// `import { RecordingStorage } from "@cloudflare/workspace-fs/testing"`
+// `import { RecordingStorage } from "@cloudflare/dofs/testing"`
 // call sites keep working under node.
 
 import { DatabaseSync, type StatementSync } from "node:sqlite";

@@ -16,7 +16,7 @@
 //   kind = 1  stderr, value = raw bytes
 //   kind = 2  exit,   value = 4-byte LE int32 exit code
 
-import type { Database } from "@cloudflare/workspace-fs";
+import type { Database } from "@cloudflare/dofs";
 
 import { ExecError, type ExecEvent } from "./types.js";
 

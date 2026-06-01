@@ -16,7 +16,7 @@ import {
   materialiseChange,
   readWatermark,
   stageBlob,
-} from "@cloudflare/workspace-fs";
+} from "@cloudflare/dofs";
 import { newWebSocketRpcSession, nodeHttpBatchRpcResponse, RpcTarget } from "capnweb";
 
 import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js";

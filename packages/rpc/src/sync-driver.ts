@@ -19,7 +19,7 @@ import {
   readWatermark,
   stageBlob,
   writeWatermark,
-} from "@cloudflare/workspace-fs";
+} from "@cloudflare/dofs";
 
 import type { SyncRPC } from "./interface.js";
 

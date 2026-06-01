@@ -37,7 +37,7 @@ export { currentRev, readWatermark, writeWatermark } from "./sync/watermarks.js"
 export type { ExecutedStatement } from "./testing-recording.js";
 // RecordingStorage is workerd-safe (pure JS). SQLiteTestStorage
 // wraps node:sqlite and must be imported from
-// '@cloudflare/workspace-fs/testing' under node-only call sites.
+// '@cloudflare/dofs/testing' under node-only call sites.
 export { RecordingStorage } from "./testing-recording.js";
 export type {
   DurableObjectStorageLike,

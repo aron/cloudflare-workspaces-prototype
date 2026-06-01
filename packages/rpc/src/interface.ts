@@ -17,7 +17,7 @@
 // WorkspaceRPC, so the wire stub exposes one stable surface while
 // the two halves stay internally separable.
 
-import type { ChangeEntry } from "@cloudflare/workspace-fs";
+import type { ChangeEntry } from "@cloudflare/dofs";
 
 export interface SyncRPC {
   // DO → container. Stream a coalesced batch of changes. Bytes are

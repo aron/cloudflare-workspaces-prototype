@@ -1,11 +1,11 @@
-// wsd-owned tables in the same SQLite DB as workspace-fs.
+// wsd-owned tables in the same SQLite DB as dofs.
 //
-// The exec log is a wsd runtime concern, not a workspace-fs
+// The exec log is a wsd runtime concern, not a dofs
 // storage concern, so the schema lives here. CREATE TABLE IF NOT
 // EXISTS keeps it idempotent across restarts; the runner calls
 // initializeExecSchema() once at construction.
 
-import type { Database } from "@cloudflare/workspace-fs";
+import type { Database } from "@cloudflare/dofs";
 
 // Single table per the "middle-ground" shape in PLAN.md Phase 8:
 // one row per event, kind discriminates stdout/stderr/exit, value

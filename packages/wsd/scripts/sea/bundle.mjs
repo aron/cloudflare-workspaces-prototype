@@ -93,7 +93,7 @@ module.exports = { beforeMount: noop, beforeUnmount: noop, configure: noop, unco
     target: "node22",
     format: "esm",
     // wsd is compiled to CJS, so esbuild walks it via the `require`
-    // condition. Add `import` to that list so workspace-fs and workspace-rpc
+    // condition. Add `import` to that list so dofs and workspace-rpc
     // (ESM-only after the SEA migration) still resolve via their exports map.
     conditions: ["import", "node"],
     outfile,

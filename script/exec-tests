@@ -248,7 +248,7 @@ try {
   // node:sqlite-backed test storage so this runs under plain
   // Node. Workerd consumers pass ctx.storage instead.
   const { SQLiteTestStorage } = await import(
-    `${repoRoot}/packages/workspace-fs/dist/testing.js`
+    `${repoRoot}/packages/dofs/dist/testing.js`
   );
   const ws = new Workspace({
     storage: new SQLiteTestStorage(),

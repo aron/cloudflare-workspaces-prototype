@@ -4,8 +4,8 @@ import {
   initializeSchema,
   readWatermark,
   SQLiteWorkspaceProvider,
-} from "@cloudflare/workspace-fs";
-import { SQLiteTestStorage } from "@cloudflare/workspace-fs/testing";
+} from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it } from "vitest";
 
 import type { SyncRPC } from "./interface.js";
