@@ -2,3 +2,8 @@ node_modules/
 dist/
 PLAN.md
 artifacts/
+
+# Platform packages: the SEA binary lands here at publish time via
+# packages/wsd/scripts/publish-*.mjs; the source of truth is
+# artifacts/wsd/ from the build-bin step.
+packages/wsd-*/bin/wsd

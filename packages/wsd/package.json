@@ -1,8 +1,9 @@
 {
   "name": "@cloudflare/workspace-wsd",
   "version": "0.1.0",
-  "description": "Workspace daemon CLI and FUSE mount.",
+  "description": "Workspace daemon CLI and FUSE mount. Source-only; the distributable lives at @cloudflare/workspace-wsd-linux-x64.",
   "license": "MIT",
+  "private": true,
   "type": "commonjs",
   "bin": {
     "wsd": "./dist/cli/wsd.cjs"
@@ -14,7 +15,8 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "build:bin": "node ./scripts/build-bin.mjs",
-    "test": "npm run build && npx -y node@22 --experimental-strip-types --test \"src/**/*.test.ts\""
+    "test": "npm run build && npx -y node@22 --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "publish:linux-x64": "node ./scripts/publish-linux-x64.mjs"
   },
   "engines": {
     "node": ">=22"
