@@ -65,11 +65,11 @@ export class WorkspaceFilesystem {
     return readdir(this.db, path);
   }
 
-  async findFiles(directory: string, pattern?: string): Promise<WorkspaceFoundEntry[]> {
+  async find(directory: string, pattern?: string): Promise<WorkspaceFoundEntry[]> {
     return find(this.db, directory, pattern);
   }
 
-  async listFilesUnder(prefix: string): Promise<string[]> {
+  async ls(prefix: string): Promise<string[]> {
     return ls(this.db, prefix);
   }
 

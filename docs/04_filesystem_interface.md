@@ -158,10 +158,10 @@ const s = await fs.stat("/workspace/build/out.wasm");
 console.log(`${s.size} bytes, modified ${new Date(s.mtime).toISOString()}`);
 ```
 
-### `findFiles`
+### `find`
 
 ```ts
-findFiles(
+find(
   directory: string,
   pattern?:  string,           // simple glob (`*.ts`, `**/*.md`)
 ): Promise<Array<{ path: string; type: "file" | "dir" }>>
@@ -169,23 +169,23 @@ findFiles(
 
 ```ts
 // Every TypeScript file in the project.
-const ts = await fs.findFiles("/workspace/src", "**/*.ts");
+const ts = await fs.find("/workspace/src", "**/*.ts");
 
 // Everything under a directory (no pattern).
-const all = await fs.findFiles("/workspace/notes");
+const all = await fs.find("/workspace/notes");
 ```
 
-### `listFilesUnder`
+### `ls`
 
 ```ts
-listFilesUnder(prefix: string): Promise<string[]>
+ls(prefix: string): Promise<string[]>
 ```
 
 Flat list of every file path that starts with `prefix`. Cheaper than
-`findFiles` when you don't need the directory rows.
+`find` when you don't need the directory rows.
 
 ```ts
-const paths = await fs.listFilesUnder("/workspace/.agents/skills");
+const paths = await fs.ls("/workspace/.agents/skills");
 ```
 
 ### `grep`
@@ -302,7 +302,7 @@ maps to `Workspace.fs`:
 | `symlink` / `readlink` | — | No symlink support. |
 | `watch` | — | See [02. Sync Protocol](./02_sync_protocol.md) for the change stream. |
 | `open` / `FileHandle` | — | Use streams instead. |
-| `glob` | `findFiles` | Limited glob support. |
+| `glob` | `find` | Limited glob support. |
 | — | `grep` | Not in `node:fs`; included here for agents. |
-| — | `findFiles` | Recursive directory walk with an optional pattern. |
-| — | `listFilesUnder` | Flat list of file paths under a prefix. |
+| — | `find` | Recursive directory walk with an optional pattern. |
+| — | `ls` | Flat list of file paths under a prefix. |

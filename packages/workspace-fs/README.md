@@ -27,14 +27,8 @@ export class WorkspaceDO extends DurableObject {
 
 > The `src/fs/*` primitives (`mkdir`, `writeFile`, `readFile`, `rm`, `readdir`, `stat`, `find`, `ls`, `grep`, `symlink`, `readlink`, `gc`, `watch`) are not re-exported from the package root yet — they are consumed in-tree by `SQLiteWorkspaceProvider` and by the sync `applyChanges` path. On the node side, instantiate `SQLiteWorkspaceProvider` (the `@platformatic/vfs` adapter) for a familiar node:fs-shaped surface; this is what `@cloudflare/workspace-wsd` mounts via FUSE. A higher-level DO-side `Workspace` class with the `fs`/`shell`/`push`/`pull` surface described in [`../../docs/README.md`](../../docs/README.md) is still future work — see [`../../PLAN.md`](../../PLAN.md).
 
-## API shape
+## Implementation status
 
-Naming decisions relative to `docs/04_filesystem_interface.md`:
-
-- `findFiles` is exposed as `find`.
-- `listFilesUnder` is exposed as `ls`.
-
-Implementation status:
 
 - `Database` wrapper around Durable Object SQL storage in place.
 - Schema initialization for the documented `vfs_*` tables (FS and sync) implemented and split into `schema/core.ts` + `schema/sync.ts`.
