@@ -67,7 +67,7 @@ PORT="${port}" REPO_ROOT="${repo_root}" node --input-type=module -e '
 const repoRoot = process.env.REPO_ROOT;
 const port = process.env.PORT;
 const { createWorkspaceClient } = await import(
-  `${repoRoot}/node_modules/@cloudflare/workspace-rpc/dist/cjs/client.js`
+  `${repoRoot}/node_modules/@cloudflare/workspace-rpc/dist/client.js`
 );
 
 const assert = (cond, msg) => {
@@ -234,10 +234,24 @@ try {
   // 7. Workspace.shell host wrapper (E3). Uses the composite
   // client through the high-level facade: encoding utf8 +
   // ExecHandle.result() in one call.
-  const { TestBackend, Workspace } = await import(
-    `${repoRoot}/packages/workspace/dist/index.js`
+  // Import the specific files rather than the package barrel.
+  // The barrel re-exports WorkspaceProxy, which extends
+  // WorkerEntrypoint from cloudflare:workers — that scheme
+  // only resolves under workerd, not plain Node.
+  const { TestBackend } = await import(
+    `${repoRoot}/packages/workspace/dist/backends/test.js`
+  );
+  const { Workspace } = await import(
+    `${repoRoot}/packages/workspace/dist/workspace.js`
+  );
+  // Workspace needs DurableObjectStorageLike; supply the
+  // node:sqlite-backed test storage so this runs under plain
+  // Node. Workerd consumers pass ctx.storage instead.
+  const { SQLiteTestStorage } = await import(
+    `${repoRoot}/packages/workspace-fs/dist/testing.js`
   );
   const ws = new Workspace({
+    storage: new SQLiteTestStorage(),
     backends: [new TestBackend({ url: `http://localhost:${port}` })],
   });
   try {
