@@ -162,7 +162,13 @@ function createHTTPServer(
 
   // /ws — capnweb WebSocket endpoint. Long-lived, bidirectional,
   // streaming-friendly. The container's primary sync carrier.
-  const wss = new WebSocketServer({ noServer: true });
+  // perMessageDeflate compresses each WS frame with zlib. Defaults
+  // off in the `ws` package; we turn it on so wsd-to-wsd peers
+  // (and any Node-side client that negotiates the extension) save
+  // bytes on the wire. Clients that don't advertise the extension
+  // negotiate down to plain frames, so no flag day for workerd or
+  // browser callers.
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
   wss.on("connection", (ws) => {
     acceptWebSocketSession(ws, rpc);
   });
@@ -319,7 +325,14 @@ async function main(): Promise<void> {
   const upstreamUrl = process.env.UPSTREAM_URL?.trim();
   let upstreamClient: WorkspaceClient | undefined;
   if (upstreamUrl !== undefined && upstreamUrl.length > 0) {
-    upstreamClient = createWorkspaceClient({ url: upstreamUrl });
+    // Use the `ws` package's WebSocket (not Node's built-in
+    // global) so the dial negotiates permessage-deflate against
+    // the upstream's WebSocketServer. Node 22's built-in
+    // WebSocket doesn't advertise the deflate extension.
+    upstreamClient = createWorkspaceClient({
+      url: upstreamUrl,
+      WebSocketImpl: WebSocket as unknown as typeof globalThis.WebSocket,
+    });
   }
   const { vfs, db, stopSync } = await createNodeVirtualFileSystem({
     upstream: upstreamClient?.sync,
