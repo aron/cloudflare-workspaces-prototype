@@ -93,7 +93,7 @@ export class Runner {
     if (this.disposed) throw new Error("runner disposed");
     const id = options.id ?? randomUUID();
     const existing = this.records.get(id);
-    if (existing !== undefined && existing.live) {
+    if (existing?.live) {
       throw new ExecError("EEXEC_BUSY", `exec id ${id} is already running`);
     }
     if (existing !== undefined) this.disposeRecord(existing);
@@ -158,7 +158,7 @@ export class Runner {
   get(id: string, options: { after?: number | "tail" } = {}): ExecHandle {
     const after = options.after ?? 0;
     const record = this.records.get(id);
-    if (record !== undefined && record.live) {
+    if (record?.live) {
       // Live reattach: seed with whatever's already in the log
       // past `after`, then continue with live events.
       return { id, events: this.makeLiveStream(record, after === "tail" ? -1 : after) };

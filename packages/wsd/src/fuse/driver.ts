@@ -458,7 +458,7 @@ export async function mountFuse(options: {
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
     debug: false,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
   }) as any;
 
   // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read

@@ -251,7 +251,7 @@ async function handleConnect(
     return;
   }
 
-  const wsUrl = toWebSocketUrl(baseUrl) + "/ws";
+  const wsUrl = `${toWebSocketUrl(baseUrl)}/ws`;
   const ws = new WebSocket(wsUrl);
   ws.once("open", () => {
     console.log(`/connect: attached RPC session to ${wsUrl}`);

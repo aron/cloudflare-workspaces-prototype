@@ -4,14 +4,20 @@ const { test, before } = require("node:test");
 // @cloudflare/workspace-fs is ESM-only; load it through a dynamic
 // import (this file runs as CommonJS because the wsd package is
 // declared "type": "commonjs").
-let Database: any;
-let SQLiteTestStorage: any;
+import type { Database as DatabaseT } from "@cloudflare/workspace-fs";
+import type { SQLiteTestStorage as SQLiteTestStorageT } from "@cloudflare/workspace-fs/testing";
+import type { Runner as RunnerT } from "../../src/exec/runner.js";
+
+let Database: typeof DatabaseT;
+let SQLiteTestStorage: typeof SQLiteTestStorageT;
 before(async () => {
   ({ Database } = await import("@cloudflare/workspace-fs"));
   ({ SQLiteTestStorage } = await import("@cloudflare/workspace-fs/testing"));
 });
 
-const { Runner } = require("../../dist/exec/index.js");
+const { Runner } = require("../../dist/exec/index.js") as {
+  Runner: typeof RunnerT;
+};
 
 type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
@@ -19,7 +25,7 @@ type ExecEvent =
   | { id: string; seq: number; name: "exit"; value: number };
 
 function fixture(options: Record<string, unknown> = {}): {
-  runner: any;
+  runner: InstanceType<typeof RunnerT>;
   dispose: () => void;
 } {
   const storage = new SQLiteTestStorage();
@@ -184,14 +190,14 @@ test("log eviction past maxBytes yields ELOG_TRUNCATED on replay", async () => {
     assert.ok(events.some((e) => e.name === "stdout"));
     // Replay should fail with ELOG_TRUNCATED. The throw happens
     // inside the pull callback when we walk the (gone) log rows.
-    let caught: any;
+    let caught: unknown;
     try {
       await drain(runner.get("evict", { after: 0 }).events);
     } catch (err) {
       caught = err;
     }
     assert.ok(caught !== undefined, "replay should throw after eviction");
-    assert.equal(caught.code, "ELOG_TRUNCATED");
+    assert.equal((caught as { code?: string }).code, "ELOG_TRUNCATED");
   } finally {
     dispose();
   }

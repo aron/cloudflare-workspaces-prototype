@@ -1,11 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
-const {
-  NotImplementedError,
-  createNodeVirtualFileSystem,
-  makeFUSEOps,
-} = require("../../dist/fuse/index.js");
+const { createNodeVirtualFileSystem, makeFUSEOps } = require("../../dist/fuse/index.js");
 
 const callback = (fn: (cb: (errno: number, result: unknown) => void) => void) =>
   new Promise<{ errno: number; result: unknown }>((resolve) =>
