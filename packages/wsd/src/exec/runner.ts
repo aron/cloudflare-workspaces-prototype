@@ -134,7 +134,16 @@ export class Runner {
       let seq: number;
       try {
         seq = log.setExit(exitCode);
-      } catch {
+      } catch (err) {
+        // The log row vanished (disposed mid-exit, schema reset, ...).
+        // Surface the exit to the live subscriber anyway so its
+        // stream closes, then propagate the storage failure as an
+        // error on the same stream. Without this the subscriber
+        // hangs forever waiting for an exit event that already
+        // happened.
+        record.subscriber?.error(err instanceof Error ? err : new Error(String(err)));
+        record.subscriber = undefined;
+        this.scheduleSweep();
         return;
       }
       record.subscriber?.enqueue({ id, seq, name: "exit", value: exitCode });

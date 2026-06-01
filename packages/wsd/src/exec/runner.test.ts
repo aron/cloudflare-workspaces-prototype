@@ -26,6 +26,7 @@ type ExecEvent =
 
 function fixture(options: Record<string, unknown> = {}): {
   runner: InstanceType<typeof RunnerT>;
+  db: DatabaseT;
   dispose: () => void;
 } {
   const storage = new SQLiteTestStorage();
@@ -33,6 +34,7 @@ function fixture(options: Record<string, unknown> = {}): {
   const runner = new Runner({ db, ...options });
   return {
     runner,
+    db,
     dispose: () => {
       runner.disposeAll();
       storage.close?.();
@@ -222,6 +224,41 @@ test("retention sweep evicts records past TTL", async () => {
         return true;
       },
     );
+  } finally {
+    dispose();
+  }
+});
+
+test("exit-event surfaces an error on the subscriber when setExit throws", async () => {
+  // Simulate the log row vanishing between exec start and child exit.
+  // Previously this swallowed the exit event and the subscriber's
+  // stream hung forever. Now the subscriber should see its stream
+  // error out instead.
+  const { runner, db, dispose } = fixture();
+  try {
+    const handle = runner.exec("sleep 0.1", { id: "setexit-throws" });
+    // Drop the meta row out from under the runner. setExit() will
+    // throw 'setExit after dispose' when the child exits.
+    db.run("DELETE FROM wsd_exec_meta WHERE exec_id = ?", "setexit-throws");
+    db.run("DELETE FROM wsd_exec_log WHERE exec_id = ?", "setexit-throws");
+
+    let caught: unknown;
+    const reader = handle.events.getReader();
+    try {
+      while (true) {
+        try {
+          const { done } = await reader.read();
+          if (done) break;
+        } catch (err) {
+          caught = err;
+          break;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    assert.ok(caught instanceof Error, "subscriber stream should surface the error");
+    assert.match((caught as Error).message, /setExit after dispose/);
   } finally {
     dispose();
   }
