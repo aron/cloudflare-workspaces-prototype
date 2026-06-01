@@ -29,6 +29,12 @@ function hex(bytes: Uint8Array): string {
   return s;
 }
 
+// Soft cap on entries processed per batch in pullOnce. Each batch
+// runs hasObjects + fetchObjects + applyChanges against the entries
+// it just buffered, then releases them before reading the next.
+// Peak memory in pullOnce is O(PULL_BATCH_SIZE), not O(stream).
+const PULL_BATCH_SIZE = 256;
+
 // Pull every entry the remote has produced since the last successful
 // pull, apply locally, advance fetchRev. Returns the number of
 // entries applied so callers can decide whether to tick again.
@@ -36,6 +42,13 @@ function hex(bytes: Uint8Array): string {
 // Bytes the receiver already holds (vfs_blobs.hash present) are
 // skipped on the wire; the hasObjects probe is what makes that
 // dedup work without per-chunk round-trips.
+//
+// The entry stream is drained in batches of PULL_BATCH_SIZE so peak
+// memory stays bounded on a large tree. fetchRev still advances
+// once at the end of the whole stream — per-batch advance would
+// require the wire to carry a rev cursor per entry. Crash safety is
+// idempotent re-apply: the receiver's alreadyApplied() check inside
+// applyChanges drops a re-fetched batch on the floor.
 export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
   const sinceRev = readWatermark(db, "fetchRev");
   // Capture the remote's currentRev BEFORE we drain its stream so
@@ -47,64 +60,81 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
   if (remoteRev <= sinceRev) return 0;
 
   const stream = await remote.fetchChanges({ sinceRev });
-  const entries: ChangeEntry[] = [];
-  const wantedHashes: Uint8Array[] = [];
-  const seenHash = new Set<string>();
   const reader = stream.getReader();
+  let totalApplied = 0;
+  let streamDone = false;
   try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      entries.push(value);
-      if (value.kind === "file") {
-        for (const c of value.chunks) {
-          const k = hex(c.hash);
-          if (!seenHash.has(k)) {
-            seenHash.add(k);
-            wantedHashes.push(c.hash);
+    while (!streamDone) {
+      // Read up to PULL_BATCH_SIZE entries before processing the batch.
+      const batch: ChangeEntry[] = [];
+      const wantedHashes: Uint8Array[] = [];
+      const seenHash = new Set<string>();
+      while (batch.length < PULL_BATCH_SIZE) {
+        const { value, done } = await reader.read();
+        if (done) {
+          streamDone = true;
+          break;
+        }
+        batch.push(value);
+        if (value.kind === "file") {
+          for (const c of value.chunks) {
+            const k = hex(c.hash);
+            if (!seenHash.has(k)) {
+              seenHash.add(k);
+              wantedHashes.push(c.hash);
+            }
           }
         }
       }
+      if (batch.length === 0) break;
+
+      // Probe + fetch missing chunk bytes for just this batch. Bytes
+      // the receiver already holds (or the remote doesn't have) are
+      // skipped, so the per-batch network cost is bounded.
+      if (wantedHashes.length > 0) {
+        const haveSubset = await remote.hasObjects(wantedHashes);
+        const remoteHasLocally = new Set<string>();
+        for (const h of haveSubset) remoteHasLocally.add(hex(h));
+        const missing = wantedHashes.filter((h) => {
+          const k = hex(h);
+          if (!remoteHasLocally.has(k)) return false;
+          const row = db.one<{ hash: Uint8Array }>("SELECT hash FROM vfs_blobs WHERE hash = ?", h);
+          return row === undefined;
+        });
+        if (missing.length > 0) {
+          const bytesStream = await remote.fetchObjects(missing);
+          const bytesReader = bytesStream.getReader();
+          try {
+            while (true) {
+              const { value, done } = await bytesReader.read();
+              if (done) break;
+              stageBlob(db, value.hash, value.bytes, Date.now());
+            }
+          } finally {
+            bytesReader.releaseLock();
+          }
+        }
+      }
+
+      // applyChanges with no advanceFetchRev: we only commit the
+      // watermark once at the end of the whole stream.
+      await applyChanges(db, batch, new Map(), { source: "upstream" });
+      totalApplied += batch.length;
     }
   } finally {
     reader.releaseLock();
   }
 
-  if (wantedHashes.length > 0) {
-    const haveSubset = await remote.hasObjects(wantedHashes);
-    // hasObjects answers "which of these does the receiver have"
-    // \u2014 from the remote's perspective. We want "which does
-    // the local store lack". Same query, against the local DB.
-    const remoteHasLocally = new Set<string>();
-    for (const h of haveSubset) remoteHasLocally.add(hex(h));
-    // Probe local: anything the remote knows about that we don't
-    // hold yet must be fetched.
-    const missing = wantedHashes.filter((h) => {
-      const k = hex(h);
-      if (!remoteHasLocally.has(k)) return false; // remote doesn't have it either
-      const row = db.one<{ hash: Uint8Array }>("SELECT hash FROM vfs_blobs WHERE hash = ?", h);
-      return row === undefined;
-    });
-    if (missing.length > 0) {
-      const bytesStream = await remote.fetchObjects(missing);
-      const bytesReader = bytesStream.getReader();
-      try {
-        while (true) {
-          const { value, done } = await bytesReader.read();
-          if (done) break;
-          stageBlob(db, value.hash, value.bytes, Date.now());
-        }
-      } finally {
-        bytesReader.releaseLock();
-      }
+  // Final watermark advance, gated on at least one batch having
+  // landed. Skipping the write when nothing applied avoids
+  // touching the DB on a no-op pull.
+  if (totalApplied > 0) {
+    const current = readWatermark(db, "fetchRev");
+    if (remoteRev > current) {
+      writeWatermark(db, "fetchRev", remoteRev);
     }
   }
-
-  await applyChanges(db, entries, new Map(), {
-    source: "upstream",
-    advanceFetchRev: remoteRev,
-  });
-  return entries.length;
+  return totalApplied;
 }
 
 // Push every entry the local store has produced since the last

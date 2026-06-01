@@ -227,3 +227,42 @@ describe("sync driver — cross-side invariant", () => {
     }
   });
 });
+
+describe("sync driver — streaming pullOnce", () => {
+  it("applies the entry stream in batches rather than buffering it whole", async () => {
+    // Source writes more entries than the batch size. The receiver
+    // should call hasObjects() more than once — once per batch —
+    // proving it didn't buffer the entire entry stream first.
+    const a = makePeer();
+    const b = makePeer();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      // PULL_BATCH_SIZE in sync-driver.ts is 256. Write twice that to
+      // force at least two batches.
+      const total = 600;
+      for (let i = 0; i < total; i++) {
+        providerA.writeFileSync(`/f${i}.txt`, `c${i}`);
+      }
+      let hasObjectsCalls = 0;
+      const wrapped = new Proxy(a.rpc as object, {
+        get(target, prop, receiver) {
+          if (prop === "hasObjects") {
+            return async (hashes: Uint8Array[]) => {
+              hasObjectsCalls++;
+              return Reflect.get(target, prop, receiver).call(target, hashes);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as typeof a.rpc;
+      const applied = await pullOnce(b.db, wrapped);
+      expect(applied).toBe(total);
+      expect(fileEntries(b.db).length).toBe(total);
+      // With a 256-entry batch we expect at least 3 calls.
+      expect(hasObjectsCalls).toBeGreaterThanOrEqual(3);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});

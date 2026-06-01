@@ -59,23 +59,26 @@ A typical `exec()` round-trip:
    container streams `ChangeEntry` records — one per touched path,
    per-file entries carrying `chunks: (hash, size)[]`. No bytes
    inline.
-5. **Diff.** The DO unions all chunk hashes from the entry stream,
-   probes its own `vfs_blobs` for which it already has, and calls
+5. **Diff.** The DO reads up to `PULL_BATCH_SIZE` (256) entries from the
+   stream, unions the chunk hashes referenced by that batch, probes
+   its own `vfs_blobs` for which it already has, and calls
    `fetchObjects` for the missing subset.
-6. **Apply.** Entries + new objects land in the DO's SQLite. The
-   shipped `applyChanges` helper tracks `bytesInBatch` / `pathsInBatch`
-   counters against a 64 MiB / 1024-path cap, but the cap currently
-   only **resets the counters** — the real durability boundary is the
-   per-mutation `transactionSync` inside each `writeFile`/`mkdir`/`rm`/
-   `symlink`. `fetchRev` is written **once at the end of the stream**,
-   to the remote `currentRev` captured at the start of the pull. A
-   crash mid-fetch resumes from the previous `fetchRev` and re-fetches
-   the whole batch (the apply is idempotent, so the end state is
-   correct).
-   *Roadmap (`PLAN.md` → Important):* consume the entry stream as it
-   arrives instead of buffering, wrap each batch in a real transaction,
-   and commit `fetchRev` per batch so a DO restart mid-pull resumes
-   minimally.
+6. **Apply.** Entries + new objects land in the DO's SQLite. Peak
+   memory in `pullOnce` is bounded by `PULL_BATCH_SIZE` entries plus
+   the bytes the batch references — the entry stream is never buffered
+   whole. Each batch runs through `applyChanges`, whose per-mutation
+   `transactionSync` inside `writeFile`/`mkdir`/`rm`/`symlink` is the
+   real durability boundary. The driver then loops back to step 5 for
+   the next batch.
+   `fetchRev` is written **once at the end of the stream**, to the
+   remote `currentRev` captured at the start of the pull. A crash
+   mid-fetch resumes from the previous `fetchRev` and re-fetches the
+   whole stream; the receiver's `alreadyApplied` check inside
+   `applyChanges` drops already-applied entries on the floor so
+   re-apply is idempotent and cheap.
+   *Roadmap (`PLAN.md` → Important):* per-batch `fetchRev` advance
+   needs the wire to carry a rev cursor per entry; until then the
+   stream-level advance is the only safe checkpoint.
 
 `writeFile` / `mkdir` / `rm` outside of `exec()` follow the same shape:
 step 1 is "this single change", steps 3–6 are skipped. `workspace.push()`
