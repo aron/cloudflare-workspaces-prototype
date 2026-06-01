@@ -140,7 +140,6 @@ export interface NodeVfsHandle {
 
 // Polling cadence for the background sync loop. Picked to match
 // human-typing latency expectations without saturating the wire.
-// Future work: make this configurable via CreateOptions.
 const SYNC_TICK_MS = 250;
 
 export async function createNodeVirtualFileSystem(
@@ -172,7 +171,6 @@ function startSyncLoop(db: Database, upstream: SyncRPC): () => void {
   const handle = setInterval(() => {
     if (stopped) return;
     tick(db, upstream).catch((error) => {
-      // eslint-disable-next-line no-console
       console.error("sync tick failed:", error);
     });
   }, SYNC_TICK_MS);
