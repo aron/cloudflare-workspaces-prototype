@@ -32,6 +32,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { newHttpBatchRpcSession, newWebSocketRpcSession } from "capnweb";
+import WebSocket from "ws";
 
 const execFileP = promisify(execFile);
 
@@ -184,18 +185,39 @@ async function fetchWatermarks(url) {
   return await batchStub(url).sync.watermarks();
 }
 
-// Build a payload-bytes Uint8Array filled with a deterministic
-// pattern so it doesn't compress trivially.
+// Build a payload-bytes Uint8Array.
+//
+// SOAK_PAYLOAD=incompressible (default): pseudo-random byte
+// pattern so a deflate-on-the-wire test doesn't get a free
+// win from the payload itself.
+//
+// SOAK_PAYLOAD=text: repeated ASCII so deflate can show its
+// compression ratio when it's enabled on the wire.
+const PAYLOAD_MODE = process.env.SOAK_PAYLOAD ?? "incompressible";
 function payloadBytes(seed) {
   const out = new Uint8Array(PAYLOAD_B);
-  for (let i = 0; i < PAYLOAD_B; i++) out[i] = (seed * 31 + i) & 0xff;
+  if (PAYLOAD_MODE === "text") {
+    const filler = `change ${seed} \u2014 the quick brown fox jumps over the lazy dog. `;
+    const bytes = new TextEncoder().encode(filler);
+    for (let i = 0; i < PAYLOAD_B; i++) out[i] = bytes[i % bytes.length];
+  } else {
+    for (let i = 0; i < PAYLOAD_B; i++) out[i] = (seed * 31 + i) & 0xff;
+  }
   return out;
 }
 
 // Persistent capnweb WebSocket session against B. Reused
 // across the soak; one upgrade, many push round-trips.
+//
+// SOAK_NO_DEFLATE=1 forces the dial to negotiate without
+// permessage-deflate so the soak can compare compressed and
+// uncompressed wire costs without rebuilding the wsd binary.
 function wsStub(url) {
-  return newWebSocketRpcSession(`${url.replace("http://", "ws://")}/ws`);
+  const wsUrl = `${url.replace("http://", "ws://")}/ws`;
+  const ws = new WebSocket(wsUrl, {
+    perMessageDeflate: process.env.SOAK_NO_DEFLATE !== "1",
+  });
+  return newWebSocketRpcSession(ws);
 }
 
 // One write into wsd via the SyncRPC push path. senderRev=0
