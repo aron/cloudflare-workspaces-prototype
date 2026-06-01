@@ -351,11 +351,19 @@ async function main(): Promise<void> {
   // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
   // without rebuilding the binary. Default lives in the Runner.
   const logMaxBytesEnv = process.env.EXEC_LOG_MAX_BYTES;
+  let logMaxBytesOverride: number | undefined;
+  if (logMaxBytesEnv !== undefined && logMaxBytesEnv !== "") {
+    const parsed = Number(logMaxBytesEnv);
+    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+      throw new Error(
+        `EXEC_LOG_MAX_BYTES must be a positive integer; got ${JSON.stringify(logMaxBytesEnv)}`,
+      );
+    }
+    logMaxBytesOverride = parsed;
+  }
   const runner = new Runner({
     db,
-    ...(logMaxBytesEnv !== undefined && logMaxBytesEnv !== ""
-      ? { logMaxBytes: Number(logMaxBytesEnv) }
-      : {}),
+    ...(logMaxBytesOverride !== undefined ? { logMaxBytes: logMaxBytesOverride } : {}),
   });
   const rpc = createWorkspaceServer(db, runner);
   const http = createHTTPServer(info, rpc);

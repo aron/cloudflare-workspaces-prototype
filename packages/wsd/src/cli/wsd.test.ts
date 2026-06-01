@@ -24,6 +24,28 @@ test("wsd rejects relative MOUNT_POINT values", async () => {
   assert.match(stderr, /MOUNT_POINT must be an absolute path/);
 });
 
+test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
+  // Boot the daemon with garbage in EXEC_LOG_MAX_BYTES; it should
+  // refuse to start. Previously Number('foo') -> NaN silently
+  // disabled log eviction (every append exceeded the cap).
+  const port = await getAvailablePort();
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: "/tmp/wsd-mount-not-used",
+      PORT: String(port),
+      EXEC_LOG_MAX_BYTES: "foo",
+      DISABLE_FUSE: "1",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  assert.equal(code, 1);
+  assert.match(stderr, /EXEC_LOG_MAX_BYTES must be a positive integer/);
+});
+
 test("wsd exposes file IO through the mounted filesystem", async (t) => {
   const backend = await detectFUSEBackend();
   if (backend.kind === "none") {
