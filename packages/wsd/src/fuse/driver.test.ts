@@ -226,3 +226,47 @@ test("write past the per-file cap returns EFBIG instead of growing unbounded", a
   );
   assert.equal(truncated, -27, "expected EFBIG (-27) from truncate");
 });
+
+test("FUSE write is visible through the backing VFS after release", async () => {
+  // The production wsd-container example showed FUSE-written files
+  // returning HTTP 200 / 0 bytes when read back via the RPC
+  // surface. Root cause hypothesis: makeFUSEOps keeps a per-file
+  // in-memory buffer (`files` Map) that .write() updates but
+  // .release()/.flush()/.fsync() never spill into the backing VFS.
+  // RPC readers go through the VFS, so they see the empty inode
+  // create()'d up front and miss every subsequent write.
+  //
+  // This test pins the contract: after a create + write + release
+  // sequence, the same path read through the VFS API returns the
+  // bytes that were written. Failing today; will turn green once
+  // the driver flushes its buffer on release (or write-through).
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/from-fuse.txt", 0o644, cb),
+  );
+  assert.equal(create.errno, 0);
+  const fh = create.result as number;
+
+  const payload = Buffer.from("from-fuse\n", "utf8");
+  const written = await status((cb: (value: number) => void) =>
+    ops.write("/from-fuse.txt", fh, payload, payload.byteLength, 0, cb),
+  );
+  assert.equal(written, payload.byteLength);
+
+  // release + flush + fsync — every codepath a well-behaved
+  // client would call before considering the write durable.
+  assert.equal(await status((cb) => ops.flush("/from-fuse.txt", fh, cb)), 0);
+  assert.equal(await status((cb) => ops.fsync("/from-fuse.txt", fh, 0, cb)), 0);
+  assert.equal(await status((cb) => ops.release("/from-fuse.txt", fh, cb)), 0);
+
+  // The VFS is the RPC surface's source of truth. Anything that
+  // wasn't written here doesn't survive a pullOnce.
+  const fromVfs = vfs.readFileSync("/from-fuse.txt");
+  assert.equal(
+    Buffer.from(fromVfs).toString("utf8"),
+    "from-fuse\n",
+    "FUSE writes must be flushed into the backing VFS for RPC reads to see them",
+  );
+});
