@@ -16,6 +16,7 @@ import {
   initializeSchema,
   WorkspaceFilesystem,
 } from "@cloudflare/workspace-fs";
+import { pullOnce, pushOnce } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { WorkspaceShell } from "./shell.js";
@@ -71,6 +72,7 @@ export class Workspace {
   }
 
   // Shell facade. Throws if called before ready() resolves.
+  // exec() brackets the spawn with push() / pull(); see shell.ts.
   get shell(): WorkspaceShell {
     if (!this.#shell) {
       throw new Error("Workspace not connected — await ready() first");
@@ -101,6 +103,27 @@ export class Workspace {
     return new WorkspaceStub(this);
   }
 
+  // Sync the local store with the connected backend.
+  //
+  // push() ships everything the host has written since the last
+  // push to wsd; pull() applies everything wsd has produced since
+  // the last pull. Both are explicit — the package doesn't run a
+  // background loop. WorkspaceShell brackets exec() automatically;
+  // call these directly for FS-only flows that need to hand off to
+  // the container via a tool other than exec.
+  //
+  // Returns the number of entries transferred so a polling loop
+  // can decide whether to tick again.
+  async push(): Promise<number> {
+    await this.ready();
+    return pushOnce(this.#db, this.#handle!.rpc.sync);
+  }
+
+  async pull(): Promise<number> {
+    await this.ready();
+    return pullOnce(this.#db, this.#handle!.rpc.sync);
+  }
+
   async close(): Promise<void> {
     if (this.#handle) {
       try {
@@ -119,7 +142,9 @@ export class Workspace {
       try {
         const handle = await backend.connect();
         this.#handle = handle;
-        this.#shell = new WorkspaceShell(handle.rpc);
+        // Workspace satisfies the Sync interface in shell.ts via
+        // its public push() / pull() methods.
+        this.#shell = new WorkspaceShell(handle.rpc.shell, this);
         return;
       } catch (error) {
         errors.push({ id: backend.id, error });

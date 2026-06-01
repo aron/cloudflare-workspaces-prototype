@@ -9,7 +9,22 @@ import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "@cloudflare/wor
 import { describe, expect, it } from "vitest";
 
 import type { KillSignal } from "./shell.js";
-import { WorkspaceShell } from "./shell.js";
+import { type Sync, WorkspaceShell } from "./shell.js";
+
+// Inert sync impl. The shell unit tests aren't exercising the
+// push/pull bracket — they just need a Sync that returns 0 from
+// both methods so the bracket plumbing is a no-op. Workspace.test.ts
+// covers the bracket against a real workspace.
+function makeSync(): Sync {
+  return {
+    async push() {
+      return 0;
+    },
+    async pull() {
+      return 0;
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Test fixture: a fully synthesised WorkspaceRPC. Each helper method on the
@@ -156,7 +171,7 @@ function exit(seq: number, code: number): ExecEvent {
 describe("WorkspaceShell.exec — RPC forwarding", () => {
   it("forwards the command verbatim", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.exec("echo hi && exit 0");
     expect(f.calls.exec).toHaveLength(1);
     expect(f.calls.exec[0].command).toBe("echo hi && exit 0");
@@ -164,21 +179,21 @@ describe("WorkspaceShell.exec — RPC forwarding", () => {
 
   it("forwards an explicit id", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.exec("noop", { id: "stable-id" });
     expect(f.calls.exec[0].id).toBe("stable-id");
   });
 
   it("omits id from the RPC when the caller doesn't supply one", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.exec("noop");
     expect(f.calls.exec[0].id).toBeUndefined();
   });
 
   it("forwards cwd", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.exec("noop", { cwd: "/workspace/sub" });
     expect(f.calls.exec[0].cwd).toBe("/workspace/sub");
   });
@@ -187,17 +202,29 @@ describe("WorkspaceShell.exec — RPC forwarding", () => {
     // The runner is authoritative — if it mints an id, the handle
     // exposes it. The facade doesn't second-guess.
     const f = fakeRpc({ mintedId: "from-runner" });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     expect(handle.id).toBe("from-runner");
   });
 
-  it("propagates errors from shell.exec without invoking the bracket", async () => {
+  it("propagates errors from shell.exec; the pre-spawn push ran, the post-drain pull did not", async () => {
     const f = fakeRpc({ throwOnExec: new Error("EEXEC_BUSY") });
-    const shell = new WorkspaceShell(f.rpc);
+    let pushCalls = 0;
+    let pullCalls = 0;
+    const sync: Sync = {
+      async push() {
+        pushCalls += 1;
+        return 0;
+      },
+      async pull() {
+        pullCalls += 1;
+        return 0;
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     await expect(shell.exec("noop")).rejects.toThrow("EEXEC_BUSY");
-    // Pre-exec currentRev was sampled; post-exec was not (no handle).
-    expect(f.calls.currentRev).toBe(1);
+    expect(pushCalls).toBe(1);
+    expect(pullCalls).toBe(0);
   });
 });
 
@@ -208,7 +235,7 @@ describe("WorkspaceShell.exec — RPC forwarding", () => {
 describe("WorkspaceShell.exec — handle shape", () => {
   it("returns a ReadableStream that can be consumed with getReader()", async () => {
     const f = fakeRpc({ events: [stdout(1, "hi"), exit(2, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     expect(handle).toBeInstanceOf(ReadableStream);
     const reader = handle.getReader();
@@ -219,7 +246,7 @@ describe("WorkspaceShell.exec — handle shape", () => {
 
   it("returns a stream that supports for-await iteration", async () => {
     const f = fakeRpc({ events: [stdout(1, "a"), stdout(2, "b"), exit(3, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const seen: string[] = [];
     for await (const event of handle) seen.push(event.name);
@@ -228,7 +255,7 @@ describe("WorkspaceShell.exec — handle shape", () => {
 
   it("hides id / result / kill from Object.keys and JSON.stringify", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     expect(Object.keys(handle)).not.toContain("id");
     expect(Object.keys(handle)).not.toContain("result");
@@ -240,7 +267,7 @@ describe("WorkspaceShell.exec — handle shape", () => {
 
   it("kill(signal) forwards the signal to killExec", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { id: "kid" });
     await handle.kill("SIGKILL");
     expect(f.calls.killExec).toEqual([{ id: "kid", signal: "SIGKILL" }]);
@@ -248,7 +275,7 @@ describe("WorkspaceShell.exec — handle shape", () => {
 
   it("kill() with no signal forwards undefined (server defaults to SIGTERM)", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { id: "kid" });
     await handle.kill();
     expect(f.calls.killExec).toEqual([{ id: "kid", signal: undefined }]);
@@ -264,7 +291,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
     const f = fakeRpc({
       events: [stdout(1, "one"), stdout(2, "two"), stdout(3, "three"), exit(4, 0)],
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.stdout).toBeInstanceOf(Uint8Array);
@@ -275,7 +302,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
     const f = fakeRpc({
       events: [stdout(1, "out"), stderr(2, "err"), stdout(3, "out2"), exit(4, 0)],
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(new TextDecoder().decode(result.stdout as Uint8Array)).toBe("outout2");
@@ -284,7 +311,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
 
   it("captures the exit code from the exit event", async () => {
     const f = fakeRpc({ events: [exit(1, 42)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.exitCode).toBe(42);
@@ -295,7 +322,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
     // the facade must still resolve so callers see something. -1 is
     // the documented sentinel.
     const f = fakeRpc({ events: [stdout(1, "partial")] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.exitCode).toBe(-1);
@@ -303,7 +330,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
 
   it("returns an empty Uint8Array when no output arrives", async () => {
     const f = fakeRpc({ events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.stdout).toBeInstanceOf(Uint8Array);
@@ -313,7 +340,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
 
   it("returns an empty string for utf8 encoding with no output", async () => {
     const f = fakeRpc({ events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { encoding: "utf8" });
     const result = await handle.result();
     expect(result.stdout).toBe("");
@@ -325,7 +352,7 @@ describe("WorkspaceShell.exec — result accumulation", () => {
       events: [stdout(1, "partial")],
       streamError: new Error("ESHUTDOWN"),
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop");
     await expect(handle.result()).rejects.toThrow("ESHUTDOWN");
   });
@@ -340,7 +367,7 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
     const f = fakeRpc({
       events: [stdout(1, "hello "), stderr(2, "warn"), stdout(3, "world"), exit(4, 0)],
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { encoding: "utf8" });
     const result = await handle.result();
     expect(result.stdout).toBe("hello world");
@@ -362,7 +389,7 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
         exit(3, 0),
       ],
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { encoding: "utf8" });
     const result = await handle.result();
     expect(result.stdout).toBe("🎉");
@@ -383,7 +410,7 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
         exit(5, 0),
       ],
     });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { encoding: "utf8" });
     const result = await handle.result();
     expect(result.stdout).toBe("🎉");
@@ -392,7 +419,7 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
 
   it("preserves encoding when consuming the stream directly", async () => {
     const f = fakeRpc({ events: [stdout(1, "stream-mode"), exit(2, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.exec("noop", { encoding: "utf8" });
     const seen: unknown[] = [];
     for await (const event of handle) {
@@ -406,60 +433,80 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
 // exec() — Phase 8.5 bracket math
 // ---------------------------------------------------------------------------
 
-describe("WorkspaceShell.exec — bracket math", () => {
-  it("reports pulled = postRev - preRev when wsd advanced during the run", async () => {
-    const f = fakeRpc({ revs: [10, 17], events: [stdout(1, "hi"), exit(2, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+describe("WorkspaceShell.exec — push/pull bracket", () => {
+  it("reports pushed and pulled from the Sync calls", async () => {
+    const f = fakeRpc({ events: [stdout(1, "hi"), exit(2, 0)] });
+    const sync: Sync = {
+      async push() {
+        return 5;
+      },
+      async pull() {
+        return 7;
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.exitCode).toBe(0);
-    expect(result.pushed).toBe(0);
+    expect(result.pushed).toBe(5);
     expect(result.pulled).toBe(7);
   });
 
-  it("reports pulled = 0 when wsd's currentRev did not advance", async () => {
-    const f = fakeRpc({ revs: [42, 42], events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+  it("calls push() before spawn and pull() after drain, in that order", async () => {
+    const f = fakeRpc({ events: [exit(1, 0)] });
+    const order: string[] = [];
+    const sync: Sync = {
+      async push() {
+        order.push("push");
+        return 0;
+      },
+      async pull() {
+        order.push("pull");
+        return 0;
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     const handle = await shell.exec("noop");
-    const result = await handle.result();
-    expect(result.pulled).toBe(0);
+    expect(order).toEqual(["push"]); // push fired before exec returned
+    await handle.result();
+    expect(order).toEqual(["push", "pull"]); // pull fired after drain
   });
 
-  it("clamps pulled to 0 when currentRev appears to go backwards", async () => {
-    // Shouldn't happen in production (currentRev is monotonic), but
-    // a misbehaving stub or a wsd restart between calls could trip
-    // it. We don't want to surface negative counts to callers.
-    const f = fakeRpc({ revs: [100, 50], events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
-    const handle = await shell.exec("noop");
-    const result = await handle.result();
-    expect(result.pulled).toBe(0);
-  });
-
-  it("falls back to pulled = 0 when the post-exec currentRev call throws", async () => {
-    // docs/05: failed pushes/pulls do not abort the command. The
-    // caller still gets the exit code; the bracket count is just
-    // best-effort.
-    const f = fakeRpc({
-      revs: [10, 99],
-      throwOnRevCall: 2,
-      events: [exit(1, 0)],
-    });
-    const shell = new WorkspaceShell(f.rpc);
+  it("falls back to pushed = 0 when sync.push() throws", async () => {
+    const f = fakeRpc({ events: [exit(1, 0)] });
+    const sync: Sync = {
+      async push() {
+        throw new Error("push offline");
+      },
+      async pull() {
+        return 3;
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     const handle = await shell.exec("noop");
     const result = await handle.result();
     expect(result.exitCode).toBe(0);
-    expect(result.pulled).toBe(0);
+    expect(result.pushed).toBe(0);
+    // pull still fires — docs/05 says one failed half doesn't abort the other
+    expect(result.pulled).toBe(3);
   });
 
-  it("pushed is always 0 under the thin-client architecture", async () => {
-    // Pin the contract so a future change that wires a non-zero
-    // value here lands explicitly and visibly.
-    const f = fakeRpc({ revs: [0, 50], events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+  it("falls back to pulled = 0 when sync.pull() throws", async () => {
+    const f = fakeRpc({ events: [exit(1, 0)] });
+    const sync: Sync = {
+      async push() {
+        return 2;
+      },
+      async pull() {
+        throw new Error("pull offline");
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     const handle = await shell.exec("noop");
     const result = await handle.result();
-    expect(result.pushed).toBe(0);
+    expect(result.exitCode).toBe(0);
+    expect(result.pushed).toBe(2);
+    expect(result.pulled).toBe(0);
   });
 });
 
@@ -470,60 +517,75 @@ describe("WorkspaceShell.exec — bracket math", () => {
 describe("WorkspaceShell.get — reattach", () => {
   it("forwards id to getExec", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.get("attach-id");
     expect(f.calls.getExec[0].id).toBe("attach-id");
   });
 
   it("maps resume: 'full' to after: undefined", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.get("id", { resume: "full" });
     expect(f.calls.getExec[0].after).toBeUndefined();
   });
 
   it("maps resume: 'tail' to after: 'tail'", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.get("id", { resume: "tail" });
     expect(f.calls.getExec[0].after).toBe("tail");
   });
 
   it("maps resume: <number> to after: <number>", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.get("id", { resume: 17 });
     expect(f.calls.getExec[0].after).toBe(17);
   });
 
   it("omits after when resume is not supplied", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     await shell.get("id");
     expect(f.calls.getExec[0].after).toBeUndefined();
   });
 
   it("returns a handle whose id matches the requested id", async () => {
     const f = fakeRpc();
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.get("replay-me");
     expect(handle.id).toBe("replay-me");
   });
 
-  it("samples preRev at reattach time, not at the original exec", async () => {
-    // Reattaching to a child after exit replays the buffered events
-    // immediately; postRev should equal preRev sampled inside get(),
-    // so pulled is 0 for a fully-completed run.
-    const f = fakeRpc({ revs: [200, 200], events: [exit(1, 0)] });
-    const shell = new WorkspaceShell(f.rpc);
+  it("skips the pre-exec push but still runs the post-drain pull", async () => {
+    // Reattach doesn't own the original push frame: pushed = 0.
+    // The post-drain pull still fires — anything wsd produced
+    // between reattach and drain lands locally.
+    const f = fakeRpc({ events: [exit(1, 0)] });
+    let pushCalls = 0;
+    let pullCalls = 0;
+    const sync: Sync = {
+      async push() {
+        pushCalls += 1;
+        return 1;
+      },
+      async pull() {
+        pullCalls += 1;
+        return 2;
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
     const handle = await shell.get("x", { resume: "full" });
     const result = await handle.result();
-    expect(result.pulled).toBe(0);
+    expect(pushCalls).toBe(0);
+    expect(pullCalls).toBe(1);
+    expect(result.pushed).toBe(0);
+    expect(result.pulled).toBe(2);
   });
 
   it("accumulates the replayed output the same way exec() does", async () => {
     const f = fakeRpc({ events: [stdout(1, "replay"), exit(2, 5)] });
-    const shell = new WorkspaceShell(f.rpc);
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
     const handle = await shell.get("id", { encoding: "utf8" });
     const result = await handle.result();
     expect(result.stdout).toBe("replay");

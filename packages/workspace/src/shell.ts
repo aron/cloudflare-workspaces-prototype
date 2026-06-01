@@ -6,18 +6,30 @@
 // consume the ReadableStream directly (run-and-stream), or drop
 // the handle entirely (fire-and-forget).
 //
-// Phase 8.5 bracket. WorkspaceShell holds the composite
-// WorkspaceRPC (not just ShellRPC) so it can sample wsd's
-// `currentRev` via SyncRPC.watermarks() around each exec. The
-// rev delta from pre-exec to post-exit becomes ExecResult.pulled.
-// `pushed` stays 0 under the thin-client architecture — there is
-// no host-side store to push from; Workspace.fs.writeFile ships
-// bytes synchronously, so by the time exec() is called the
-// container has already seen them. The field is preserved for the
-// docs/05 contract and will start carrying a non-zero count when
-// the host gains a local store or batched push surface.
+// Every exec() call brackets the spawn with the docs/05 sync
+// frames:
+//   - pushOnce(db, rpc.sync) runs *before* the spawn so any
+//     host-side writes since the last push are visible to the
+//     command.
+//   - pullOnce(db, rpc.sync) runs *after* the stream drains (i.e.
+//     after the exit event), so anything the command produced is
+//     visible to subsequent Workspace.fs reads.
+// The pushed / pulled counts land in ExecResult.
+//
+// Pull only fires when the caller awaits handle.result(). A
+// caller that consumes the stream directly gets the push but not
+// the pull — docs/05 puts the pull after the exit event, which
+// only result() observes. If you need the pull in that flow,
+// drive the stream yourself then call Workspace.pull() explicitly.
+//
+// get() (reattach) is intentionally not bracketed. Reattaching
+// to an already-running exec doesn't represent a new push frame.
+// The result() of a reattached handle reports pushed = 0 and the
+// pulled count from a pull that runs after its own drain — best-
+// effort, can be 0 if nothing landed in wsd between reattach and
+// drain.
 
-import type { ExecEvent, ShellRPC, WorkspaceRPC } from "@cloudflare/workspace-rpc";
+import type { ExecEvent, ShellRPC } from "@cloudflare/workspace-rpc";
 
 export type ExecEncoding = "utf8" | undefined;
 
@@ -35,15 +47,12 @@ export interface ExecResult<E extends ExecEncoding = undefined> {
   stdout: Chunk<E>;
   stderr: Chunk<E>;
   // VFS sync stats from the docs/05 bracket.
-  //   pushed — changes the host uploaded before the command ran.
-  //            Always 0 under the thin-client architecture, where
-  //            Workspace.fs.writeFile ships synchronously and the
-  //            host holds no local store to push from.
-  //   pulled — wsd revs observed between exec() and the exit
-  //            event. Best-effort: includes the spawned command's
-  //            own writes plus anything else that landed in wsd
-  //            during the window. v1 makes no attempt to isolate
-  //            the command's writes from concurrent host writers.
+  //   pushed — entries shipped by the pre-exec pushOnce.
+  //   pulled — entries applied by the post-drain pullOnce.
+  // Both fields are populated only when handle.result() is
+  // awaited. Consuming the stream directly leaves pulled at 0;
+  // pushed is observed before the stream is returned, so it
+  // reflects the real push count either way.
   pushed: number;
   pulled: number;
 }
@@ -89,13 +98,23 @@ export interface GetExecOptions<E extends ExecEncoding = undefined> {
   resume?: "tail" | "full" | number;
 }
 
-export class WorkspaceShell {
-  readonly #rpc: WorkspaceRPC;
-  readonly #shell: ShellRPC;
+// Push/pull bracket plumbing. WorkspaceShell doesn't know about
+// the local Database or the SyncRPC wire — the host wires both
+// behind a Sync object that exposes the entry counts.
+// Workspace itself satisfies this interface (push() / pull() are
+// public methods); tests pass a plain { push, pull } object.
+export interface Sync {
+  push(): Promise<number>;
+  pull(): Promise<number>;
+}
 
-  constructor(rpc: WorkspaceRPC) {
-    this.#rpc = rpc;
-    this.#shell = rpc.shell;
+export class WorkspaceShell {
+  readonly #shell: ShellRPC;
+  readonly #sync: Sync;
+
+  constructor(shell: ShellRPC, sync: Sync) {
+    this.#shell = shell;
+    this.#sync = sync;
   }
 
   exec(command: string): Promise<ExecHandle<undefined>>;
@@ -105,21 +124,21 @@ export class WorkspaceShell {
     command: string,
     options: ExecOptions<E> = {},
   ): Promise<ExecHandle<E>> {
-    // Snapshot wsd's currentRev BEFORE handing the exec to the
-    // runner. Any rev advance between this read and the child's
-    // exit event lands in ExecResult.pulled. Concurrent host
-    // writers can also bump currentRev during the window; v1
-    // accepts that the count is "revs observed during the exec",
-    // not "revs the command itself produced". A per-exec
-    // attribution would need wsd-side rev ranges scoped to the
-    // child's pid — deferred.
-    const preRev = await this.#rpc.sync.currentRev();
+    // Pre-exec push: ship anything the host wrote since the last
+    // push so the spawned command sees it. Failures non-fatal per
+    // docs/05 — the command still runs; pushed reports 0.
+    let pushed = 0;
+    try {
+      pushed = await this.#sync.push();
+    } catch {
+      // pushed stays 0
+    }
     const { id, events } = await this.#shell.exec({
       command,
       id: options.id,
       cwd: options.cwd,
     });
-    return wrapHandle<E>(this.#rpc, id, events, options.encoding, preRev);
+    return wrapHandle<E>(this.#shell, this.#sync, id, events, options.encoding, pushed);
   }
 
   get(id: string): Promise<ExecHandle<undefined>>;
@@ -130,15 +149,11 @@ export class WorkspaceShell {
     options: GetExecOptions<E> = {},
   ): Promise<ExecHandle<E>> {
     const after = resumeToAfter(options.resume);
-    // Reattach can't recover the original pre-exec rev. Sample
-    // currentRev now and report only the delta the reattached
-    // observer sees from this point forward. For "full" replays
-    // of an already-exited child the delta will be 0; for a
-    // still-running child it's the revs that land between now
-    // and exit.
-    const preRev = await this.#rpc.sync.currentRev();
     const { events } = await this.#shell.getExec({ id, after });
-    return wrapHandle<E>(this.#rpc, id, events, options.encoding, preRev);
+    // Reattach doesn't own the original push frame: pushed = 0.
+    // The post-drain pull still fires, scoped to whatever lands
+    // between reattach and the next drain.
+    return wrapHandle<E>(this.#shell, this.#sync, id, events, options.encoding, 0);
   }
 }
 
@@ -152,25 +167,24 @@ function resumeToAfter(resume: "tail" | "full" | number | undefined): number | "
 // ReadableStream that pipes from the wire stream and applies any
 // encoding conversion in flight.
 function wrapHandle<E extends ExecEncoding>(
-  rpc: WorkspaceRPC,
+  shell: ShellRPC,
+  sync: Sync,
   id: string,
   wireEvents: ReadableStream<ExecEvent>,
   encoding: E | undefined,
-  preRev: number,
+  pushed: number,
 ): ExecHandle<E> {
   const stream = pipeEvents<E>(wireEvents, encoding);
   const handle = stream as ExecHandle<E>;
-  // id / result / kill are not enumerable so JSON.stringify
-  // on the handle (rare but plausible) doesn't trip on them.
   Object.defineProperties(handle, {
     id: { value: id, enumerable: false, writable: false },
     result: {
-      value: () => drainToResult<E>(stream, encoding, rpc, preRev),
+      value: () => drainToResult<E>(stream, encoding, sync, pushed),
       enumerable: false,
       writable: false,
     },
     kill: {
-      value: (signal?: KillSignal) => rpc.shell.killExec({ id, signal }),
+      value: (signal?: KillSignal) => shell.killExec({ id, signal }),
       enumerable: false,
       writable: false,
     },
@@ -230,8 +244,8 @@ function pipeEvents<E extends ExecEncoding>(
 async function drainToResult<E extends ExecEncoding>(
   stream: ReadableStream<WorkspaceExecEvent<E>>,
   encoding: E | undefined,
-  rpc: WorkspaceRPC,
-  preRev: number,
+  sync: Sync,
+  pushed: number,
 ): Promise<ExecResult<E>> {
   const reader = stream.getReader();
   const stdoutParts: Array<Chunk<E>> = [];
@@ -248,25 +262,21 @@ async function drainToResult<E extends ExecEncoding>(
   } finally {
     reader.releaseLock();
   }
-  // Sample currentRev after the stream drains — i.e. after the
-  // exit event was emitted upstream. Anything wsd's applyChanges
-  // committed during the child's lifetime is visible to this
-  // read; subtracting preRev gives the bracket's pulled count.
-  // Failures on the wire here are non-fatal per docs/05 "failed
-  // pushes/pulls do not abort the command" — fall back to 0.
-  let postRev = preRev;
+  // Post-drain pull: apply anything wsd produced during the exec.
+  // Failures non-fatal per docs/05 ("failed pushes/pulls do not
+  // abort the command"); pulled stays 0 in that case.
+  let pulled = 0;
   try {
-    postRev = await rpc.sync.currentRev();
+    pulled = await sync.pull();
   } catch {
-    // Leave postRev = preRev so pulled is 0; the exec's own
-    // exit code is the contract the caller cares about.
+    // pulled stays 0
   }
   return {
     exitCode,
     stdout: joinParts<E>(stdoutParts, encoding),
     stderr: joinParts<E>(stderrParts, encoding),
-    pushed: 0,
-    pulled: Math.max(0, postRev - preRev),
+    pushed,
+    pulled,
   };
 }
 
