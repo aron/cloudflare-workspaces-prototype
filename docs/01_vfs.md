@@ -1,4 +1,4 @@
-# 01. Directory Structure
+# 01. VFS
 
 > [!IMPORTANT]
 > This document describes the **intended design** and has **diverged

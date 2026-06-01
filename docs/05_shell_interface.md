@@ -128,7 +128,7 @@ await run.kill("SIGKILL");
 ## Working directory
 
 `cwd` is optional and defaults to the workspace root (see
-[01. Directory Structure](./01_directory_structure.md)). It must be an
+[01. VFS](./01_vfs.md)). It must be an
 absolute path inside the workspace; container-local paths (e.g. `/tmp`)
 are rejected.
 

@@ -24,7 +24,7 @@ Three things to keep in mind when porting Node code over:
 
 - Every method is **async**, even ones Node ships as sync-only.
 - Paths are **absolute** and POSIX-style (see
-  [01. Directory Structure](./01_directory_structure.md)).
+  [01. VFS](./01_vfs.md)).
 - The default `readFile` return is a **stream**, not a Buffer. Pass
   `"utf8"` (or `{ encoding: "utf8" }`) when you actually want a string in
   memory. Use streams whenever the file could be larger than a few

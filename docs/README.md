@@ -204,7 +204,7 @@ above, then dive into the area you're working on.
 
 | Document | Topic |
 | --- | --- |
-| [01. Directory Structure](./01_directory_structure.md) | Layout of the workspace tree, reserved paths, and mount points. |
+| [01. VFS](./01_vfs.md) | Layout of the workspace tree, reserved paths, and mount points. |
 | [02. Sync Protocol](./02_sync_protocol.md) | How the DO-backed VFS synchronises with the sandbox container. |
 | [03. Filesystem Schema](./03_filesystem_schema.md) | SQLite schema backing the virtual filesystem. |
 | [04. Filesystem Interface](./04_filesystem_interface.md) | `Workspace.fs` API: `readFile`, `writeFile`, `mkdir`, `grep`, etc. |

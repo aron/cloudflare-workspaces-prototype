@@ -243,7 +243,7 @@ of the `FileStore` contract.
 
 - Tools take absolute paths. Pre-resolve user input against the
   configured workspace root before calling (see
-  [01. Directory Structure](./01_directory_structure.md)).
+  [01. VFS](./01_vfs.md)).
 - The `read` tool returns continuation offsets — feed them back to the
   model on truncation rather than asking for the whole file.
 - Pair the `edit` tool with a system prompt that tells the model edits
