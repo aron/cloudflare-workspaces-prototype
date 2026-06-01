@@ -16,7 +16,8 @@
       "!**/artifacts",
       "!**/.devbox",
       "!**/.venv",
-      "!package-lock.json"
+      "!package-lock.json",
+      "!**/worker-configuration.d.ts"
     ]
   },
   "formatter": {
