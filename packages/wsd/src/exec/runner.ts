@@ -235,16 +235,11 @@ export class Runner {
     }
     let controller: ReadableStreamDefaultController<ExecEvent> | undefined;
     let closed = false;
-    const pendingPreStart: ExecEvent[] = [];
-
     const sub: LiveSubscriber = {
       paused: false,
       enqueue: (event) => {
         if (closed) return;
-        if (controller === undefined) {
-          pendingPreStart.push(event);
-          return;
-        }
+        if (controller === undefined) return;
         try {
           controller.enqueue(event);
         } catch {
@@ -296,8 +291,6 @@ export class Runner {
             c.enqueue(ev);
           }
         }
-        for (const ev of pendingPreStart) c.enqueue(ev);
-        pendingPreStart.length = 0;
         if (!record.live) c.close();
       },
       pull: () => {
