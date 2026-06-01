@@ -8,10 +8,16 @@ const ERRNO = {
   ENOTDIR: -20,
   EISDIR: -21,
   EINVAL: -22,
+  EFBIG: -27,
   ENOTEMPTY: -39,
   ENODATA: -61,
   ENOSYS: -38,
 } as const;
+
+// Cap per-file in-memory size so a runaway client can't OOM the daemon.
+// Sized to be comfortable for source trees while staying well below
+// typical container memory limits.
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 
 type StatusCallback = (errnoOrBytes: number) => void;
 type ResultCallback<T> = (errno: number, result: T) => void;
@@ -123,13 +129,18 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     size: number; // logical end-of-file
   }
   const files = new Map<string, FileEntry>();
-  const ensureCapacity = (entry: FileEntry, needed: number): void => {
-    if (needed <= entry.buf.length) return;
+  // Returns true on success, false if `needed` exceeds MAX_FILE_BYTES.
+  // Callers must surface the failure to FUSE as EFBIG.
+  const ensureCapacity = (entry: FileEntry, needed: number): boolean => {
+    if (needed > MAX_FILE_BYTES) return false;
+    if (needed <= entry.buf.length) return true;
     let cap = Math.max(entry.buf.length * 2, 64 * 1024);
     while (cap < needed) cap *= 2;
+    if (cap > MAX_FILE_BYTES) cap = MAX_FILE_BYTES;
     const next = Buffer.alloc(cap);
     entry.buf.copy(next, 0, 0, entry.size);
     entry.buf = next;
+    return true;
   };
 
   const warnedOperations = new Set<string>();
@@ -265,7 +276,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
         files.set(path, entry);
       }
       const end = position + length;
-      ensureCapacity(entry, end);
+      if (!ensureCapacity(entry, end)) {
+        cb(ERRNO.EFBIG);
+        return;
+      }
       buffer.copy(entry.buf, position, 0, length);
       if (end > entry.size) entry.size = end;
       cb(length);
@@ -296,7 +310,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
         files.set(path, entry);
       }
       if (size > entry.size) {
-        ensureCapacity(entry, size);
+        if (!ensureCapacity(entry, size)) {
+          cb(ERRNO.EFBIG);
+          return;
+        }
         entry.buf.fill(0, entry.size, size);
       }
       entry.size = size;

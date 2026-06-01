@@ -196,3 +196,33 @@ test("FUSE ops return errno values instead of throwing for expected filesystem e
   assert.equal(await status((cb) => ops.open("/missing", 0, cb)), -2);
   assert.equal(await status((cb) => ops.unlink("/missing", cb)), -2);
 });
+
+test("write past the per-file cap returns EFBIG instead of growing unbounded", async () => {
+  // The driver keeps an in-memory buffer per file and doubles its
+  // capacity on demand. Without a ceiling, a runaway client can OOM
+  // the daemon. We cap per-file size at 256 MiB and surface EFBIG.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/big", 0o644, cb),
+  );
+  assert.equal(create.errno, 0);
+  const fh = create.result as number;
+
+  // Sized just past the cap. The driver allocates the buffer up-front
+  // and writes into it, so this also catches an off-by-one in the
+  // boundary check.
+  const PAST_CAP = 256 * 1024 * 1024 + 1;
+  const tinyBuffer = Buffer.alloc(1, 0x61);
+  const written = await status((cb: (value: number) => void) =>
+    ops.write("/big", fh, tinyBuffer, 1, PAST_CAP - 1, cb),
+  );
+  assert.equal(written, -27, "expected EFBIG (-27)");
+
+  // Truncate past the cap should also refuse rather than allocate.
+  const truncated = await status((cb: (value: number) => void) =>
+    ops.truncate("/big", PAST_CAP, cb),
+  );
+  assert.equal(truncated, -27, "expected EFBIG (-27) from truncate");
+});
