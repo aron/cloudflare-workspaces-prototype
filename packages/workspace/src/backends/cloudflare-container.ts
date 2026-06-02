@@ -44,6 +44,7 @@ import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 
 import type { BackendHandle, WorkspaceBackend } from "../backend.js";
+import { startHeartbeat } from "../heartbeat.js";
 
 export interface CloudflareContainerBackendOptions {
   // Resolver for the container the backend should drive. Called
@@ -79,11 +80,18 @@ export interface CloudflareContainerBackendOptions {
   // Total time the backend waits for: container port to open,
   // /connect POST to return, /ws upgrade to arrive. Default 30s.
   connectTimeoutMs?: number;
+
+  // Period for the application-level heartbeat — a watermarks()
+  // RPC on a timer. Two jobs: detect a silently-dead peer faster
+  // than waiting for the next real RPC, and keep middlebox idle
+  // timers warm. Default 20_000ms. Set 0 to disable.
+  heartbeatIntervalMs?: number;
 }
 
 const DEFAULT_EGRESS_HOST = "workspace.internal";
 const DEFAULT_CONTAINER_PORT = 8080;
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export class CloudflareContainerBackend implements WorkspaceBackend {
   readonly id = "cloudflare-container";
@@ -115,6 +123,7 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       containerPort: options.containerPort ?? DEFAULT_CONTAINER_PORT,
       containerEnv: options.containerEnv,
       connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+      heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
     };
   }
 
@@ -145,8 +154,10 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     // handle so the next ready() call rebuilds against a fresh
     // session. Without this, a mid-session drop strands the dead
     // handle and every subsequent RPC throws.
+    let stopHeartbeat: (() => void) | undefined;
     const closed = new Promise<void>((resolve) => {
       const onClose = () => {
+        stopHeartbeat?.();
         resolve();
         this.#handle = undefined;
       };
@@ -156,10 +167,30 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       ws.addEventListener("error", onClose, { once: true });
     });
 
+    // Heartbeat. A cheap watermarks() RPC on a timer detects a
+    // silently-dead peer faster than waiting for the next real RPC,
+    // and keeps middlebox idle timers warm. On failure we close the
+    // socket, which fires the close handler above; the Workspace
+    // sees the `closed` promise resolve and rebuilds.
+    if (this.#options.heartbeatIntervalMs > 0) {
+      stopHeartbeat = startHeartbeat({
+        intervalMs: this.#options.heartbeatIntervalMs,
+        ping: () => (stub as unknown as WorkspaceRPC).sync.watermarks(),
+        onFailure: () => {
+          try {
+            ws.close();
+          } catch {
+            // already closed; idempotent
+          }
+        },
+      });
+    }
+
     const handle: BackendHandle = {
       rpc: stub as unknown as WorkspaceRPC,
       closed,
       close: async () => {
+        stopHeartbeat?.();
         try {
           ws.close();
         } catch {
