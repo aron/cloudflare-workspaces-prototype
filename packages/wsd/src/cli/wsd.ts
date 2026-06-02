@@ -89,6 +89,11 @@ function createHTTPServer(
   info: WSDInfo,
   rpc: ReturnType<typeof createWorkspaceServer>,
 ): HTTPHandle {
+  // Holds the current outbound capnweb session opened via /connect.
+  // Re-POSTing /connect (e.g. after a DO hibernate + new incarnation)
+  // closes the previous socket so the old session doesn't leak for
+  // the life of the container.
+  const upstreamSlot: { ws: WebSocket | undefined } = { ws: undefined };
   const server = createServer((request, response) => {
     const path = requestPath(request);
 
@@ -128,7 +133,7 @@ function createHTTPServer(
         });
         return;
       }
-      void handleConnect(request, response, rpc);
+      void handleConnect(request, response, rpc, upstreamSlot);
       return;
     }
 
@@ -228,6 +233,7 @@ async function handleConnect(
   request: IncomingMessage,
   response: ServerResponse,
   rpc: ReturnType<typeof createWorkspaceServer>,
+  upstreamSlot: { ws: WebSocket | undefined },
 ): Promise<void> {
   let body: ConnectBody;
   try {
@@ -260,11 +266,31 @@ async function handleConnect(
     return;
   }
 
+  // Close any prior outbound session before opening a new one. A DO
+  // restart / hibernate hands the new incarnation a fresh /connect;
+  // without this, the previous WebSocket leaks for the life of the
+  // container.
+  const previous = upstreamSlot.ws;
+  if (previous !== undefined) {
+    upstreamSlot.ws = undefined;
+    try {
+      previous.close(1000, "replaced by new /connect");
+    } catch {
+      // already closed; idempotent
+    }
+  }
+
   const wsUrl = `${toWebSocketUrl(baseUrl)}/ws`;
   const ws = new WebSocket(wsUrl);
+  upstreamSlot.ws = ws;
   ws.once("open", () => {
     console.log(`/connect: attached RPC session to ${wsUrl}`);
     acceptWebSocketSession(ws, rpc);
+  });
+  ws.once("close", () => {
+    // Drop the slot only if we're still the current ws — a
+    // subsequent /connect may have already installed a new one.
+    if (upstreamSlot.ws === ws) upstreamSlot.ws = undefined;
   });
   ws.once("error", (err) => {
     console.error(`/connect: WebSocket error against ${wsUrl}:`, err.message);

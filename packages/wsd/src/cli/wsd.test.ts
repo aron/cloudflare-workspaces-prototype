@@ -174,6 +174,80 @@ test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
   assert.match(stderr, /mutually exclusive/);
 });
 
+test("/connect re-dial tears down the prior WebSocket session", async (t) => {
+  // After a DO hibernate, the new incarnation calls POST /connect
+  // again to bootstrap a fresh capnweb session against the still-
+  // running wsd. wsd must close the previous outbound socket before
+  // opening the new one — otherwise the old session leaks for the
+  // life of the container and the DO ends up with two halves of two
+  // sessions tangled together.
+  const { WebSocketServer } = require("ws");
+  const peerPort = await getAvailablePort();
+  const opened = [];
+  const peerSockets = new Set();
+  const peerServer = http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok\n");
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  peerServer.on("connection", (sock) => {
+    peerSockets.add(sock);
+    sock.on("close", () => peerSockets.delete(sock));
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  peerServer.on("upgrade", (req, socket, head) => {
+    if (req.url !== "/ws") {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const entry = { closed: false, closeCode: null };
+      ws.on("close", (code) => {
+        entry.closed = true;
+        entry.closeCode = code;
+      });
+      opened.push(entry);
+    });
+  });
+  await new Promise((resolve) => peerServer.listen(peerPort, "127.0.0.1", resolve));
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        // Force-destroy any lingering TCP sockets so peerServer.close()
+        // can return; otherwise an unkilled wsd-side WS keeps the
+        // server open and the test hangs at teardown.
+        for (const sock of peerSockets) sock.destroy();
+        wss.close();
+        peerServer.close(() => resolve());
+      }),
+  );
+
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
+  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+
+  const peerUrl = `http://127.0.0.1:${peerPort}`;
+  const connect = async () => {
+    const res = await postJson(`http://127.0.0.1:${port}/connect`, { url: peerUrl });
+    assert.equal(res.statusCode, 200);
+  };
+
+  await connect();
+  // Wait for the first WS to actually attach on the peer side before
+  // issuing the second /connect; otherwise the assert race is flaky.
+  await waitFor(() => opened.length === 1);
+
+  await connect();
+  await waitFor(() => opened.length === 2);
+  // The prior socket must be closed by the time the new one lands.
+  await waitFor(() => opened[0].closed);
+  assert.equal(opened[0].closed, true, "first peer WS should be closed after re-POST /connect");
+  assert.equal(opened[1].closed, false, "second peer WS should still be open");
+});
+
 async function startWsd(
   t,
   {
@@ -292,6 +366,44 @@ function isConnectionError(error) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(predicate, { timeoutMs = 2_000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await delay(intervalMs);
+  }
+  throw new Error("waitFor: predicate did not become true within the timeout");
+}
+
+function postJson(url, body) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        response.setEncoding("utf8");
+        let buf = "";
+        response.on("data", (chunk) => {
+          buf += chunk;
+        });
+        response.on("end", () => {
+          resolve({ body: buf, headers: response.headers, statusCode: response.statusCode });
+        });
+      },
+    );
+    req.once("error", reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 function stopProcess(child) {
