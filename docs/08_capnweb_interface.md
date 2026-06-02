@@ -201,17 +201,18 @@ ends:
   the chunk hashes referenced, the DO follows up with `pushObjects`
   (itself a stream) for the missing subset, the container applies the
   batch and returns `{ rev, appliedPushRev }`.
-- **Fetch (container → DO).** The DO calls `currentRev()` to capture
-  the target watermark, then `fetchChanges({ sinceRev })` to stream
+- **Fetch (container → DO).** The DO calls `fetchChanges({ sinceRev })`,
+  which returns `{ currentRev, appliedPushRev, stream }` in one round-
+  trip. `currentRev` is the target watermark; `appliedPushRev`
+  carries the cross-side invariant (the puller asserts it covers
+  the local `pushRev` before draining). The DO then streams
   `ChangeEntry` records, accumulates chunk hashes, calls `hasObjects`
   on itself (cheap, local) to find what it already has, then calls
-  `fetchObjects` for the rest. The extra `currentRev()` round-trip is
-  noted at `packages/rpc/src/sync-driver.ts:46` and is the motivation
-  for the planned `fetchChanges → { rev, stream }` collapse.
+  `fetchObjects` for the rest.
 
 | Aspect | Value |
 | --- | --- |
-| Round-trips per fetch | 1 `currentRev` + 1 streaming `fetchChanges` + 1 `hasObjects` + 1 streaming `fetchObjects` (only if any hashes are missing) |
+| Round-trips per fetch | 1 streaming `fetchChanges` (carries `currentRev` + `appliedPushRev` + entry stream) + 1 `hasObjects` per batch + 1 streaming `fetchObjects` per batch (only if any hashes are missing) |
 | Round-trips per push | 1 streaming `push` (carries `senderRev`) + 1 `hasObjects` (server-driven) + 1 streaming `pushObjects` (only if any hashes are missing) |
 | Bytes inline in `ChangeEntry` | None — entries carry chunk hashes only |
 | Object transfer shape | `ReadableStream<{ hash, bytes }>` in both directions |

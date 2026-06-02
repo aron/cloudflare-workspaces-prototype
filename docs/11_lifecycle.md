@@ -191,10 +191,11 @@ to retry against a fresh session. Specifically:
   `assertAppliedPushRev` succeeds. A torn push leaves `pushRev` at
   the previous value; the next push replays the same batch.
   `applyChanges` on the receiver is idempotent.
-- **`pullOnce`.** `fetchRev` is written once at end-of-stream. A torn
-  pull leaves `fetchRev` at the previous value; the next pull
-  re-fetches the entire stream. `applyChanges`'s `alreadyApplied`
-  check drops the duplicates.
+- **`pullOnce`.** `fetchRev` advances per committed batch to the max
+  `rev` the batch carried. A torn pull leaves `fetchRev` at the last
+  per-batch checkpoint; the next pull re-fetches only the entries
+  past that point. `applyChanges`'s `alreadyApplied` check drops any
+  duplicates the resume happens to overlap with.
 - **`exec.events`.** Each event carries a monotonic `seq` per exec
   id. The client reattaches via `getExec({ id, after: seq })`.
 
