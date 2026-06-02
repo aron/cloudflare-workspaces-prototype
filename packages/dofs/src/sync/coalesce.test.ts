@@ -53,7 +53,7 @@ describe("coalesceChanges", () => {
       rm(db, "/gone.txt", {});
       const entries = await drain(coalesceChanges(db, 0));
       const gone = entries.find((e) => e.path === "/gone.txt");
-      expect(gone).toEqual({ kind: "delete", path: "/gone.txt" });
+      expect(gone).toEqual({ kind: "delete", rev: expect.any(Number), path: "/gone.txt" });
     });
   });
 
@@ -79,6 +79,27 @@ describe("coalesceChanges", () => {
       const paths = entries.map((e) => e.path);
       expect(paths).toContain("/new.txt");
       expect(paths).not.toContain("/old.txt");
+    });
+  });
+
+  it("yields entries in ascending rev order", async () => {
+    // pullOnce uses entry.rev as a per-batch checkpoint cursor. The
+    // contract is monotonicity: if entry N has rev R, every entry
+    // already emitted has rev <= R. Without that, the puller can't
+    // advance fetchRev mid-stream without risking a skip on the next
+    // resume.
+    await withDB(async (db) => {
+      await writeFile(db, "/a.txt", "a", {}, () => 1);
+      mkdir(db, "/d", {}, () => 1);
+      await writeFile(db, "/d/b.txt", "b", {}, () => 1);
+      await writeFile(db, "/c.txt", "c", {}, () => 1);
+      rm(db, "/a.txt", {});
+      await writeFile(db, "/d/b.txt", "b2", {}, () => 2);
+      const entries = await drain(coalesceChanges(db, 0));
+      const revs = entries.map((e) => e.rev);
+      for (let i = 1; i < revs.length; i++) {
+        expect(revs[i]).toBeGreaterThanOrEqual(revs[i - 1]);
+      }
     });
   });
 });

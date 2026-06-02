@@ -268,6 +268,59 @@ describe("sync driver — streaming pullOnce", () => {
       b.close();
     }
   });
+
+  it("advances fetchRev per committed batch, not once at end-of-stream", async () => {
+    // The roadmap item: on a crash mid-pull, wasted work should be
+    // bounded by the in-flight batch (PULL_BATCH_SIZE = 256), not by
+    // the whole stream. After each batch's applyChanges commits,
+    // fetchRev should reflect the max rev of that batch — not stay
+    // at the previous watermark until the final stream end.
+    const a = makePeer();
+    const b = makePeer();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      // Write > PULL_BATCH_SIZE entries so the puller sees at least
+      // two batches.
+      const total = 400;
+      for (let i = 0; i < total; i++) {
+        providerA.writeFileSync(`/f${i.toString().padStart(4, "0")}.txt`, `c${i}`);
+      }
+      const remoteFinalRev = currentRev(a.db);
+
+      // Sample fetchRev after each batch's applyChanges by
+      // intercepting hasObjects — by the time hasObjects fires for
+      // batch N, batch N-1 has already committed and advanced
+      // fetchRev.
+      const sampledRevs: number[] = [];
+      const wrapped = new Proxy(a.rpc as object, {
+        get(target, prop, receiver) {
+          if (prop === "hasObjects") {
+            return async (hashes: Uint8Array[]) => {
+              sampledRevs.push(readWatermark(b.db, "fetchRev"));
+              return Reflect.get(target, prop, receiver).call(target, hashes);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as typeof a.rpc;
+
+      await pullOnce(b.db, wrapped);
+
+      // First batch's hasObjects call sees fetchRev = 0 (nothing
+      // committed yet). Subsequent batches see strictly increasing
+      // values — that's the property the per-batch advance buys.
+      expect(sampledRevs.length).toBeGreaterThanOrEqual(2);
+      expect(sampledRevs[0]).toBe(0);
+      for (let i = 1; i < sampledRevs.length; i++) {
+        expect(sampledRevs[i]).toBeGreaterThan(sampledRevs[i - 1]);
+      }
+      // End state still matches the remote.
+      expect(readWatermark(b.db, "fetchRev")).toBe(remoteFinalRev);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
 });
 
 describe("sync driver — push atomicity", () => {

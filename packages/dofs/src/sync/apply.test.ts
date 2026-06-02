@@ -114,7 +114,7 @@ describe("applyChanges", () => {
   it("handles delete entries", async () => {
     await withDB(async (db) => {
       await writeFile(db, "/gone.txt", "bye", {}, () => 1);
-      await applyChanges(db, [{ kind: "delete", path: "/gone.txt" }], new Map());
+      await applyChanges(db, [{ kind: "delete", rev: 99, path: "/gone.txt" }], new Map());
       expect(resolveInode(db, "/gone.txt")).toBeNull();
     });
   });
@@ -140,6 +140,7 @@ describe("applyChanges loopback suppression", () => {
         [
           {
             kind: "file",
+            rev: 100,
             path: "/from-upstream.txt",
             mode: 0o644,
             mtime: 2,
@@ -169,6 +170,7 @@ describe("applyChanges loopback suppression", () => {
         [
           {
             kind: "file",
+            rev: 100,
             path: "/local.txt",
             mode: 0o644,
             mtime: 1,
@@ -196,6 +198,7 @@ describe("applyChanges loopback suppression", () => {
         [
           {
             kind: "file",
+            rev: 100,
             path: "/upstream.txt",
             mode: 0o644,
             mtime: 1,
@@ -241,6 +244,7 @@ describe("applyChanges loopback suppression — F1", () => {
         [
           {
             kind: "file",
+            rev: 100,
             path: "/from-upstream.txt",
             mode: 0o644,
             mtime: 2,
@@ -276,6 +280,7 @@ describe("applyChanges loopback suppression — F1", () => {
         [
           {
             kind: "file",
+            rev: 100,
             path: "/from-upstream.txt",
             mode: 0o644,
             mtime: 1,

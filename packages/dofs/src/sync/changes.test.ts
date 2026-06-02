@@ -19,6 +19,8 @@ describe("materialiseChange", () => {
         size: 11,
       });
       if (entry?.kind !== "file") throw new Error("expected file");
+      expect(entry.rev).toBeGreaterThan(0);
+      if (entry?.kind !== "file") throw new Error("expected file");
       expect(entry.chunks).toHaveLength(1);
       expect(entry.chunks[0].size).toBe(11);
       expect(entry.chunks[0].hash).toBeInstanceOf(Uint8Array);
@@ -31,6 +33,7 @@ describe("materialiseChange", () => {
       mkdir(db, "/sub", { mode: 0o755 }, () => 999);
       expect(materialiseChange(db, "/sub")).toEqual({
         kind: "dir",
+        rev: expect.any(Number),
         path: "/sub",
         mode: 0o755,
         mtime: 999,
@@ -44,6 +47,7 @@ describe("materialiseChange", () => {
       symlink(db, "/target.txt", "/link", () => 2);
       expect(materialiseChange(db, "/link")).toEqual({
         kind: "symlink",
+        rev: expect.any(Number),
         path: "/link",
         target: "/target.txt",
         // chmod on a symlink itself is platform-specific; we record
@@ -60,6 +64,7 @@ describe("materialiseChange", () => {
       rm(db, "/gone.txt", {});
       expect(materialiseChange(db, "/gone.txt")).toEqual({
         kind: "delete",
+        rev: expect.any(Number),
         path: "/gone.txt",
       });
     });

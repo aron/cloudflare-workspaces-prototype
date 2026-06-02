@@ -69,6 +69,7 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
       const batch: ChangeEntry[] = [];
       const wantedHashes: Uint8Array[] = [];
       const seenHash = new Set<string>();
+      let batchMaxRev = 0;
       while (batch.length < PULL_BATCH_SIZE) {
         const { value, done } = await reader.read();
         if (done) {
@@ -76,6 +77,7 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
           break;
         }
         batch.push(value);
+        if (value.rev > batchMaxRev) batchMaxRev = value.rev;
         if (value.kind === "file") {
           for (const c of value.chunks) {
             const k = hex(c.hash);
@@ -116,23 +118,33 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
         }
       }
 
-      // applyChanges with no advanceFetchRev: we only commit the
-      // watermark once at the end of the whole stream.
-      await applyChanges(db, batch, new Map(), { source: "upstream" });
+      // Advance fetchRev per committed batch. Because coalesceChanges
+      // emits in ascending rev order, every entry already applied
+      // (this batch + all previous ones) has rev <= batchMaxRev, so
+      // it's safe to checkpoint here. A crash after this commit
+      // means the next pull resumes from batchMaxRev and re-fetches
+      // only entries from later batches — bounded by PULL_BATCH_SIZE
+      // instead of the whole stream.
+      await applyChanges(db, batch, new Map(), {
+        source: "upstream",
+        advanceFetchRev: batchMaxRev,
+      });
       totalApplied += batch.length;
     }
   } finally {
     reader.releaseLock();
   }
 
-  // Final watermark advance, gated on at least one batch having
-  // landed. Skipping the write when nothing applied avoids
-  // touching the DB on a no-op pull.
-  if (totalApplied > 0) {
-    const current = readWatermark(db, "fetchRev");
-    if (remoteRev > current) {
-      writeWatermark(db, "fetchRev", remoteRev);
-    }
+  // Nudge fetchRev to the remote's currentRev captured at the start.
+  // The per-batch advances above bring fetchRev up to the max rev
+  // any entry carried, but if the rev window contained entries that
+  // were all filtered out (e.g. ignored paths), the stream is empty
+  // and the per-batch path never fires. Advancing to remoteRev here
+  // is still safe because we captured it before draining the stream
+  // and never regress.
+  const current = readWatermark(db, "fetchRev");
+  if (remoteRev > current) {
+    writeWatermark(db, "fetchRev", remoteRev);
   }
   return totalApplied;
 }

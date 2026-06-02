@@ -70,15 +70,15 @@ A typical `exec()` round-trip:
    `transactionSync` inside `writeFile`/`mkdir`/`rm`/`symlink` is the
    real durability boundary. The driver then loops back to step 5 for
    the next batch.
-   `fetchRev` is written **once at the end of the stream**, to the
-   remote `currentRev` captured at the start of the pull. A crash
-   mid-fetch resumes from the previous `fetchRev` and re-fetches the
-   whole stream; the receiver's `alreadyApplied` check inside
-   `applyChanges` drops already-applied entries on the floor so
-   re-apply is idempotent and cheap.
-   *Roadmap (`PLAN.md` → Important):* per-batch `fetchRev` advance
-   needs the wire to carry a rev cursor per entry; until then the
-   stream-level advance is the only safe checkpoint.
+   `fetchRev` is advanced **per committed batch** to the max `rev`
+   any entry in that batch carried. `coalesceChanges` emits entries
+   in ascending rev order so this checkpoint is safe — everything
+   below `batchMaxRev` has been applied. A crash mid-pull resumes
+   from the last per-batch advance, so re-fetched work is bounded
+   by `PULL_BATCH_SIZE` (256) entries, not the whole stream. The
+   receiver's `alreadyApplied` check inside `applyChanges` still
+   drops already-applied entries on the floor so re-apply is
+   idempotent and cheap.
 
 `writeFile` / `mkdir` / `rm` outside of `exec()` follow the same shape:
 step 1 is "this single change", steps 3–6 are skipped. `workspace.push()`
@@ -191,11 +191,11 @@ edited file) shows up exactly once on the wire. See
   applied so far; the receiver never sees a partial push. The pull
   path keeps the per-mutation model because the streaming batches
   can't hold a synchronous transaction across network I/O.
-- **DO restart mid-pull.** `fetchRev` is single-write at end of stream
-  today, so a DO restart mid-pull resumes from the previous `fetchRev`
-  and re-fetches the entire in-flight batch. End state is correct
-  (apply is idempotent). *Roadmap (`PLAN.md` → Important):* advance
-  `fetchRev` per committed batch so the resume is minimal.
+- **DO restart mid-pull.** `fetchRev` advances per committed batch
+  to the max `rev` the batch carried, so a restart mid-pull resumes
+  from the last per-batch checkpoint. Wasted work is bounded by
+  `PULL_BATCH_SIZE` entries (256), not the whole stream. End state is
+  correct either way — apply is idempotent.
 - **DO restart.** Watermarks are persisted, so the new DO instance
   picks up where the old one left off. The container keeps `wsd`
   alive across the gap.
