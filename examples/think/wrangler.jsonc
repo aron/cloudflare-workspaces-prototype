@@ -1,0 +1,35 @@
+// Worker + Durable Object hosting a Cloudflare Container that runs
+// the wsd daemon. The TriageAgent DO extends @cloudflare/think and
+// owns one Workspace per agent name; the TriageWorkflow drives a
+// three-step pipeline against it.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "think-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-26",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "ai": { "binding": "AI" },
+
+  "containers": [
+    {
+      "class_name": "TriageAgent",
+      "image": "./Dockerfile",
+      "max_instances": 5
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "TriageAgent", "class_name": "TriageAgent" }]
+  },
+
+  "workflows": [
+    {
+      "name": "TRIAGE_WORKFLOW",
+      "binding": "TRIAGE_WORKFLOW",
+      "class_name": "TriageWorkflow"
+    }
+  ],
+
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TriageAgent"] }]
+}

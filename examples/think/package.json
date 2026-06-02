@@ -1,0 +1,35 @@
+{
+  "name": "@cloudflare/example-think",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "@cloudflare/think + Workflows triage bot. Worker accepts POST /issue, clones a repo into a container-backed Workspace, triages the issue, attempts a fix, and posts a patch + DONE to a webhook.",
+  "scripts": {
+    "build:wsd": "npm run build:docker --workspace @cloudflare/workspace-wsd",
+    "predev": "npm run build:wsd",
+    "predeploy": "npm run build:wsd",
+    "dev": "wrangler dev --ip 0.0.0.0",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "bin": {
+    "triage": "./cli/triage.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/think": "^0.8.0",
+    "@cloudflare/worker-bundler": "^0.2.0",
+    "@cloudflare/workspace": "*",
+    "agents": "^0.14.0",
+    "ai": "^6.0.194",
+    "diff": "^9.0.0",
+    "isomorphic-git": "^1.38.3",
+    "workers-ai-provider": "^3.1.14",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260602.1",
+    "@types/diff": "^8.0.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.96.0"
+  }
+}
