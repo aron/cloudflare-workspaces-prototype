@@ -19,7 +19,7 @@ import {
   type FuseMount,
   mountFuse,
 } from "../fuse/index.js";
-import { mountShim } from "../shim/index.js";
+import { mountShim, type ShimMount } from "../shim/index.js";
 import { installLogging } from "./logger.js";
 
 // The compiled-in default port. esbuild's `define` substitutes the
@@ -394,9 +394,15 @@ async function main(): Promise<void> {
   const info: WSDInfo = { backend, mountPoint, port };
 
   let fuse: FuseMount | undefined;
+  // When running on the userspace shim, capture the typed handle
+  // so we can wire `flush()` into the SyncRPC `push` afterApply
+  // hook below. A real FUSE mount serves reads straight from the
+  // VFS, so it doesn't need an explicit settle.
+  let shim: ShimMount | undefined;
   if (backend.kind === "shim") {
     await mkdir(mountPoint, { recursive: true });
-    fuse = await mountShim({ vfs, mountPoint });
+    shim = await mountShim({ vfs, mountPoint });
+    fuse = shim;
   } else if (!fuseDisabled && backend.kind !== "none") {
     await mkdir(mountPoint, { recursive: true });
     fuse = await mountFuse({
@@ -425,7 +431,13 @@ async function main(): Promise<void> {
     ...(fuse !== undefined ? { cwd: mountPoint } : {}),
     ...(logMaxBytesOverride !== undefined ? { logMaxBytes: logMaxBytesOverride } : {}),
   });
-  const rpc = createWorkspaceServer(db, runner);
+  const rpc = createWorkspaceServer(db, runner, {
+    // Push handler awaits the shim flush before returning, so any
+    // exec()/read against the host fs after a push sees the new
+    // files. Real FUSE doesn't need this — the kernel-FUSE driver
+    // serves reads from the VFS directly.
+    ...(shim ? { afterApply: () => shim!.flush() } : {}),
+  });
   const http = createHTTPServer(info, rpc);
 
   let shuttingDown = false;

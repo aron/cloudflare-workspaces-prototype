@@ -37,6 +37,19 @@ import type { NodeVirtualFileSystem } from "../fuse/vfs.js";
 
 export interface ShimMount {
   unmount(): Promise<void>;
+  /**
+   * Block until the on-disk tree at `mountPoint` reflects the
+   * VFS's current state. Called by the SyncRPC `push` handler
+   * after applying a peer batch so a subsequent `shell.exec` is
+   * guaranteed to see the just-pushed files — the watcher-driven
+   * VFS→disk path is async, and reads from spawned processes go
+   * against the real fs.
+   *
+   * Walks the VFS tree and calls `syncVfsPathToDisk` for every
+   * entry. The shadow short-circuits files that already match,
+   * so flushing twice in a row is cheap.
+   */
+  flush(): Promise<void>;
 }
 
 export interface MountShimOptions {
@@ -152,6 +165,17 @@ export async function mountShim(options: MountShimOptions): Promise<ShimMount> {
       }
       await watchLoop;
     },
+    async flush(): Promise<void> {
+      if (stopped) return;
+      // Wait for anything the watcher loop has already queued, then
+      // walk the VFS once and reconcile every entry against disk.
+      // Both steps go through `run` so they serialise with the rest
+      // of the chain — a concurrent watcher event can't sneak in a
+      // write between our walk and the resolve of `flush()`.
+      await run(async () => {
+        await flushVfsToDisk(vfs, mountPoint, shadow);
+      });
+    },
   };
 }
 
@@ -192,6 +216,36 @@ async function materialiseVfsToDisk(
           contentHash: hash(bytes),
         });
       }
+    }
+  }
+}
+
+/**
+ * Walk the VFS tree and call `syncVfsPathToDisk` for every entry.
+ * Unlike `materialiseVfsToDisk` (which always writes), this honors
+ * the shadow so files that already match disk are no-ops. Used by
+ * `ShimMount.flush()` to settle a freshly-applied push batch.
+ */
+async function flushVfsToDisk(
+  vfs: NodeVirtualFileSystem,
+  mountPoint: string,
+  shadow: Shadow,
+): Promise<void> {
+  const queue: string[] = ["/"];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    let entries: string[];
+    try {
+      entries = vfs.readdirSync(current) as string[];
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const vfsPath = current === "/" ? `/${name}` : `${current}/${name}`;
+      const stat = safeVfsStat(vfs, vfsPath);
+      if (stat === undefined) continue;
+      await syncVfsPathToDisk(vfs, mountPoint, vfsPath, shadow);
+      if (stat.isDirectory()) queue.push(vfsPath);
     }
   }
 }

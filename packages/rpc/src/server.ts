@@ -46,12 +46,25 @@ export interface RunnerLike {
 
 export interface ServerOptions {
   ignore?: string[];
+  /**
+   * Optional hook fired inside the SyncRPC `push` handler, right
+   * after a successful peer batch has been committed. Resolved
+   * before `push()` returns to the caller. Used by wsd to settle
+   * the FUSE_SHIM layer so a subsequent `shell.exec` sees the
+   * just-pushed files on disk.
+   *
+   * Errors are caught and logged — the push itself already
+   * succeeded; the caller should not see a flush failure as a
+   * push failure.
+   */
+  afterApply?: () => void | Promise<void>;
 }
 
 class SyncRPCServer extends RpcTarget implements SyncRPC {
   constructor(
     private readonly db: Database,
-    private readonly options: Required<Pick<ServerOptions, "ignore">>,
+    private readonly options: Required<Pick<ServerOptions, "ignore">> &
+      Pick<ServerOptions, "afterApply">,
   ) {
     super();
   }
@@ -94,6 +107,16 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
         ...(isPeer ? { advanceFetchRev: input.senderRev } : {}),
       });
     });
+    if (this.options.afterApply !== undefined && entries.length > 0) {
+      try {
+        await this.options.afterApply();
+      } catch (err) {
+        // Settle hook failures must not surface as push failures —
+        // the entries are already committed. Log so the operator
+        // notices a wedged shim, then return success.
+        console.warn("[SyncRPCServer] afterApply hook failed:", err);
+      }
+    }
     return {
       rev: currentRev(this.db),
       appliedPushRev: input.senderRev,
@@ -216,7 +239,7 @@ class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
 // back the object to mount on each connection via
 // acceptWebSocketSession().
 export function createSyncServer(db: Database, options: ServerOptions = {}): SyncRPC {
-  return new SyncRPCServer(db, { ignore: options.ignore ?? [] });
+  return new SyncRPCServer(db, { ignore: options.ignore ?? [], afterApply: options.afterApply });
 }
 
 // Construct a ShellRPC bound to a Runner. wsd holds the only
