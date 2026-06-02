@@ -82,11 +82,32 @@ Additional environment variables:
 
 ```sh
 DISABLE_FUSE=1                   # skip the FUSE mount; keep HTTP + RPC running
+FUSE_SHIM=1                      # opt into the userspace dev shim (no FUSE)
 UPSTREAM_URL=https://example/ws  # open a SyncClient against this capnweb endpoint
 EXEC_LOG_MAX_BYTES=1048576       # cap the in-memory exec log buffer (bytes)
 ```
 
 If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain directory. Set `DISABLE_FUSE=1` to skip the FUSE mount entirely while keeping the HTTP server and `/api` + `/ws` RPC endpoints alive — handy for tests and tooling that don't need `/dev/fuse`.
+
+## `FUSE_SHIM=1` — userspace dev shim
+
+When `FUSE_SHIM=1` is set, `wsd` materialises the VFS at `MOUNT_POINT` on the host filesystem and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
+
+How it works:
+
+- On boot, `wsd` walks the VFS and writes every file out to `MOUNT_POINT`.
+- `vfs.watchAsync("/", { recursive: true })` drives VFS → disk: each VFS revision turns into a host-fs `writeFile`/`mkdir`/`rm`.
+- A periodic poll (~250 ms) walks `MOUNT_POINT`, diffs it against a content-hash shadow, and pushes any new or changed entries into the VFS.
+- The shadow doubles as a loop suppressor: after a write in either direction the shadow matches both sides, so the next tick on the opposite side sees no diff.
+
+`exec` runs with `cwd=MOUNT_POINT` exactly as it does under real FUSE, so a child process that writes into the mount point ends up writing through the shim into the VFS — and onward to the DO when `UPSTREAM_URL` is set.
+
+Caveats. The shim is dev-only:
+
+- Conflicting writes across the seam are resolved on the next reconcile tick; the shim does not guarantee process-level coherence.
+- Symlinks, xattrs, chmod/chown, and watch fan-out are not modelled. Real FUSE keeps them; the shim treats files and directories only.
+- Large files cost a full read on every change. Don't park multi-GB blobs in the shim path.
+- `FUSE_SHIM=1` and `DISABLE_FUSE=1` are mutually exclusive; passing both makes `wsd` exit non-zero at startup.
 
 ## Tests
 

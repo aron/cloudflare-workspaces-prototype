@@ -3,6 +3,7 @@ import { access as defaultAccess } from "node:fs/promises";
 export type FUSEBackend =
   | { kind: "linux" }
   | { kind: "macfuse" }
+  | { kind: "shim"; reason: string }
   | { kind: "none"; reason: string };
 
 export interface DetectFUSEBackendOptions {

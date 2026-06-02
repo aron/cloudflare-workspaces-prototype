@@ -19,6 +19,7 @@ import {
   type FuseMount,
   mountFuse,
 } from "../fuse/index.js";
+import { mountShim } from "../shim/index.js";
 import { installLogging } from "./logger.js";
 
 // The compiled-in default port. esbuild's `define` substitutes the
@@ -327,12 +328,26 @@ async function main(): Promise<void> {
   // /api and /ws endpoints stay up so tests and tooling can talk to
   // wsd's RPC surface without needing /dev/fuse. The in-memory store
   // is still real; nothing is mounted on the filesystem.
+  //
+  // FUSE_SHIM=1 swaps the kernel-FUSE mount for a userspace polling
+  // shim that materialises the VFS at MOUNT_POINT on the host fs and
+  // keeps the two in sync. Dev-only: it loses races between writers
+  // and resolves them on the next reconcile tick (~250 ms).
   const fuseDisabled = process.env.DISABLE_FUSE === "1";
-  const backend = fuseDisabled
-    ? ({ kind: "none", reason: "DISABLE_FUSE=1" } as const)
-    : await detectFUSEBackend();
-  if (!fuseDisabled && backend.kind === "none") {
-    throw new Error(`FUSE backend unavailable: ${backend.reason}`);
+  const shimRequested = process.env.FUSE_SHIM === "1";
+  if (fuseDisabled && shimRequested) {
+    throw new Error("DISABLE_FUSE=1 and FUSE_SHIM=1 are mutually exclusive");
+  }
+  let backend: FUSEBackend;
+  if (fuseDisabled) {
+    backend = { kind: "none", reason: "DISABLE_FUSE=1" };
+  } else if (shimRequested) {
+    backend = { kind: "shim", reason: "FUSE_SHIM=1" };
+  } else {
+    backend = await detectFUSEBackend();
+    if (backend.kind === "none") {
+      throw new Error(`FUSE backend unavailable: ${backend.reason}`);
+    }
   }
 
   const upstreamUrl = process.env.UPSTREAM_URL?.trim();
@@ -353,10 +368,13 @@ async function main(): Promise<void> {
   const info: WSDInfo = { backend, mountPoint, port };
 
   let fuse: FuseMount | undefined;
-  if (!fuseDisabled) {
+  if (backend.kind === "shim") {
+    await mkdir(mountPoint, { recursive: true });
+    fuse = await mountShim({ vfs, mountPoint });
+  } else if (!fuseDisabled && backend.kind !== "none") {
     await mkdir(mountPoint, { recursive: true });
     fuse = await mountFuse({
-      backend: backend as Exclude<FUSEBackend, { kind: "none" }>,
+      backend: backend as Exclude<FUSEBackend, { kind: "none" } | { kind: "shim" }>,
       mountPoint,
       vfs,
     });
@@ -376,6 +394,9 @@ async function main(): Promise<void> {
   }
   const runner = new Runner({
     db,
+    // When we have a mount (real FUSE or the shim) point spawned
+    // children at it so writes from exec flow through the VFS.
+    ...(fuse !== undefined ? { cwd: mountPoint } : {}),
     ...(logMaxBytesOverride !== undefined ? { logMaxBytes: logMaxBytesOverride } : {}),
   });
   const rpc = createWorkspaceServer(db, runner);

@@ -134,6 +134,46 @@ test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (t) => {
   assert.deepEqual(await stub.sync.hasObjects([]), []);
 });
 
+test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (t) => {
+  // No FUSE backend required — the shim runs in user space and is
+  // explicitly opt-in via FUSE_SHIM=1. Mirrors the real-FUSE test
+  // above but for the dev fallback path.
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-"));
+  await startWsd(t, { port, mountPoint, env: { FUSE_SHIM: "1" } });
+
+  const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
+  assert.equal(info.statusCode, 200);
+  const parsed = JSON.parse(info.body);
+  assert.equal(parsed.backend.kind, "shim");
+  assert.equal(parsed.mountPoint, mountPoint);
+
+  // Disk → VFS: writing into the mount point should land in the VFS
+  // and round-trip back through the shim onto disk.
+  await fs.mkdir(path.join(mountPoint, "dir"));
+  await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello shim");
+  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello shim");
+});
+
+test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
+  const port = await getAvailablePort();
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: "/tmp/wsd-mount-not-used",
+      PORT: String(port),
+      FUSE_SHIM: "1",
+      DISABLE_FUSE: "1",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  assert.equal(code, 1);
+  assert.match(stderr, /mutually exclusive/);
+});
+
 async function startWsd(
   t,
   {
