@@ -47,7 +47,7 @@ import {
   WorkspaceFileStore,
 } from "./tools/fs/index.js";
 import { createGitCloneTool } from "./tools/git/clone.js";
-import { WorkspaceGitFs } from "./tools/git/workspace-fs.js";
+import { createWorkspaceVfs } from "./tools/git/vfs.js";
 import { createReportUpdateTool } from "./tools/report-update.js";
 
 // Re-export so the runtime can build a loopback binding for the
@@ -237,25 +237,20 @@ export class TriageAgent extends Think<Env> {
   async gitDiff(): Promise<string> {
     await this.#containerWs.ready();
     const dir = REPO_ROOT;
-    const fs = new WorkspaceGitFs(
-      adaptToFsWorkspace(this.#containerWs),
-      // Large budget here: we're reading the working tree, not
-      // writing it. The cap is a defensive ceiling only.
-      { maxBytes: 256 * 1024 * 1024 },
-    );
+    const vfs = createWorkspaceVfs(this.#containerWs.provider());
     let head: string;
     try {
-      head = await git.resolveRef({ fs, dir, ref: "HEAD" });
+      head = await git.resolveRef({ fs: vfs, dir, ref: "HEAD" });
     } catch {
       return "";
     }
-    const status = await git.statusMatrix({ fs, dir });
+    const status = await git.statusMatrix({ fs: vfs, dir });
     const chunks: string[] = [];
     for (const [filepath, headStatus, workdirStatus] of status) {
       // workdirStatus: 0 absent, 1 == HEAD, 2 differs
       if (workdirStatus === 1) continue;
-      const headText = headStatus === 1 ? await readBlobAsText(fs, dir, head, filepath) : "";
-      const workdirText = workdirStatus === 2 ? await readWorkdirAsText(fs, dir, filepath) : "";
+      const headText = headStatus === 1 ? await readBlobAsText(vfs, dir, head, filepath) : "";
+      const workdirText = workdirStatus === 2 ? await readWorkdirAsText(vfs, dir, filepath) : "";
       const patch = createPatch(filepath, headText, workdirText, "", "");
       if (patch.trim().length > 0) chunks.push(patch);
     }
@@ -351,6 +346,22 @@ export class TriageAgent extends Think<Env> {
     return createWorkersAI({ binding: this.env.AI })(MODEL_ID);
   }
 
+  /**
+   * Kimi K2.6 has a 262,144-token context window but the Workers AI
+   * runtime caps generations at a small default (a few thousand
+   * tokens) when `max_tokens` is unset — enough to truncate mid-
+   * tool-call. Bump it to something that lets the model finish a
+   * structured answer or a chain of tool calls.
+   *
+   * 16k is well under the 262k window and leaves plenty of room for
+   * input — the workflow's prior tool calls + the system prompt
+   * commonly run ~30–50k tokens by the time we hit the structure
+   * phase, so the input dominates anyway.
+   */
+  override async beforeTurn() {
+    return { maxOutputTokens: 16384 };
+  }
+
   override getSystemPrompt(): string {
     const phase = this.#phase ?? "explore";
     if (phase === "structure") {
@@ -416,17 +427,18 @@ export class TriageAgent extends Think<Env> {
     const containerWs = this.#containerWs;
     return {
       git_clone: createGitCloneTool({
-        workspace: adaptToFsWorkspace(containerWs),
+        provider: containerWs.provider(),
       }),
-      // Tight caps keep the model under context-window pressure: Kimi
-      // tops out around 64k input tokens, and each turn already
-      // includes the system prompt, schema, and every prior tool
-      // call / result. ~6 KiB per read ≈ ~1500 tokens.
-      read: createReadTool({ store, maxBytes: 6 * 1024, maxLines: 200 }),
+      // Per-tool caps. Kimi K2.6 has a 262k context window so we
+      // don't need to be paranoid; the caps are mostly so a
+      // pathological tool call (giant lockfile, multi-MB log) doesn't
+      // burn through the input budget on a single turn. ~32 KiB ≈
+      // ~8k tokens per read.
+      read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
       ls: createLsTool(containerWs),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
-      exec: createExecTool({ workspace: containerWs, maxBytes: 6 * 1024 }),
+      exec: createExecTool({ workspace: containerWs, maxBytes: 32 * 1024 }),
       report_update: createReportUpdateTool({ webhookUrl: ctx.webhookUrl }),
     };
   }
@@ -689,7 +701,7 @@ function redact(value: unknown): unknown {
  * a thrown error.
  */
 async function readBlobAsText(
-  fs: WorkspaceGitFs,
+  fs: import("./tools/git/vfs.js").WorkspaceGitFsHandle,
   dir: string,
   oid: string,
   filepath: string,
@@ -708,13 +720,14 @@ async function readBlobAsText(
  * doesn't reach into `workspace.fs` directly.
  */
 async function readWorkdirAsText(
-  fs: WorkspaceGitFs,
+  fs: import("./tools/git/vfs.js").WorkspaceGitFsHandle,
   dir: string,
   filepath: string,
 ): Promise<string> {
   try {
     const data = await fs.promises.readFile(`${dir}/${filepath}`);
     if (typeof data === "string") return data;
+    // `data` is a Node `Buffer` (Uint8Array subclass) under platformatic.
     return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(data);
   } catch {
     return "";

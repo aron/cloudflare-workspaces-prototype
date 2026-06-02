@@ -3,31 +3,34 @@
  * agent's workspace via isomorphic-git. No Cloudflare Artifacts, no
  * fork registry, no commit/push.
  *
- * The fs adapter (`WorkspaceGitFs`) enforces a byte budget; the clone
- * aborts with `EFBIG` if the working tree + packfile exceed it. Depth
- * defaults to 1 so the demo stays well under that budget for typical
- * repos.
+ * Storage:
+ *   The clone is written through a `@platformatic/vfs`
+ *   `VirtualFileSystem` over `Workspace.provider()` — the same
+ *   `node:fs`-shaped surface wsd uses internally for its FUSE mount.
+ *   isomorphic-git accepts that VFS directly as its `fs` argument
+ *   because `vfs.promises` already implements the `PromiseFsClient`
+ *   contract (including `symlink` / `readlink`, which the dofs
+ *   provider implements for real). No bespoke adapter required.
  *
- * `git.clone` runs entirely inside the Worker isolate. The packfile
- * has to fit in workerd's heap, which is fine for small / medium
- * repos but not for huge monorepos — same trade-off the hackspace
- * `@cloudflare/git-tools` documents.
+ * Limits:
+ *   `git.clone` runs entirely inside the Worker isolate; the packfile
+ *   has to fit in workerd's heap, which is fine for small/medium
+ *   repos at `depth: 1` (the default) but not for huge monorepos.
+ *   Same trade-off the hackspace `@cloudflare/git-tools` documents.
  */
 
+import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 import { tool } from "ai";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { z } from "zod";
-import type { WorkspaceLike } from "../fs/stores/workspace.js";
-import { WorkspaceGitFs } from "./workspace-fs.js";
+import { createWorkspaceVfs } from "./vfs.js";
 
-const DEFAULT_MAX_BYTES = 100 * 1024 * 1024; // 100 MiB
 const DEFAULT_DEPTH = 1;
 
 export interface GitCloneToolOptions {
-  workspace: WorkspaceLike;
-  /** Default byte budget. Default 100 MiB. */
-  maxBytes?: number;
+  /** dofs provider over the workspace's local store. */
+  provider: SQLiteWorkspaceProvider;
   /** Default clone depth. Default 1 (shallow). */
   defaultDepth?: number;
 }
@@ -40,12 +43,14 @@ const inputSchema = z.object({
   dest: z.string().describe("Absolute workspace path to clone into, e.g. /workspace/repo."),
   ref: z.string().optional().describe('Branch, tag, or commit to clone. Defaults to "main".'),
   depth: z.number().int().min(1).optional().describe("Shallow clone depth. Defaults to 1."),
-  maxBytes: z.number().int().min(1).optional().describe("Cap on bytes written during the clone."),
 });
 
 export function createGitCloneTool(opts: GitCloneToolOptions) {
-  const maxBytesDefault = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const depthDefault = opts.defaultDepth ?? DEFAULT_DEPTH;
+  // Build the VFS once per tool instance and reuse it across clone
+  // calls — the provider is stable, and `@platformatic/vfs.create` is
+  // cheap but not free (it registers handlers on construction).
+  const vfs = createWorkspaceVfs(opts.provider);
   return tool({
     description:
       "Shallow-clone a public GitHub repository into the workspace " +
@@ -53,23 +58,21 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
       "commit and total bytes written. Run this once at the start " +
       "of triage so the rest of the tools have files to read.",
     inputSchema,
-    execute: async ({ repo, dest, ref, depth, maxBytes }) => {
-      const maxBudget = maxBytes ?? maxBytesDefault;
-      const fs = new WorkspaceGitFs(opts.workspace, { maxBytes: maxBudget });
+    execute: async ({ repo, dest, ref, depth }) => {
       const url = `https://github.com/${repo}`;
       // Wipe any prior clone at the target. Stale `.git` directories
-      // from a previous failed call cause isomorphic-git to error out
-      // with "commit ... not available locally" — the second clone
-      // refuses to overwrite the orphaned refs.
+      // from a previous failed call cause isomorphic-git to error
+      // out with "commit ... not available locally" — the second
+      // clone refuses to overwrite the orphaned refs.
       try {
-        await opts.workspace.fs.rm(dest, { recursive: true, force: true });
+        await vfs.promises.rmdir(dest);
       } catch {
-        // Best-effort. If rm isn't supported, isomorphic-git may still
-        // succeed against an empty dir.
+        // Best-effort. The dir may not exist yet, or `rmdir` may
+        // ENOTEMPTY — both are fine for the next mkdir.
       }
-      await opts.workspace.fs.mkdir(dest, { recursive: true });
+      await vfs.promises.mkdir(dest, { recursive: true });
       await git.clone({
-        fs,
+        fs: vfs,
         http,
         dir: dest,
         url,
@@ -79,7 +82,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
       });
       let head: string | undefined;
       try {
-        head = await git.resolveRef({ fs, dir: dest, ref: "HEAD" });
+        head = await git.resolveRef({ fs: vfs, dir: dest, ref: "HEAD" });
       } catch {
         head = undefined;
       }
@@ -89,7 +92,6 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
         ref: ref ?? "default",
         dest,
         head,
-        bytesWritten: fs.bytesWritten,
       };
     },
   });
