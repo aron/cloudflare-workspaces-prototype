@@ -219,6 +219,7 @@ above, then dive into the area you're working on.
 | [08. Capnweb Interface](./08_capnweb_interface.md) | RPC wire protocol between the DO and the sandbox. |
 | [09. Tool Interface (Agents)](./09_tool_interface.md) | Ready-made tools for `@cloudflare/agents`. **(not yet implemented)** |
 | [10. Project Layout](./10_project_layout.md) | Source tree of this package and how the pieces fit together. |
+| [11. Lifecycle](./11_lifecycle.md) | DO incarnations, container lifetime, capnweb session lifecycle, and hibernation. |
 
 ## High-level API
 
