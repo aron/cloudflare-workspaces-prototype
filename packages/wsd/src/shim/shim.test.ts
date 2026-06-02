@@ -123,3 +123,49 @@ test("shim picks up nested directory creates on disk", async (t) => {
     return true;
   });
 });
+
+test("shim.flush() settles VFS writes onto disk before resolving", async (t) => {
+  // Use a very slow poll so the watcher/poll loops can't accidentally
+  // serve the assertion. If flush() works, the file is on disk before
+  // any tick fires; if it doesn't, the read fails because nothing else
+  // has materialised it yet.
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-flush-"));
+  const { vfs } = await createNodeVirtualFileSystem();
+  const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: 60_000 });
+  t.after(async () => {
+    await shim.unmount();
+    await fs.rm(mountPoint, { recursive: true, force: true });
+  });
+
+  vfs.mkdirSync("/proj", { recursive: true });
+  vfs.writeFileSync("/proj/a.txt", Buffer.from("alpha"));
+  vfs.writeFileSync("/proj/b.txt", Buffer.from("beta"));
+
+  await shim.flush();
+
+  assert.equal(await fs.readFile(path.join(mountPoint, "proj", "a.txt"), "utf8"), "alpha");
+  assert.equal(await fs.readFile(path.join(mountPoint, "proj", "b.txt"), "utf8"), "beta");
+});
+
+test("shim.flush() is idempotent and cheap on a clean tree", async (t) => {
+  // Second flush should be a no-op (shadow short-circuits every
+  // syncVfsPathToDisk call) and complete promptly.
+  const { vfs, mountPoint, shim } = await setup(t);
+  vfs.writeFileSync("/hello.txt", Buffer.from("world"));
+  await shim.flush();
+  const mtime1 = (await fs.stat(path.join(mountPoint, "hello.txt"))).mtimeMs;
+  await shim.flush();
+  const mtime2 = (await fs.stat(path.join(mountPoint, "hello.txt"))).mtimeMs;
+  assert.equal(mtime2, mtime1, "flush should not rewrite an unchanged file");
+});
+
+test("shim.flush() resolves on an unmounted shim without throwing", async (t) => {
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-flush-unmount-"));
+  const { vfs } = await createNodeVirtualFileSystem();
+  const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: TICK_MS });
+  t.after(async () => {
+    await fs.rm(mountPoint, { recursive: true, force: true });
+  });
+  await shim.unmount();
+  await shim.flush();
+});

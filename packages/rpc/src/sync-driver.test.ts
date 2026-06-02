@@ -131,6 +131,106 @@ describe("sync driver — pushOnce", () => {
   });
 });
 
+describe("SyncRPC server — afterApply hook", () => {
+  // Peer factory that returns a thenable `afterApply` spy alongside the
+  // standard fixture. Used by the three tests below to assert the hook
+  // fires exactly once per push and that errors don't surface as push
+  // failures.
+  function makeReceiverWithSpy(): {
+    db: Database;
+    rpc: SyncRPC;
+    close: () => void;
+    calls: number;
+    setAfterApply: (fn: () => void | Promise<void>) => void;
+  } {
+    const storage = new SQLiteTestStorage();
+    const db = new Database(storage);
+    initializeSchema(db, () => 1000);
+    let hook: () => void | Promise<void> = () => {};
+    let calls = 0;
+    const rpc = createSyncServer(db, {
+      afterApply: async () => {
+        calls += 1;
+        await hook();
+      },
+    });
+    return {
+      db,
+      rpc,
+      close: () => storage.close(),
+      get calls() {
+        return calls;
+      },
+      setAfterApply: (fn) => {
+        hook = fn;
+      },
+    };
+  }
+
+  it("fires once per push, after entries are committed", async () => {
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      providerA.writeFileSync("/hi.txt", "hi");
+
+      let entriesAtHook = -1;
+      b.setAfterApply(() => {
+        // Snapshot the receiver's vfs_dirents at the moment the hook
+        // fires. The transaction already committed, so the file must
+        // be visible here.
+        entriesAtHook = fileEntries(b.db).length;
+      });
+
+      const pushed = await pushOnce(a.db, b.rpc);
+      expect(pushed).toBe(1);
+      expect(b.calls).toBe(1);
+      expect(entriesAtHook).toBeGreaterThan(0);
+      expect(fileEntries(b.db)).toContain("hi.txt");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("is not called for empty pushes", async () => {
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      // No writes on a, so pushOnce ships zero entries.
+      const pushed = await pushOnce(a.db, b.rpc);
+      expect(pushed).toBe(0);
+      expect(b.calls).toBe(0);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("a thrown hook does not fail the push", async () => {
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      const providerA = new SQLiteWorkspaceProvider(a.db, { now: () => 1 });
+      providerA.writeFileSync("/hi.txt", "hi");
+
+      b.setAfterApply(() => {
+        throw new Error("settle blew up");
+      });
+
+      // The push must still succeed — entries are committed before
+      // the hook runs, and the server logs+swallows hook errors.
+      const pushed = await pushOnce(a.db, b.rpc);
+      expect(pushed).toBe(1);
+      expect(b.calls).toBe(1);
+      expect(fileEntries(b.db)).toContain("hi.txt");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});
+
 describe("sync driver — bidirectional convergence", () => {
   it("two peers writing in parallel converge after a few ticks", async () => {
     const a = makePeer();
