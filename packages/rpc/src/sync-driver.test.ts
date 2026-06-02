@@ -229,6 +229,42 @@ describe("sync driver — cross-side invariant", () => {
       b.close();
     }
   });
+
+  it("pullOnce throws when fetchChanges echoes back a lower appliedPushRev", async () => {
+    // Symmetric to the push case. fetchChanges returns the remote's
+    // appliedPushRev alongside the entry stream; the DO asserts
+    // appliedPushRev >= pushRev before draining, so a regression in
+    // the remote's apply path that loses applied state trips the
+    // invariant on the next pull instead of corrupting fetchRev.
+    const remote = makePeer();
+    try {
+      // Seed the local pushRev so it's higher than what the lying
+      // remote will echo. The remote is otherwise fresh — nothing
+      // to fetch.
+      const local = new Database(new SQLiteTestStorage());
+      initializeSchema(local, () => 1000);
+      writeWatermark(local, "pushRev", 42);
+      // Make the remote return *something* so the puller drains it.
+      const providerR = new SQLiteWorkspaceProvider(remote.db, { now: () => 1 });
+      providerR.writeFileSync("/seed.txt", "x");
+
+      const lyingRpc = new Proxy(remote.rpc as object, {
+        get(target, prop, receiver) {
+          if (prop === "fetchChanges") {
+            return (input: { sinceRev?: number; ignore?: string[] }) => {
+              const real = Reflect.get(target, prop, receiver).call(target, input);
+              return { ...real, appliedPushRev: 0 };
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as typeof remote.rpc;
+
+      await expect(pullOnce(local, lyingRpc)).rejects.toThrow(/cross-side invariant violated/i);
+    } finally {
+      remote.close();
+    }
+  });
 });
 
 describe("sync driver — streaming pullOnce", () => {
@@ -340,6 +376,7 @@ describe("sync driver — push atomicity", () => {
       const entries: ChangeEntry[] = [
         {
           kind: "file",
+          rev: 1,
           path: "/first.txt",
           mode: 0o644,
           mtime: 1,
@@ -348,6 +385,7 @@ describe("sync driver — push atomicity", () => {
         },
         {
           kind: "file",
+          rev: 2,
           path: "/second.txt",
           mode: 0o644,
           mtime: 1,

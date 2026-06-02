@@ -251,7 +251,7 @@ describe("Composite WorkspaceRPC (sync + shell on one session)", () => {
     harness = undefined;
   });
 
-  it("client.sync.currentRev and client.shell.exec both work over one socket", async () => {
+  it("client.sync.watermarks and client.shell.exec both work over one socket", async () => {
     // The whole point of the composite stub. If the WorkspaceRPCServer
     // getter trick regresses (capnweb starting to traverse plain
     // instance properties again, or the getter shape changing), one
@@ -260,11 +260,11 @@ describe("Composite WorkspaceRPC (sync + shell on one session)", () => {
     harness = await startCompositeHarness();
     const client = createWorkspaceClient({ url: harness.url });
     try {
-      const rev = await client.sync.currentRev();
-      // currentRev is whatever initializeSchema landed on; we only
+      const wm = await client.sync.watermarks();
+      // The watermarks shape is the diagnostic surface; we only
       // care that it round-trips and that the call lands.
-      expect(typeof rev).toBe("number");
-      expect(rev).toBeGreaterThanOrEqual(0);
+      expect(typeof wm.currentRev).toBe("number");
+      expect(wm.currentRev).toBeGreaterThanOrEqual(0);
 
       const handle = await client.shell.exec({ command: "ls" });
       const events = await drainExec(handle.events);
@@ -306,8 +306,8 @@ describe("Composite WorkspaceRPC (sync + shell on one session)", () => {
     try {
       const handle = await client.shell.exec({ command: "x" });
       await drainExec(handle.events);
-      const rev = await client.sync.currentRev();
-      expect(typeof rev).toBe("number");
+      const wm = await client.sync.watermarks();
+      expect(typeof wm.currentRev).toBe("number");
     } finally {
       await client.close();
     }
@@ -315,18 +315,18 @@ describe("Composite WorkspaceRPC (sync + shell on one session)", () => {
 
   it("createSyncClient against a WorkspaceRPC server still reaches sync via property pipelining", async () => {
     // Cross-check: a sync-only client talking to a composite server.
-    // Capnweb resolves `.currentRev()` against the composite's `.sync`
+    // Capnweb resolves `.watermarks()` against the composite's `.sync`
     // getter when the call lands; this is the "client expects SyncRPC
     // but server is WorkspaceRPC" case. Until pipelining is wired we
     // exercise the composite client only.
     harness = await startCompositeHarness();
     const syncClient = createSyncClient({ url: harness.url });
     try {
-      // currentRev lives on SyncRPC. The composite root doesn't expose
+      // watermarks lives on SyncRPC. The composite root doesn't expose
       // it directly; this should fail without two-step access. Pin
       // that the sync-only client therefore can't see it (documenting
       // the constraint).
-      await expect(syncClient.currentRev()).rejects.toThrow();
+      await expect(syncClient.watermarks()).rejects.toThrow();
     } finally {
       await syncClient.close();
     }

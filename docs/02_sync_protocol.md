@@ -122,19 +122,16 @@ fresh receiver).
 
 ### Cross-side invariant
 
-After every successful `push`, the response carries the container's
-current `appliedPushRev`. The DO asserts `appliedPushRev >= pushRev`
-before continuing. The two sides never share a single clock, but
-echoing the largest applied DO rev makes the "container is caught up
-with the DO's pushes" invariant inspectable on the wire instead of
-load-bearing in-process state. A regression in the post-apply
-`pushRev` advancement path (see step 1 above) trips the assertion
-immediately rather than corrupting data silently.
-
-*Revisit (`PLAN.md` → Revisit):* attach `appliedPushRev` to the
-`fetchChanges` response as well, and assert the same invariant on
-the pull path. Today the symmetric check is missing — `ChangeEntry`
-carries no `appliedPushRev` field and the pull path does no assertion.
+After every successful `push` **and** every `fetchChanges`, the
+response carries the receiver's current `appliedPushRev` (the
+largest `senderRev` it has fully applied). The DO asserts
+`appliedPushRev >= pushRev` before continuing. The two sides never
+share a single clock, but echoing the largest applied rev makes the
+"receiver is caught up with our pushes" invariant inspectable on
+the wire instead of load-bearing in-process state. A regression in
+the post-apply `pushRev` advancement path (see step 1 above) trips
+the assertion on the next push or pull rather than corrupting data
+silently.
 
 ## Wire shape
 
@@ -146,7 +143,7 @@ objects to the container, and *fetches* entries and objects back.
 | RPC | Direction | Returns | Notes |
 | --- | --- | --- | --- |
 | `push({ senderRev, changes })` | DO → container | `{ rev, appliedPushRev }` | Streams a coalesced batch of `ChangeEntry` via the `changes` `ReadableStream`. The sender then calls `hasObjects` on the referenced hashes and follows up with `pushObjects` for the missing subset. See the `senderRev` branches below. |
-| `fetchChanges({ sinceRev?, ignore? })` | container → DO | `ReadableStream<ChangeEntry>` | Streams one entry per touched path. For files, `chunks: (hash, size)[]` (no bytes inline); for dirs, metadata; for deletes, a tombstone. |
+| `fetchChanges({ sinceRev?, ignore? })` | container → DO | `Promise<{ currentRev, appliedPushRev, stream: ReadableStream<ChangeEntry> }>` | Streams one entry per touched path. For files, `chunks: (hash, size)[]` (no bytes inline); for dirs, metadata; for deletes, a tombstone. `currentRev` is the receiver's rev at stream open; the puller advances `fetchRev` no further than this. `appliedPushRev` carries the cross-side invariant check on the pull path. |
 | `hasObjects(hashes[])` | sender probes receiver | `Uint8Array[]` | Returns the subset of the input the receiver already holds. The git `have` line, batched. |
 | `fetchObjects(hashes[])` | container → DO | `ReadableStream<{ hash, bytes }>` | Streams chunk bytes by hash. The git `want`/pack response on the fetch path. |
 | `pushObjects(objects)` | DO → container | `void` | Streams chunk bytes by hash. The push-direction mirror of `fetchObjects`. |

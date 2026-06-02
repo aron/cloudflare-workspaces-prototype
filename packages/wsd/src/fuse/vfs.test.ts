@@ -28,24 +28,26 @@ test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC",
 
   let fetchChangesCalls = 0;
   const upstream = {
-    async currentRev() {
-      return 1;
-    },
     async fetchChanges() {
       fetchChangesCalls++;
-      return new ReadableStream({
-        start(c) {
-          c.enqueue({
-            kind: "file",
-            path: "/hi.txt",
-            mode: 0o644,
-            mtime: 100,
-            size: 2,
-            chunks: [{ hash, size: 2 }],
-          });
-          c.close();
-        },
-      });
+      return {
+        currentRev: 1,
+        appliedPushRev: 0,
+        stream: new ReadableStream({
+          start(c) {
+            c.enqueue({
+              kind: "file",
+              rev: 1,
+              path: "/hi.txt",
+              mode: 0o644,
+              mtime: 100,
+              size: 2,
+              chunks: [{ hash, size: 2 }],
+            });
+            c.close();
+          },
+        }),
+      };
     },
     async hasObjects(hashes) {
       // The fake upstream is the source of truth for this file's

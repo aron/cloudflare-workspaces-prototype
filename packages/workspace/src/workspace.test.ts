@@ -60,21 +60,23 @@ function fakeRpc(): import("@cloudflare/workspace-rpc").SyncRPC {
       }
       return { rev: 0, appliedPushRev: input.senderRev };
     },
-    fetchChanges() {
-      return new ReadableStream({
-        start(c) {
-          c.close();
-        },
-      });
-    },
-    async currentRev() {
-      return 0;
+    async fetchChanges() {
+      return {
+        currentRev: 0,
+        appliedPushRev: 0,
+        stream: new ReadableStream<import("@cloudflare/dofs").ChangeEntry>({
+          start(c) {
+            c.close();
+          },
+        }),
+      };
     },
     async readEntry(path) {
       const entry = files.get(path);
       if (entry === undefined) return null;
       return {
         kind: "file",
+        rev: 0,
         path,
         mode: entry.mode,
         mtime: entry.mtime,

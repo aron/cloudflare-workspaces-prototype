@@ -51,15 +51,31 @@ const PULL_BATCH_SIZE = 256;
 // applyChanges drops a re-fetched batch on the floor.
 export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
   const sinceRev = readWatermark(db, "fetchRev");
-  // Capture the remote's currentRev BEFORE we drain its stream so
-  // the watermark we advance to is consistent with what the
-  // stream actually carried. If we read it after, a write that
-  // landed remote-side mid-stream could push us past it without
-  // the receiver having applied it.
-  const remoteRev = await remote.currentRev();
-  if (remoteRev <= sinceRev) return 0;
+  const localPushRev = readWatermark(db, "pushRev");
+  // fetchChanges hands back the remote's currentRev (cursor we
+  // advance fetchRev to), its appliedPushRev (cross-side invariant
+  // check on the pull path), and the entry stream itself. One
+  // round-trip instead of the previous currentRev() + fetchChanges()
+  // pair.
+  const {
+    currentRev: remoteRev,
+    appliedPushRev,
+    stream,
+  } = await remote.fetchChanges({
+    sinceRev,
+  });
+  // Symmetric to the push response check: the remote must have
+  // applied at least everything we claimed to push. A drop here
+  // means apply lost state on the receiver; tear down and rebuild
+  // rather than corrupt watermarks.
+  assertAppliedPushRev(appliedPushRev, localPushRev);
+  if (remoteRev <= sinceRev) {
+    // Drain the (empty) stream so the remote's iterator is
+    // released; cancel is the right surface for that.
+    await stream.cancel().catch(() => {});
+    return 0;
+  }
 
-  const stream = await remote.fetchChanges({ sinceRev });
   const reader = stream.getReader();
   let totalApplied = 0;
   let streamDone = false;

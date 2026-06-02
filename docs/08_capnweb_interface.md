@@ -65,20 +65,19 @@ interface SyncRPC {
     changes:   ReadableStream<ChangeEntry>;
   }): Promise<{ rev: number; appliedPushRev: number }>;
 
-  // Container ← DO. Stream every ChangeEntry with rev > sinceRev.
-  // Per-file entries carry (hash, size) chunk lists; no bytes inline.
+  // Container ← DO. Stream every ChangeEntry with rev > sinceRev,
+  // alongside the receiver's currentRev (cursor the puller advances
+  // fetchRev to) and appliedPushRev (cross-side invariant check on
+  // the pull path, mirroring the push response). Per-file entries
+  // carry (hash, size) chunk lists; no bytes inline.
   fetchChanges(input: {
     sinceRev?: number;
     ignore?:   string[];
-  }): ReadableStream<ChangeEntry>;
-
-  // Cheap scalar. Captured by the puller before draining
-  // fetchChanges so the watermark it advances to is consistent
-  // with what the stream actually carried. (planned) collapse
-  // into fetchChanges returning { rev, stream } to drop the
-  // extra round-trip — see the TODO at
-  // packages/rpc/src/interface.ts:48-54.
-  currentRev(): Promise<number>;
+  }): Promise<{
+    currentRev:     number;
+    appliedPushRev: number;
+    stream:         ReadableStream<ChangeEntry>;
+  }>;
 
   // Diagnostic surface for soak tests, dashboards, and the agent
   // when it wants to wait for the wire to drain. pushRev /

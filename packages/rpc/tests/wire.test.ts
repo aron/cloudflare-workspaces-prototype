@@ -64,7 +64,7 @@ describe("SyncRPC over a real WebSocket", () => {
 
     const client = createSyncClient({ url: harness.url });
     try {
-      const stream = await client.fetchChanges({ sinceRev: 0, ignore: [] });
+      const { stream } = await client.fetchChanges({ sinceRev: 0, ignore: [] });
       const entries: ChangeEntry[] = [];
       const reader = stream.getReader();
       try {
@@ -478,6 +478,7 @@ describe("push semantics — external vs sync peer", () => {
           start(c) {
             c.enqueue({
               kind: "file",
+              rev: 1,
               path: "/external.txt",
               mode: 0o644,
               mtime: 100,
@@ -533,6 +534,7 @@ describe("push semantics — external vs sync peer", () => {
           start(c) {
             c.enqueue({
               kind: "file",
+              rev: 1,
               path: "/from-peer.txt",
               mode: 0o644,
               mtime: 100,

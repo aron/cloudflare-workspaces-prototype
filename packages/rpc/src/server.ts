@@ -100,19 +100,26 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     };
   }
 
-  fetchChanges(input: { sinceRev?: number; ignore?: string[] }): ReadableStream<ChangeEntry> {
+  async fetchChanges(input: { sinceRev?: number; ignore?: string[] }): Promise<{
+    currentRev: number;
+    appliedPushRev: number;
+    stream: ReadableStream<ChangeEntry>;
+  }> {
     const sinceRev = input.sinceRev ?? 0;
     const ignore =
       input.ignore ?? (this.options.ignore.length > 0 ? this.options.ignore : DEFAULT_IGNORE);
-    return iterableToReadableStream(coalesceChanges(this.db, sinceRev, { ignore }));
+    // appliedPushRev == fetchRev on the receiver: every senderRev > 0
+    // push advances fetchRev to senderRev on apply, so fetchRev is
+    // the largest senderRev the receiver has fully applied.
+    return {
+      currentRev: currentRev(this.db),
+      appliedPushRev: readWatermark(this.db, "fetchRev"),
+      stream: iterableToReadableStream(coalesceChanges(this.db, sinceRev, { ignore })),
+    };
   }
 
   async readEntry(path: string): Promise<ChangeEntry | null> {
     return materialiseChange(this.db, path);
-  }
-
-  async currentRev(): Promise<number> {
-    return currentRev(this.db);
   }
 
   async watermarks(): Promise<{ currentRev: number; pushRev: number; fetchRev: number }> {

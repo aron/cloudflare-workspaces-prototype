@@ -55,20 +55,13 @@ interface FakeRpc {
     exec: ExecCall[];
     getExec: GetExecCall[];
     killExec: KillExecCall[];
-    currentRev: number; // count of currentRev() invocations
   };
 }
 
 interface FakeRpcOptions {
-  // Sequence of currentRev values returned by sync.currentRev().
-  // Call N returns revs[N-1]; if exhausted the last value sticks.
-  // Default: [0, 0].
-  revs?: number[];
   // Events to push onto the stream returned by shell.exec / getExec.
   // The runner's id is stamped onto each event before enqueue.
   events?: ExecEvent[];
-  // Optional: throw from currentRev on the Nth call (1-indexed).
-  throwOnRevCall?: number;
   // Optional: shell.exec rejects with this error.
   throwOnExec?: Error;
   // Optional: enqueue events, then error the stream with this.
@@ -79,14 +72,12 @@ interface FakeRpcOptions {
 }
 
 function fakeRpc(options: FakeRpcOptions = {}): FakeRpc {
-  const revs = options.revs ?? [0, 0];
   const events = options.events ?? [{ id: "_", seq: 1, name: "exit", value: 0 }];
   const mintedId = options.mintedId ?? "runner-minted-id";
   const calls: FakeRpc["calls"] = {
     exec: [],
     getExec: [],
     killExec: [],
-    currentRev: 0,
   };
 
   function makeStream(id: string): ReadableStream<ExecEvent> {
@@ -103,18 +94,10 @@ function fakeRpc(options: FakeRpcOptions = {}): FakeRpc {
   }
 
   const sync: SyncRPC = {
-    async currentRev() {
-      calls.currentRev += 1;
-      if (options.throwOnRevCall === calls.currentRev) {
-        throw new Error("wire boom");
-      }
-      const idx = Math.min(calls.currentRev - 1, revs.length - 1);
-      return revs[idx];
-    },
     async push() {
       throw new Error("not wired");
     },
-    fetchChanges() {
+    async fetchChanges() {
       throw new Error("not wired");
     },
     async readEntry() {

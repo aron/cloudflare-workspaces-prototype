@@ -33,18 +33,25 @@ export interface SyncRPC {
     appliedPushRev: number;
   }>;
 
-  // Container ← DO. Stream every ChangeEntry with rev > sinceRev.
+  // Container ← DO. Stream every ChangeEntry with rev > sinceRev,
+  // alongside two scalars used to drive the pull:
+  //
+  //   currentRev     — the receiver's currentRev captured at the
+  //                     start of the stream. The puller advances
+  //                     fetchRev no further than this on any pull
+  //                     so the watermark stays consistent with what
+  //                     the stream actually carried.
+  //   appliedPushRev — the largest senderRev the receiver has
+  //                     fully applied. The puller asserts
+  //                     appliedPushRev >= local.pushRev before
+  //                     draining, mirroring the same check on push.
+  //
   // Per-file entries carry (hash, size) chunk lists; no bytes inline.
-  fetchChanges(input: { sinceRev?: number; ignore?: string[] }): ReadableStream<ChangeEntry>;
-
-  // Probe which object hashes the receiver has. Same semantics in
-  // both directions: git's `have` line, batched. Returns the subset
-  // of the input the receiver already holds.
-  // Read the receiver's currentRev. Called by the puller before
-  // a fetchChanges round so it knows the cursor to advance
-  // fetchRev to once the apply settles. Cheap — one SQL
-  // scalar.
-  currentRev(): Promise<number>;
+  fetchChanges(input: { sinceRev?: number; ignore?: string[] }): Promise<{
+    currentRev: number;
+    appliedPushRev: number;
+    stream: ReadableStream<ChangeEntry>;
+  }>;
 
   // Read the receiver's full sync watermark state. Cheap (three
   // SQL scalars) and read-only. Diagnostic surface for load
