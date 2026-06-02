@@ -36,6 +36,25 @@ export interface WorkspaceOptions {
   // Clock used for mtime / last_seen on local FS writes. Defaults
   // to Date.now. Override for deterministic tests.
   now?: () => number;
+
+  // Bounded retry policy for ready(). When omitted, ready() runs
+  // the backend list once and surfaces the first failure — the
+  // shipped behaviour before retries existed. When set, a transient
+  // failure on every backend triggers a wait + retry, up to
+  // `attempts` total tries with exponential backoff. The delay
+  // starts at `initialDelayMs` and doubles each round, capped at
+  // `maxDelayMs`.
+  reconnect?: ReconnectOptions;
+}
+
+export interface ReconnectOptions {
+  // Total connect() attempts across the backend list. 1 means
+  // no retry (one pass). Default 1.
+  attempts: number;
+  // First backoff delay in ms. Doubles each round up to maxDelayMs.
+  initialDelayMs: number;
+  // Cap on the per-attempt backoff delay.
+  maxDelayMs: number;
 }
 
 export class Workspace {
@@ -47,6 +66,7 @@ export class Workspace {
    */
   #provider: SQLiteWorkspaceProvider | undefined;
   readonly #backends: WorkspaceBackend[];
+  readonly #reconnect: ReconnectOptions;
   readonly #now: () => number;
   #handle: BackendHandle | undefined;
   #shell: WorkspaceShell | undefined;
@@ -68,6 +88,7 @@ export class Workspace {
     initializeSchema(this.#db, this.#now);
     this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
     this.#backends = options.backends.slice();
+    this.#reconnect = options.reconnect ?? { attempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
   }
 
   // Local store. Exposed for tests / diagnostics and for the
@@ -204,6 +225,27 @@ export class Workspace {
   }
 
   async #connect(): Promise<void> {
+    const { attempts, initialDelayMs, maxDelayMs } = this.#reconnect;
+    let delay = initialDelayMs;
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await this.#connectOnce();
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt === attempts) break;
+        await sleep(delay);
+        delay = Math.min(delay * 2 || 1, maxDelayMs);
+      }
+    }
+    // Throwing the last attempt's error preserves the per-backend
+    // summary the pass produced — the caller still sees which
+    // backend failed and why.
+    throw lastError;
+  }
+
+  async #connectOnce(): Promise<void> {
     const errors: Array<{ id: string; error: unknown }> = [];
     for (const backend of this.#backends) {
       try {
@@ -248,4 +290,9 @@ export class Workspace {
       .join("\n");
     throw new Error(`Workspace: no backend reachable\n${summary}`);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -264,6 +264,43 @@ describe("Workspace backend fallback", () => {
     expect(readWatermark(ws.db, "pushRev")).toBe(0);
     expect(readWatermark(ws.db, "fetchRev")).toBe(0);
   });
+
+  it("retries connect() with bounded backoff when the option is set", async () => {
+    let attempts = 0;
+    const backend: WorkspaceBackend = {
+      id: "flaky",
+      async connect(): Promise<BackendHandle> {
+        attempts++;
+        if (attempts < 3) throw new Error(`attempt ${attempts} failed`);
+        return { rpc: composite(fakeRpc()), close: async () => {} };
+      },
+    };
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends: [backend],
+      reconnect: { attempts: 3, initialDelayMs: 1, maxDelayMs: 4 },
+    });
+    await ws.ready();
+    expect(attempts).toBe(3);
+  });
+
+  it("surfaces the final error after the retry budget is exhausted", async () => {
+    let attempts = 0;
+    const backend: WorkspaceBackend = {
+      id: "always-fails",
+      async connect(): Promise<BackendHandle> {
+        attempts++;
+        throw new Error(`attempt ${attempts}`);
+      },
+    };
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends: [backend],
+      reconnect: { attempts: 3, initialDelayMs: 1, maxDelayMs: 4 },
+    });
+    await expect(ws.ready()).rejects.toThrow(/attempt 3/);
+    expect(attempts).toBe(3);
+  });
 });
 
 describe("Workspace.fs against the local store", () => {
