@@ -212,6 +212,23 @@ export class Workspace {
         // Workspace satisfies the Sync interface in shell.ts via
         // its public push() / pull() methods.
         this.#shell = new WorkspaceShell(handle.rpc.shell, this);
+        // Tear down our caches if the transport drops mid-session.
+        // Backends without a `closed` promise (in-process fakes) opt
+        // out by omitting it; we only react when it's wired.
+        if (handle.closed) {
+          handle.closed
+            .catch(() => {})
+            .then(() => {
+              // Only clear if this handle is still the current one.
+              // A close() that already ran will have nulled #handle,
+              // and a subsequent ready() may have installed a new one.
+              if (this.#handle === handle) {
+                this.#handle = undefined;
+                this.#shell = undefined;
+                this.#readyPromise = undefined;
+              }
+            });
+        }
         return;
       } catch (error) {
         errors.push({ id: backend.id, error });

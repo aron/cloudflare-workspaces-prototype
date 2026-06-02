@@ -32,12 +32,13 @@
 // props), not the backend, because ctx.exports is per-isolate. The
 // backend takes whatever Fetcher the DO hands it.
 //
-// Failure model is straightforward in v1: connect() does the
-// sequence once and throws on any failure. The Workspace's ready()
-// will retry by re-entering connect() on the next call. Transparent
-// reconnect after a mid-session WebSocket drop is not implemented
-// (Phase 5 R2 deferred work); the next operation throws and the
-// caller is expected to reconstruct the Workspace.
+// Failure model: connect() does the bootstrap sequence once and
+// throws on any failure. The Workspace's ready() retries by
+// re-entering connect() on the next call. On a mid-session drop the
+// backend resolves `BackendHandle.closed`, which the Workspace
+// listens for and uses to drop its cached handle so the next call
+// rebuilds against a fresh session. Backoff and retry policy live
+// in the Workspace, not the backend.
 
 import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
@@ -139,8 +140,25 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       ws as unknown as globalThis.WebSocket,
     ) as RpcStub<WorkspaceRPC>;
 
+    // `closed` resolves on the first 'close' event from the underlying
+    // WebSocket. The Workspace listens for it and drops its cached
+    // handle so the next ready() call rebuilds against a fresh
+    // session. Without this, a mid-session drop strands the dead
+    // handle and every subsequent RPC throws.
+    const closed = new Promise<void>((resolve) => {
+      const onClose = () => {
+        resolve();
+        this.#handle = undefined;
+      };
+      ws.addEventListener("close", onClose, { once: true });
+      // Some runtimes fire 'error' without a follow-up 'close' on
+      // abrupt teardown; treat error as close too.
+      ws.addEventListener("error", onClose, { once: true });
+    });
+
     const handle: BackendHandle = {
       rpc: stub as unknown as WorkspaceRPC,
+      closed,
       close: async () => {
         try {
           ws.close();

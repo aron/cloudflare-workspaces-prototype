@@ -195,6 +195,48 @@ describe("Workspace backend fallback", () => {
       /at least one backend/,
     );
   });
+  it("drops the cached handle when the backend signals closed", async () => {
+    // The backend hands back a controllable `closed` promise; resolving it
+    // is how a real backend tells the Workspace "the transport is gone".
+    // After that, the next ready() must re-enter connect() rather than
+    // returning the dead handle.
+    let signalClosed!: () => void;
+    let closeCount = 0;
+    let connectCount = 0;
+    const backend: WorkspaceBackend = {
+      id: "only",
+      async connect(): Promise<BackendHandle> {
+        connectCount++;
+        const closed = new Promise<void>((resolve) => {
+          signalClosed = resolve;
+        });
+        return {
+          rpc: composite(fakeRpc()),
+          closed,
+          close: async () => {
+            closeCount++;
+          },
+        };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    await ws.ready();
+    expect(connectCount).toBe(1);
+
+    // Simulate a mid-session WebSocket drop.
+    signalClosed();
+    // Yield so the promise's then-callback inside Workspace runs.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The drop should have torn the cached handle down. close() on
+    // the handle is idempotent and the Workspace must not call it
+    // again here — the transport is already gone.
+    expect(closeCount).toBe(0);
+
+    // The next ready() rebuilds.
+    await ws.ready();
+    expect(connectCount).toBe(2);
+  });
 });
 
 describe("Workspace.fs against the local store", () => {

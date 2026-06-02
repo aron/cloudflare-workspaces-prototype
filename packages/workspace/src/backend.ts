@@ -35,6 +35,14 @@ export interface BackendHandle {
   // The composite WorkspaceRPC stub pointing at the wsd
   // backend produced.
   rpc: WorkspaceRPC;
+  // Resolves when the underlying transport closes for any reason
+  // (clean close, peer crash, network drop). The Workspace listens
+  // for this and drops its cached handle so the next ready() call
+  // re-enters connect() against a fresh transport. Optional for
+  // backends whose transport can't drop mid-session (e.g. an
+  // in-process fake); when omitted, the Workspace keeps the handle
+  // until close() is called explicitly.
+  closed?: Promise<void>;
   // Tear down the connection. Idempotent. The Workspace calls
   // close() during its own close(); backend authors don't need
   // to handle re-entry.
