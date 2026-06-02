@@ -13,6 +13,7 @@ import {
   Database,
   type DurableObjectStorageLike,
   initializeSchema,
+  SQLiteWorkspaceProvider,
   WorkspaceFilesystem,
 } from "@cloudflare/dofs";
 import { pullOnce, pushOnce } from "@cloudflare/workspace-rpc/driver";
@@ -40,6 +41,11 @@ export interface WorkspaceOptions {
 export class Workspace {
   readonly #db: Database;
   readonly #fs: WorkspaceFilesystem;
+  /**
+   * Lazily-constructed dofs provider. Built on first `provider()`
+   * call; cached so repeated callers share the same instance.
+   */
+  #provider: SQLiteWorkspaceProvider | undefined;
   readonly #backends: WorkspaceBackend[];
   readonly #now: () => number;
   #handle: BackendHandle | undefined;
@@ -75,6 +81,40 @@ export class Workspace {
   // reads and writes hit the local store, not the wire.
   get fs(): WorkspaceFilesystem {
     return this.#fs;
+  }
+
+  /**
+   * Underlying dofs `SQLiteWorkspaceProvider` over the local store.
+   *
+   * This is the `@platformatic/vfs`-shaped provider — a node:fs
+   * surface with full symlink support. Callers that want a
+   * `VirtualFileSystem` (e.g. to hand to isomorphic-git) wrap it
+   * themselves to keep `@platformatic/vfs` out of this package's
+   * dependency tree:
+   *
+   * ```ts
+   * import { create, VirtualProvider } from "@platformatic/vfs";
+   * import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
+   *
+   * class Glue extends VirtualProvider {
+   *   constructor(private inner: SQLiteWorkspaceProvider) { super(); }
+   *   override get readonly()         { return this.inner.readonly; }
+   *   override get supportsSymlinks() { return this.inner.supportsSymlinks; }
+   *   override get supportsWatch()    { return this.inner.supportsWatch; }
+   * }
+   * // Forward every node:fs method to `inner` via a
+   * // `for (const name of [...]) Object.defineProperty(...)` loop.
+   * const vfs = create(new Glue(workspace.provider()));
+   * ```
+   *
+   * Available immediately; doesn't need `ready()` because the
+   * provider only reads/writes the local store, not the wire.
+   */
+  provider(): SQLiteWorkspaceProvider {
+    if (!this.#provider) {
+      this.#provider = new SQLiteWorkspaceProvider(this.#db, { now: this.#now });
+    }
+    return this.#provider;
   }
 
   // Shell facade. Throws if called before ready() resolves.
