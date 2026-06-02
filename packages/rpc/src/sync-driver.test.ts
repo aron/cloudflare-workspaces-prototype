@@ -6,13 +6,14 @@ import {
   readWatermark,
   SQLiteWorkspaceProvider,
   stageBlob,
+  writeWatermark,
 } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it } from "vitest";
 
 import type { SyncRPC } from "./interface.js";
 import { createSyncServer } from "./server.js";
-import { pullOnce, pushOnce, tick } from "./sync-driver.js";
+import { pullOnce, pushOnce, reconcileWatermarks, tick } from "./sync-driver.js";
 
 // Two peers wired up as direct in-process SyncRPC stubs. No
 // WebSocket; we already have the real-wire convergence test in
@@ -320,6 +321,74 @@ describe("sync driver — push atomicity", () => {
       expect(currentRev(b.db)).toBe(beforeRev);
     } finally {
       b.close();
+    }
+  });
+});
+
+describe("sync driver — reconcileWatermarks", () => {
+  // Run on (re)connect. The DO's watermarks survive across DO and
+  // container lifetimes; the container's watermarks are
+  // process-lifetime in today's wsd. After a container restart with
+  // no new DO-side writes, pushOnce's localRev <= sincePush
+  // early-return means the assertAppliedPushRev check never runs and
+  // the container's empty FUSE mount is invisible to the DO. The
+  // reconcile catches the mismatch by comparing the local cursors
+  // against the remote's watermarks(), resetting fetchRev to 0 when
+  // the remote's log is shorter than we remember and pushRev to 0
+  // when the remote hasn't applied what we claimed to push.
+  it("resets fetchRev when the remote's currentRev is behind ours", async () => {
+    const remote = makePeer();
+    try {
+      // Local thinks it has fetched up to rev 42; remote is fresh
+      // (currentRev = 1 from initializeSchema seeding the root).
+      const local = new Database(new SQLiteTestStorage());
+      initializeSchema(local, () => 1000);
+      writeWatermark(local, "fetchRev", 42);
+      writeWatermark(local, "pushRev", 0);
+
+      await reconcileWatermarks(local, remote.rpc);
+      expect(readWatermark(local, "fetchRev")).toBe(0);
+      expect(readWatermark(local, "pushRev")).toBe(0);
+    } finally {
+      remote.close();
+    }
+  });
+
+  it("resets pushRev when the remote hasn't applied what we shipped", async () => {
+    const remote = makePeer();
+    try {
+      // Local pushRev = 17, but the remote is fresh: its pushRev,
+      // which doubles as appliedPushRev on the wire, is 0.
+      const local = new Database(new SQLiteTestStorage());
+      initializeSchema(local, () => 1000);
+      writeWatermark(local, "fetchRev", 0);
+      writeWatermark(local, "pushRev", 17);
+
+      await reconcileWatermarks(local, remote.rpc);
+      expect(readWatermark(local, "pushRev")).toBe(0);
+    } finally {
+      remote.close();
+    }
+  });
+
+  it("leaves watermarks alone when remote is at least caught up", async () => {
+    const remote = makePeer();
+    try {
+      // Seed the remote with a write so its currentRev > 1.
+      const providerR = new SQLiteWorkspaceProvider(remote.db, { now: () => 1 });
+      providerR.writeFileSync("/seed.txt", "x");
+      // Pretend we fetched it and pushed nothing.
+      const local = new Database(new SQLiteTestStorage());
+      initializeSchema(local, () => 1000);
+      const remoteCurrent = currentRev(remote.db);
+      writeWatermark(local, "fetchRev", remoteCurrent);
+      writeWatermark(local, "pushRev", 0);
+
+      await reconcileWatermarks(local, remote.rpc);
+      expect(readWatermark(local, "fetchRev")).toBe(remoteCurrent);
+      expect(readWatermark(local, "pushRev")).toBe(0);
+    } finally {
+      remote.close();
     }
   });
 });

@@ -16,7 +16,7 @@ import {
   SQLiteWorkspaceProvider,
   WorkspaceFilesystem,
 } from "@cloudflare/dofs";
-import { pullOnce, pushOnce } from "@cloudflare/workspace-rpc/driver";
+import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { WorkspaceShell } from "./shell.js";
@@ -208,6 +208,13 @@ export class Workspace {
     for (const backend of this.#backends) {
       try {
         const handle = await backend.connect();
+        // Reconcile watermarks before publishing the handle. If the
+        // remote restarted between our pushes / fetches it has lost
+        // state we thought it had; reset the local cursors so the
+        // next tick rebaselines. Done eagerly on connect because
+        // pushOnce's localRev <= sincePush early-return otherwise
+        // hides the mismatch.
+        await reconcileWatermarks(this.#db, handle.rpc.sync);
         this.#handle = handle;
         // Workspace satisfies the Sync interface in shell.ts via
         // its public push() / pull() methods.

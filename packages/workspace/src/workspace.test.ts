@@ -237,6 +237,33 @@ describe("Workspace backend fallback", () => {
     await ws.ready();
     expect(connectCount).toBe(2);
   });
+
+  it("reconciles watermarks on connect when the remote is behind", async () => {
+    // Seed local watermarks so they look like they have already
+    // shipped data to / pulled data from a previous container. The
+    // remote in this test is fresh — currentRev = 0, pushRev = 0 —
+    // mirroring the "container restarted with an empty in-memory VFS"
+    // case. ready() must observe the mismatch and reset both
+    // cursors so the next push/pull rebaselines.
+    let watermarksCalls = 0;
+    const sync: import("@cloudflare/workspace-rpc").SyncRPC = {
+      ...fakeRpc(),
+      async watermarks() {
+        watermarksCalls++;
+        return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+      },
+    };
+    const storage = makeStorage();
+    const ws = new Workspace({ storage, backends: [makeBackend("only", sync)] });
+    // Pre-seed local watermarks.
+    const { writeWatermark, readWatermark } = await import("@cloudflare/dofs");
+    writeWatermark(ws.db, "pushRev", 17);
+    writeWatermark(ws.db, "fetchRev", 42);
+    await ws.ready();
+    expect(watermarksCalls).toBe(1);
+    expect(readWatermark(ws.db, "pushRev")).toBe(0);
+    expect(readWatermark(ws.db, "fetchRev")).toBe(0);
+  });
 });
 
 describe("Workspace.fs against the local store", () => {

@@ -226,3 +226,51 @@ export async function tick(
   const pushed = await pushOnce(db, remote);
   return { pulled, pushed };
 }
+
+// Reconcile local watermarks against the remote's view of the world.
+// Called on (re)connect, before any push or pull tick.
+//
+// The asymmetry that makes this necessary: the DO's watermarks live
+// in durable storage and survive its incarnations, but today's wsd
+// runs against a process-lifetime DB so a container restart wipes
+// the container-side state. Without a check, pushOnce's early-return
+// (`localRev <= sincePush`) skips talking to the container entirely
+// when the DO has no new writes — so the next exec runs against an
+// empty FUSE mount.
+//
+// The fix is mechanical: ask the remote what it has, and reset our
+// cursors to 0 wherever the remote is behind us. The rev-0 baseline
+// path in fetchChanges / pushOnce then re-ships everything
+// incrementally on the next tick.
+//
+// Returns the changes made so callers can log them.
+export async function reconcileWatermarks(
+  db: Database,
+  remote: SyncRPC,
+): Promise<{ fetchRevReset: boolean; pushRevReset: boolean }> {
+  const remoteWatermarks = await remote.watermarks();
+  const localFetchRev = readWatermark(db, "fetchRev");
+  const localPushRev = readWatermark(db, "pushRev");
+
+  let fetchRevReset = false;
+  let pushRevReset = false;
+
+  // If the remote's currentRev is below our fetchRev, the remote's
+  // log is shorter than we remember — it lost state since we last
+  // pulled. Re-baseline from 0.
+  if (remoteWatermarks.currentRev < localFetchRev) {
+    writeWatermark(db, "fetchRev", 0);
+    fetchRevReset = true;
+  }
+
+  // The remote's pushRev is what it last applied from us (when the
+  // remote acts as a sync peer it advances pushRev to the senderRev
+  // on every push). If that's below our local pushRev, the remote
+  // hasn't seen what we claimed to ship — reset and re-push.
+  if (remoteWatermarks.pushRev < localPushRev) {
+    writeWatermark(db, "pushRev", 0);
+    pushRevReset = true;
+  }
+
+  return { fetchRevReset, pushRevReset };
+}
