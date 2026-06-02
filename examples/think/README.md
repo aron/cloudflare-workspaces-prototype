@@ -4,8 +4,10 @@ A small end-to-end example that uses [`@cloudflare/think`][think] and
 [`agents/workflows`][workflows] to triage a GitHub issue. The agent
 runs inside a [Cloudflare Container][containers] holding a
 [`@cloudflare/workspace`][workspace] VFS; the workflow drives it
-through three model steps (triage → fix → notify) and POSTs a final
-unified diff back to the user.
+through one explore step (full toolset — the model decides whether
+to attempt a fix or just gather findings), one tool-less structure
+step that coerces the explore output into a zod schema, and a
+terminal step that POSTs a unified diff back to the user.
 
 [think]: https://www.npmjs.com/package/@cloudflare/think
 [workflows]: https://developers.cloudflare.com/workflows/
@@ -18,14 +20,16 @@ unified diff back to the user.
 client (./triage)                worker                                   container
    │  POST /issue                   │                                         │
    ├──────────────────────────────▶ │  setContext + runWorkflow               │
-   │                                ├──── TRIAGE_WORKFLOW ────────────────▶   │
-   │                                │     fetch-issue → set-phase:triage      │
-   │                                │     → step.prompt(triage) ─ tools ──▶ wsd
+   │                                ├──── TRIAGE_WORKFLOW ────────────────────▶   │
+   │                                │     fetch-issue                          │
+   │                                │     → set-phase:explore                  │
+   │                                │     → explore  (tools, agentic loop) ──▶ wsd
    │  POST /webhook (progress)      │                                         │
    │  ◀───────────────────────────  │                                         │
-   │                                │     → set-phase:fix → step.prompt(fix) ─┤
-   │                                │     → build-patch (git diff HEAD)       │
-   │  POST /webhook (DONE + patch)  │     → notify-done                       │
+   │                                │     → set-phase:structure                │
+   │                                │     → structure  (step.prompt, no tools) │
+   │                                │     → build-patch  (git diff via vfs)    │
+   │  POST /webhook (DONE + patch)  │     → notify-done                         │
    │  ◀───────────────────────────  │                                         │
 ```
 
@@ -37,26 +41,33 @@ reach it back over the host network.
 
 ## Tools
 
-The agent has different toolsets per phase. The workflow flips phases
-via `agent.setPhase("triage" | "fix")` inside a `step.do` before each
-`step.prompt`, so a replay after a crash still ends up in the right
-phase.
+The agent has two phases. The workflow flips between them via
+`agent.setPhase("explore" | "structure")` inside a `step.do` before
+each model step, so a replay after a crash still ends up in the
+right phase. `explore` has the full toolset; `structure` has none —
+the model can't be tempted to keep calling tools when its job is to
+just emit JSON.
 
-| Tool            | Triage | Fix | Source                                  |
-| --------------- | :----: | :-: | --------------------------------------- |
-| `git_clone`     |   ✓    |  ✓  | `src/tools/git/clone.ts` (isomorphic-git) |
-| `read`          |   ✓    |  ✓  | vendored from `hackspace/fs-tools`      |
-| `ls`            |   ✓    |  ✓  | `src/agent.ts`                          |
-| `report_update` |   ✓    |  ✓  | `src/tools/report-update.ts`            |
-| `write`         |        |  ✓  | vendored from `hackspace/fs-tools`      |
-| `edit`          |        |  ✓  | vendored from `hackspace/fs-tools`      |
-| `exec`          |        |  ✓  | `src/tools/exec.ts`                     |
+| Tool            | Source                                    |
+| --------------- | ----------------------------------------- |
+| `git_clone`     | `src/tools/git/clone.ts` (isomorphic-git) |
+| `read`          | vendored from `hackspace/fs-tools`        |
+| `ls`            | `src/agent.ts`                            |
+| `write`         | vendored from `hackspace/fs-tools`        |
+| `edit`          | vendored from `hackspace/fs-tools`        |
+| `exec`          | `src/tools/exec.ts`                       |
+| `report_update` | `src/tools/report-update.ts`              |
 
-`git_clone` writes to the workspace through a small `WorkspaceGitFs`
-adapter that enforces a byte budget (100 MiB by default) so a clone of
-a huge repo can't OOM the worker. The clone uses isomorphic-git
-directly against `https://github.com/<repo>` — no Cloudflare Artifacts
-binding required.
+`git_clone` writes to the workspace through a `@platformatic/vfs`
+`VirtualFileSystem` over `Workspace.provider()` — the same `node:fs`-
+shaped surface wsd uses for its FUSE mount. The dofs
+`SQLiteWorkspaceProvider` underneath implements every method
+isomorphic-git asks for, symlinks included, so a clone of e.g.
+`cloudflare/sandbox-sdk` (which has symlinks in its tree) checks
+out cleanly. The clone runs entirely inside the Worker isolate; the
+packfile has to fit in workerd's heap, which is fine for small to
+medium repos at `depth: 1` (the default) but not for huge monorepos.
+No Cloudflare Artifacts binding required.
 
 ## Running it locally
 
