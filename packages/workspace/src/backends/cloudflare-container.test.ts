@@ -1,118 +1,92 @@
 // CloudflareContainerBackend tests — exercise the lifecycle
-// plumbing against an in-process fake Container.
+// plumbing against an in-process fake ContainerHost.
 //
 // The successful connect() path constructs a WebSocketPair, which
 // is a workerd global not available under the vitest node runner.
 // These tests cover the paths that bail before the upgrade (port
-// never opens, /connect non-2xx, /ws upgrade timeout) and the
-// handleFetch input validation. The full happy-path round-trip is
-// covered by the live example.
+// never opens, /connect non-2xx, /ws upgrade timeout), the
+// handleFetch input validation, and the factory + workspace-ref
+// plumbing. The full happy-path round-trip is covered by the live
+// example.
 
 import { describe, expect, test, vi } from "vitest";
 
 import { CloudflareContainerBackend } from "./cloudflare-container.js";
+import type { ContainerHost, WorkspaceRef } from "./container-host.js";
 
-interface FakeContainerOptions {
+interface FakeHostOptions {
   healthy?: boolean;
   connectStatus?: number;
 }
 
-function makeFakeContainer(opts: FakeContainerOptions = {}) {
+interface FakeHost {
+  host: ContainerHost;
+  calls: { name: string; args: unknown[] }[];
+  startEnv?: Record<string, string>;
+  interceptedHost?: string;
+  interceptedWorkspace?: WorkspaceRef;
+}
+
+function makeFakeHost(opts: FakeHostOptions = {}): FakeHost {
   const healthy = opts.healthy ?? true;
   const connectStatus = opts.connectStatus ?? 200;
-
   const calls: { name: string; args: unknown[] }[] = [];
-  let running = false;
-  let interceptedHost: string | undefined;
-  let interceptedFetcher: Fetcher | undefined;
+  const state: FakeHost = { calls } as FakeHost;
 
-  const portFetcher: Fetcher = {
-    // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-    fetch: vi.fn(async (input: any, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = init?.method ?? (typeof input === "string" ? "GET" : input.method);
-      calls.push({ name: "port.fetch", args: [url, method] });
-
-      if (url.endsWith("/health")) {
+  state.host = {
+    async start(env) {
+      calls.push({ name: "start", args: [env] });
+      state.startEnv = env;
+    },
+    async interceptOutboundHttp(host, workspace) {
+      calls.push({ name: "interceptOutboundHttp", args: [host, workspace] });
+      state.interceptedHost = host;
+      state.interceptedWorkspace = workspace;
+    },
+    async fetchPort(port, request) {
+      const url = new URL(request.url);
+      calls.push({ name: "fetchPort", args: [port, url.pathname, request.method] });
+      if (url.pathname === "/health") {
         if (!healthy) throw new Error("connection refused");
         return new Response(null, { status: 200 });
       }
-      if (url.endsWith("/connect")) {
+      if (url.pathname === "/connect") {
         if (connectStatus !== 200) {
           return new Response(`/connect ${connectStatus}`, { status: connectStatus });
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
-      throw new Error(`unexpected port fetch: ${url}`);
-    }),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-  } as any;
-
-  const container = {
-    get running() {
-      return running;
-    },
-    start(options: unknown) {
-      calls.push({ name: "start", args: [options] });
-      running = true;
-    },
-    async monitor() {
-      calls.push({ name: "monitor", args: [] });
-      return new Promise<void>(() => {});
-    },
-    async interceptOutboundHttp(addr: string, binding: Fetcher) {
-      calls.push({ name: "interceptOutboundHttp", args: [addr] });
-      interceptedHost = addr;
-      interceptedFetcher = binding;
-    },
-    getTcpPort(_port: number): Fetcher {
-      return portFetcher;
-    },
-    // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-  } as any as Container;
-
-  return {
-    container,
-    calls,
-    get interceptedHost() {
-      return interceptedHost;
-    },
-    get interceptedFetcher() {
-      return interceptedFetcher;
+      throw new Error(`unexpected fetchPort path: ${url.pathname}`);
     },
   };
+  return state;
 }
 
-const fakeEgress: Fetcher = {
-  // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-  fetch: vi.fn(async () => new Response("ok")) as any,
-  // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-} as any;
+const fakeWorkspace: WorkspaceRef = { binding: "TestDO", id: "abc123" };
 
 describe("CloudflareContainerBackend", () => {
   test("connect() throws when the container port never opens", async () => {
-    const fake = makeFakeContainer({ healthy: false });
+    const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
 
     await expect(backend.connect()).rejects.toThrow(/container port 8080 did not open/);
 
-    // Confirm the lifecycle steps the backend did get to.
     const names = fake.calls.map((c) => c.name);
     expect(names).toContain("start");
     expect(names).toContain("interceptOutboundHttp");
     expect(fake.interceptedHost).toBe("workspace.internal");
-    expect(fake.interceptedFetcher).toBe(fakeEgress);
+    expect(fake.interceptedWorkspace).toEqual(fakeWorkspace);
   });
 
   test("egressHost option overrides the default", async () => {
-    const fake = makeFakeContainer({ healthy: false });
+    const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
       egressHost: "wsd.local",
       connectTimeoutMs: 300,
     });
@@ -121,29 +95,55 @@ describe("CloudflareContainerBackend", () => {
   });
 
   test("containerEnv option merges onto the start() env", async () => {
-    const fake = makeFakeContainer({ healthy: false });
+    const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
       containerEnv: { CUSTOM: "1", PORT: "9000" },
       connectTimeoutMs: 300,
     });
     await expect(backend.connect()).rejects.toThrow();
-    const startCall = fake.calls.find((c) => c.name === "start");
-    expect(startCall).toBeDefined();
-    const options = startCall?.args[0] as { env?: Record<string, string> };
-    expect(options.env?.CUSTOM).toBe("1");
+    expect(fake.startEnv?.CUSTOM).toBe("1");
     // Caller-supplied value wins over the default.
-    expect(options.env?.PORT).toBe("9000");
+    expect(fake.startEnv?.PORT).toBe("9000");
     // Defaults still flow through.
-    expect(options.env?.MOUNT_POINT).toBe("/workspace");
+    expect(fake.startEnv?.MOUNT_POINT).toBe("/workspace");
+  });
+
+  test("container factory is invoked per connect()", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const factory = vi.fn(() => fake.host);
+    const backend = new CloudflareContainerBackend({
+      container: factory,
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    await expect(backend.connect()).rejects.toThrow();
+    // Two failed dials → two factory invocations. The cached
+    // handle only short-circuits on success.
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  test("async container factory is awaited", async () => {
+    const fake = makeFakeHost({ healthy: false });
+    const backend = new CloudflareContainerBackend({
+      container: async () => {
+        await Promise.resolve();
+        return fake.host;
+      },
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 300,
+    });
+    await expect(backend.connect()).rejects.toThrow();
+    expect(fake.calls.map((c) => c.name)).toContain("start");
   });
 
   test("connect() throws when /connect returns non-2xx", async () => {
-    const fake = makeFakeContainer({ connectStatus: 502 });
+    const fake = makeFakeHost({ connectStatus: 502 });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
 
@@ -151,10 +151,10 @@ describe("CloudflareContainerBackend", () => {
   });
 
   test("connect() throws when the /ws upgrade never arrives", async () => {
-    const fake = makeFakeContainer();
+    const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
 
@@ -162,20 +162,20 @@ describe("CloudflareContainerBackend", () => {
   });
 
   test("handleFetch rejects non-/ws paths", async () => {
-    const fake = makeFakeContainer();
+    const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
     });
     const res = await backend.handleFetch(new Request("http://workspace.internal/other"));
     expect(res.status).toBe(404);
   });
 
   test("handleFetch rejects missing upgrade header", async () => {
-    const fake = makeFakeContainer();
+    const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.container,
-      egress: fakeEgress,
+      container: () => fake.host,
+      workspace: fakeWorkspace,
     });
     const res = await backend.handleFetch(new Request("http://workspace.internal/ws"));
     expect(res.status).toBe(426);
