@@ -4,8 +4,10 @@
 // teardown.
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-
-import type { SyncRPC, WorkspaceRPC } from "./interface.js";
+import { wrapShellRpcResults } from "./client-shell-rpc.js";
+import { wrapSyncRpcResults } from "./client-sync-rpc.js";
+import type { ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js";
+import { disposeRpcResult } from "./rpc-lifetime.js";
 
 export interface RPCEvent {
   rpc: keyof SyncRPC;
@@ -33,57 +35,91 @@ export interface SyncClient extends SyncRPC {
   close(): Promise<void>;
 }
 
-// Open a SyncRPC session against `url`. The first call to any
-// method on the returned stub queues until the WebSocket reaches
-// readyState OPEN; capnweb's transport handles that.
-export function createSyncClient(options: ClientOptions): SyncClient {
-  const WS = options.WebSocketImpl ?? WebSocket;
-  const ws = new WS(options.url);
+export interface ShellClient extends ShellRPC {
+  // Close the WebSocket and tear down the stub. Idempotent.
+  close(): Promise<void>;
+}
+
+interface RpcSession<T> {
+  rpc: T;
+  close(): Promise<void>;
+}
+
+export type WorkspaceRpcSession = RpcSession<WorkspaceRPC>;
+
+function createRpcSession<TWire extends object, TClient>(
+  ws: WebSocket,
+  manage: (stub: TWire) => TClient,
+): RpcSession<TClient> {
   // The WebSocket cast crosses two type boundaries: the runtime
   // ws (node `ws` package or global) is structurally compatible
   // with capnweb's expected globalThis.WebSocket but TS can't
   // bridge the nominal types. The RpcStub cast names the remote
-  // interface so the Proxy returned downstream is strongly typed.
-  const stub = newWebSocketRpcSession(ws as unknown as globalThis.WebSocket) as RpcStub<SyncRPC>;
-  // capnweb's RpcStub is a Proxy that exposes the remote interface
-  // as if it were local. We wrap it so callers see SyncClient
-  // (= SyncRPC + close).
-  const onEvent = options.onRPCEvent;
-  return new Proxy(stub, {
+  // interface so downstream code remains strongly typed.
+  const stub = newWebSocketRpcSession(ws as unknown as globalThis.WebSocket) as RpcStub<TWire>;
+  let closePromise: Promise<void> | undefined;
+  let disposed = false;
+
+  const disposeStub = () => {
+    if (disposed) return;
+    disposed = true;
+    disposeRpcResult(stub);
+  };
+
+  return {
+    rpc: manage(stub as unknown as TWire),
+    close() {
+      closePromise ??= new Promise<void>((resolve) => {
+        disposeStub();
+        const w = ws as unknown as { readyState: number; close: () => void };
+        if (w.readyState >= 2) {
+          resolve();
+          return;
+        }
+        (ws as unknown as EventTarget).addEventListener("close", () => resolve(), {
+          once: true,
+        });
+        w.close();
+        // The fallback resolves close() when the runtime does not
+        // emit a close event for an already-closed socket.
+        setTimeout(resolve, 200);
+      });
+      return closePromise;
+    },
+  };
+}
+
+function wrapWorkspaceRpcResults(remote: WorkspaceRPC): WorkspaceRPC {
+  let sync: SyncRPC | undefined;
+  let shell: ShellRPC | undefined;
+  return new Proxy(remote, {
     get(target, prop, receiver) {
-      if (prop === "close") {
-        return async () => {
-          await new Promise<void>((resolve) => {
-            const w = ws as unknown as { readyState: number; close: () => void };
-            if (w.readyState >= 2) {
-              resolve();
-              return;
-            }
-            (ws as unknown as EventTarget).addEventListener("close", () => resolve(), {
-              once: true,
-            });
-            w.close();
-            // Belt-and-braces: if `close` never fires (the socket
-            // was already torn down) the timeout breaks the await.
-            setTimeout(resolve, 200);
-          });
-        };
+      if (prop === "sync") {
+        sync ??= wrapSyncRpcResults(Reflect.get(target, prop, receiver) as SyncRPC);
+        return sync;
       }
+      if (prop === "shell") {
+        shell ??= wrapShellRpcResults(Reflect.get(target, prop, receiver) as ShellRPC);
+        return shell;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
+function withRpcEvents(sync: SyncRPC, onEvent: (event: RPCEvent) => void): SyncRPC {
+  return new Proxy(sync, {
+    get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
-      if (onEvent === undefined || typeof prop !== "string") return value;
-      // Capnweb's Proxy returns a callable RpcPromise/RpcStub for
-      // every string property. Wrap the call to time it and fire
-      // onRPCEvent. The wrapped value still behaves like an
-      // RpcPromise (thenable + property-access for pipelining) for
-      // calls that return synchronously-pipelined values; we only
-      // measure the awaited terminal call.
+      if (typeof prop !== "string" || typeof value !== "function") return value;
+      // Wrap callable SyncRPC methods to time the awaited terminal
+      // result. Stream-read failures are reported by the caller that
+      // drains the stream, not by this per-call hook.
       return (...args: unknown[]) => {
         const start = Date.now();
         const result = (value as (...a: unknown[]) => unknown)(...args);
         // For non-thenable returns (streams), fire the event
-        // immediately with ok=true. The caller may still throw
-        // while reading the stream; observability for that path
-        // belongs to the caller.
+        // immediately with ok=true.
         if (result && typeof (result as { then?: unknown }).then === "function") {
           return (result as Promise<unknown>).then(
             (v) => {
@@ -105,14 +141,50 @@ export function createSyncClient(options: ClientOptions): SyncClient {
         return result;
       };
     },
+  });
+}
+
+// Open a SyncRPC session against `url`. The first call to any
+// method on the returned stub queues until the WebSocket reaches
+// readyState OPEN; capnweb's transport handles that.
+export function createSyncClient(options: ClientOptions): SyncClient {
+  const WS = options.WebSocketImpl ?? WebSocket;
+  const ws = new WS(options.url);
+  const session = createRpcSession<SyncRPC, SyncRPC>(ws, wrapSyncRpcResults);
+  const sync =
+    options.onRPCEvent === undefined ? session.rpc : withRpcEvents(session.rpc, options.onRPCEvent);
+  return new Proxy(sync, {
+    get(target, prop, receiver) {
+      if (prop === "close") return session.close;
+      return Reflect.get(target, prop, receiver);
+    },
     // The Proxy is structurally a SyncRPC stub + the close()
     // override; TS can't infer that from the get-handler shape,
     // so route through unknown to land on SyncClient.
   }) as unknown as SyncClient;
 }
 
+export function createShellClient(options: {
+  url: string;
+  WebSocketImpl?: typeof WebSocket;
+}): ShellClient {
+  const WS = options.WebSocketImpl ?? WebSocket;
+  const ws = new WS(options.url);
+  const session = createRpcSession<ShellRPC, ShellRPC>(ws, wrapShellRpcResults);
+  return new Proxy(session.rpc, {
+    get(target, prop, receiver) {
+      if (prop === "close") return session.close;
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as ShellClient;
+}
+
 export interface WorkspaceClient extends WorkspaceRPC {
   close(): Promise<void>;
+}
+
+export function createWorkspaceRpcSession(ws: WebSocket): WorkspaceRpcSession {
+  return createRpcSession<WorkspaceRPC, WorkspaceRPC>(ws, wrapWorkspaceRpcResults);
 }
 
 // Open a WorkspaceRPC session. Same transport as createSyncClient,
@@ -130,30 +202,10 @@ export function createWorkspaceClient(options: {
 }): WorkspaceClient {
   const WS = options.WebSocketImpl ?? WebSocket;
   const ws = new WS(options.url);
-  // Same WebSocket / RpcStub cast pattern as createSyncClient —
-  // see comment there. WorkspaceRPC adds the composite shape so
-  // callers can pipeline `.sync.push(...)` and `.shell.exec(...)`.
-  const stub = newWebSocketRpcSession(
-    ws as unknown as globalThis.WebSocket,
-  ) as RpcStub<WorkspaceRPC>;
-  return new Proxy(stub, {
+  const session = createWorkspaceRpcSession(ws);
+  return new Proxy(session.rpc, {
     get(target, prop, receiver) {
-      if (prop === "close") {
-        return async () => {
-          await new Promise<void>((resolve) => {
-            const w = ws as unknown as { readyState: number; close: () => void };
-            if (w.readyState >= 2) {
-              resolve();
-              return;
-            }
-            (ws as unknown as EventTarget).addEventListener("close", () => resolve(), {
-              once: true,
-            });
-            w.close();
-            setTimeout(resolve, 200);
-          });
-        };
-      }
+      if (prop === "close") return session.close;
       return Reflect.get(target, prop, receiver);
     },
     // As in createSyncClient, the Proxy is structurally a

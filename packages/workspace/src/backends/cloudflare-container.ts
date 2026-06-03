@@ -40,8 +40,7 @@
 // rebuilds against a fresh session. Backoff and retry policy live
 // in the Workspace, not the backend.
 
-import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import { createWorkspaceRpcSession } from "@cloudflare/workspace-rpc/client";
 
 import type { BackendHandle, WorkspaceBackend } from "../backend.js";
 import { startHeartbeat } from "../heartbeat.js";
@@ -145,21 +144,27 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     await this.#postConnect(container, deadline);
     const ws = await this.#waitForUpgrade(deadline);
 
-    const stub = newWebSocketRpcSession(
-      ws as unknown as globalThis.WebSocket,
-    ) as RpcStub<WorkspaceRPC>;
+    const session = createWorkspaceRpcSession(ws);
 
-    // `closed` resolves on the first 'close' event from the underlying
-    // WebSocket. The Workspace listens for it and drops its cached
-    // handle so the next ready() call rebuilds against a fresh
-    // session. Without this, a mid-session drop strands the dead
-    // handle and every subsequent RPC throws.
+    // `closed` resolves on the first close/error signal from the
+    // underlying WebSocket. The Workspace listens for it and drops
+    // its cached handle so the next ready() call rebuilds against a
+    // fresh session.
     let stopHeartbeat: (() => void) | undefined;
+    let resolveClosed: (() => void) | undefined;
+    let tornDown = false;
+    const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
+      stopHeartbeat?.();
+      this.#handle = undefined;
+      resolveClosed?.();
+    };
     const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
       const onClose = () => {
-        stopHeartbeat?.();
-        resolve();
-        this.#handle = undefined;
+        void session.close();
+        teardown();
       };
       ws.addEventListener("close", onClose, { once: true });
       // Some runtimes fire 'error' without a follow-up 'close' on
@@ -175,7 +180,7 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     if (this.#options.heartbeatIntervalMs > 0) {
       stopHeartbeat = startHeartbeat({
         intervalMs: this.#options.heartbeatIntervalMs,
-        ping: () => (stub as unknown as WorkspaceRPC).sync.watermarks(),
+        ping: () => session.rpc.sync.watermarks(),
         onFailure: () => {
           try {
             ws.close();
@@ -187,16 +192,11 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     }
 
     const handle: BackendHandle = {
-      rpc: stub as unknown as WorkspaceRPC,
+      rpc: session.rpc,
       closed,
       close: async () => {
-        stopHeartbeat?.();
-        try {
-          ws.close();
-        } catch {
-          // already closed; idempotent
-        }
-        this.#handle = undefined;
+        await session.close();
+        teardown();
       },
     };
     this.#handle = handle;

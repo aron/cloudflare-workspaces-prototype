@@ -22,7 +22,7 @@ import { Database, initializeSchema, ROOT_INODE } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
-import { createSyncClient, createWorkspaceClient } from "../src/client.js";
+import { createShellClient, createSyncClient, createWorkspaceClient } from "../src/client.js";
 import type { ExecEvent } from "../src/interface.js";
 import {
   acceptWebSocketSession,
@@ -125,6 +125,10 @@ async function startShellHarness(): Promise<ShellHarness> {
   };
 }
 
+function expectNoDisposer(value: object | null): void {
+  expect((value as { [Symbol.dispose]?: unknown } | null)?.[Symbol.dispose]).toBeUndefined();
+}
+
 async function drainExec(stream: ReadableStream<ExecEvent>): Promise<ExecEvent[]> {
   const events: ExecEvent[] = [];
   const reader = stream.getReader();
@@ -149,16 +153,9 @@ describe("ShellRPC over a real WebSocket", () => {
 
   it("exec forwards the command and streams events back to the client", async () => {
     harness = await startShellHarness();
-    // Sync client knows how to dial /rpc; reuse its constructor and
-    // cast to the wire shape we need. ShellRPC is structurally a
-    // subset of WorkspaceRPC for our purposes here.
-    const client = createWorkspaceClient({ url: harness.url });
+    const client = createShellClient({ url: harness.url });
     try {
-      // ShellRpcServer is the top-level target for this harness, so
-      // `client.exec(...)` lands on it directly. createWorkspaceClient
-      // proxies all property access through; capnweb routes by name.
-      // biome-ignore lint/suspicious/noExplicitAny: client targets ShellRPC for this harness, not WorkspaceRPC
-      const handle = await (client as any).exec({ command: "echo hi" });
+      const handle = await client.exec({ command: "echo hi" });
       const events = await drainExec(handle.events);
       expect(events).toHaveLength(2);
       expect(events[0]?.name).toBe("stdout");
@@ -175,18 +172,15 @@ describe("ShellRPC over a real WebSocket", () => {
 
   it("killExec and disposeExec land on the runner", async () => {
     harness = await startShellHarness();
-    const client = createWorkspaceClient({ url: harness.url });
+    const client = createShellClient({ url: harness.url });
     try {
-      // biome-ignore lint/suspicious/noExplicitAny: see above
-      const handle = await (client as any).exec({ command: "sleep", id: "fixed" });
+      const handle = await client.exec({ command: "sleep", id: "fixed" });
       await drainExec(handle.events);
 
-      // biome-ignore lint/suspicious/noExplicitAny: see above
-      await (client as any).killExec({ id: "fixed", signal: "SIGKILL" });
+      await client.killExec({ id: "fixed", signal: "SIGKILL" });
       expect(harness.runner.records.get("fixed")?.killed?.signal).toBe("SIGKILL");
 
-      // biome-ignore lint/suspicious/noExplicitAny: see above
-      await (client as any).disposeExec({ id: "fixed" });
+      await client.disposeExec({ id: "fixed" });
       expect(harness.runner.records.get("fixed")?.disposed).toBe(true);
     } finally {
       await client.close();
@@ -195,14 +189,12 @@ describe("ShellRPC over a real WebSocket", () => {
 
   it("getExec replays the recorded events", async () => {
     harness = await startShellHarness();
-    const client = createWorkspaceClient({ url: harness.url });
+    const client = createShellClient({ url: harness.url });
     try {
-      // biome-ignore lint/suspicious/noExplicitAny: see above
-      const first = await (client as any).exec({ command: "first", id: "repeat" });
+      const first = await client.exec({ command: "first", id: "repeat" });
       await drainExec(first.events);
 
-      // biome-ignore lint/suspicious/noExplicitAny: see above
-      const second = await (client as any).getExec({ id: "repeat" });
+      const second = await client.getExec({ id: "repeat" });
       const replayed = await drainExec(second.events);
       expect(replayed).toHaveLength(2);
       expect(new TextDecoder().decode(replayed[0]?.value as Uint8Array)).toBe("ran:first\n");
@@ -273,6 +265,25 @@ describe("Composite WorkspaceRPC (sync + shell on one session)", () => {
 
       // Sanity check: server side records both interactions.
       expect(harness.runner.records.get(handle.id)?.command).toBe("ls");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("sync half returns plain sync data while shell streams remain usable", async () => {
+    harness = await startCompositeHarness();
+    const client = createWorkspaceClient({ url: harness.url });
+    try {
+      const watermarks = await client.sync.watermarks();
+      const entry = await client.sync.readEntry("/none");
+      const handle = await client.shell.exec({ command: "shell-stream" });
+      const events = await drainExec(handle.events);
+
+      expectNoDisposer(watermarks);
+      expectNoDisposer(handle);
+      expect(entry).toBeNull();
+      expect(events).toHaveLength(2);
+      expect(harness.runner.records.get(handle.id)?.command).toBe("shell-stream");
     } finally {
       await client.close();
     }

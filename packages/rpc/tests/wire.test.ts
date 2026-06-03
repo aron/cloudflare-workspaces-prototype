@@ -23,6 +23,10 @@ interface Harness {
   close: () => Promise<void>;
 }
 
+function expectNoDisposer(value: object | null): void {
+  expect((value as { [Symbol.dispose]?: unknown } | null)?.[Symbol.dispose]).toBeUndefined();
+}
+
 // Stand up a real HTTP + WebSocket server bound to 127.0.0.1, with a
 // fresh in-memory SQLite-backed VFS behind a SyncRPC adapter. Returns
 // the ws:// URL the client should dial. Each test calls
@@ -413,6 +417,60 @@ describe("onRPCEvent observability", () => {
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ rpc: "hasObjects", ok: true });
       expect(events[0].durationMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("preserves synchronous stream returns while recording events", async () => {
+    harness = await startHarness();
+    const events: RPCEvent[] = [];
+    const client = createSyncClient({
+      url: harness.url,
+      onRPCEvent: (e) => events.push(e),
+    });
+    try {
+      const stream = client.fetchObjects([]);
+      expect(stream).toBeInstanceOf(ReadableStream);
+      await stream.cancel();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ rpc: "fetchObjects", ok: true });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("SyncRPC client result lifetime", () => {
+  let harness: Harness | undefined;
+  afterEach(async () => {
+    await harness?.close();
+    harness = undefined;
+  });
+
+  it("returns plain data objects without disposal handles", async () => {
+    harness = await startHarness();
+    const provider = new SQLiteWorkspaceProvider(harness.db, { now: () => 1234 });
+    provider.writeFileSync("/client-result.txt", "client result");
+    const client = createSyncClient({ url: harness.url });
+    try {
+      const have = await client.hasObjects([]);
+      const watermarks = await client.watermarks();
+      const entry = await client.readEntry("/client-result.txt");
+      const empty = new ReadableStream<ChangeEntry>({
+        start(controller) {
+          controller.close();
+        },
+      });
+      const pushed = await client.push({ senderRev: 0, changes: empty });
+      const changes = await client.fetchChanges({ sinceRev: 0, ignore: [] });
+      await changes.stream.cancel();
+
+      expectNoDisposer(have);
+      expectNoDisposer(watermarks);
+      expectNoDisposer(entry);
+      expectNoDisposer(pushed);
+      expectNoDisposer(changes);
     } finally {
       await client.close();
     }
