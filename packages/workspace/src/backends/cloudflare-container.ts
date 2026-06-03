@@ -60,9 +60,16 @@ export interface CloudflareContainerBackendOptions {
 
   // Identifies the Workspace-owning DO. Fixed for the lifetime of
   // the backend: the backend lives inside this DO and the /ws
-  // upgrade always lands here. `binding` is the env name of the
-  // DurableObjectNamespace; `id` is the stringified DO id.
-  workspace: WorkspaceRef;
+  // upgrade always lands here.
+  //
+  // Two shapes:
+  //   - Fetcher  — same-DO callers pass ctx.exports.WorkspaceProxy(...)
+  //     directly, since the loopback fetcher must be built in the
+  //     isolate that calls interceptOutboundHttp.
+  //   - WorkspaceRef — cross-DO callers pass plain {binding, id}
+  //     data; the host-side DO constructs the WorkspaceProxy from
+  //     it (Fetchers can't survive a Workers RPC hop).
+  workspace: Fetcher | WorkspaceRef;
 
   // Hostname wsd will dial back. Defaults to "workspace.internal".
   // Override for tests or to avoid collisions with other backends

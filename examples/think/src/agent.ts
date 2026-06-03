@@ -29,6 +29,7 @@ import { Think } from "@cloudflare/think";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
+  localContainerHost,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
@@ -143,13 +144,9 @@ export class TriageAgent extends Think<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    const container = ctx.container;
-    if (!container) {
-      throw new Error("TriageAgent DO is not container-enabled (check wrangler.jsonc)");
-    }
     this.#backend = new CloudflareContainerBackend({
-      container: () => container,
-      egress: ctx.exports.WorkspaceProxy({
+      container: () => localContainerHost(ctx),
+      workspace: ctx.exports.WorkspaceProxy({
         props: { binding: "TriageAgent", id: ctx.id.toString() },
       }),
     });
