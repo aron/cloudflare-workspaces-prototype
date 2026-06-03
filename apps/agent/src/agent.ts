@@ -33,51 +33,34 @@ import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
-import { Workspace, R2Bucket as R2Mount } from "@cloudflare/workspace";
+import type { WorkspaceStub } from "@cloudflare/workspace";
+import { resolveContainerId, releaseContainer } from "./pool.js";
+import type { Sandbox } from "./sandbox.js";
+import { adaptForFsTools } from "./workspace-adapter.js";
 
 import {
   createEditTool,
   createReadTool,
   createWriteTool,
   WorkspaceFileStore,
+  type FileStore,
 } from "@cloudflare/fs-tools";
-import {
-  createGitCloneTool,
-  createGitCreateRepoTool,
-  createGitListReposTool,
-  createGitCommitTool,
-  createGitPushTool,
-  createGitShareTool,
-} from "@cloudflare/git-tools";
-import { createDoForkRegistry } from "./fork-registry.js";
-import type { ForkRegistry } from "@cloudflare/workspace/git";
 import {
   createBraveSearchProvider,
   createWebFetchTool,
   createWebSearchTool,
 } from "@cloudflare/web-tools";
-import { resolveContainerId, releaseContainer } from "./pool.js";
 import { currentModelId } from "./model.js";
 import { readIdentity } from "./identity.js";
-import { buildSessionTar } from "./debug-tar.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
 import { splitStreamingTools } from "./streaming-tools.js";
-import { ExecOutputBuffer, type LogEvent } from "./exec-buffer.js";
-import { ExecInflight } from "./exec-inflight.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
-import { WorkerDeployer } from "./worker/deploy.js";
-import type { DeployResult } from "./worker/deploy.js";
-import { parseFetchCall, fetchAgainstWorker } from "./worker/fetch.js";
-import type { FetchToolResult, ParsedFetch } from "./worker/fetch.js";
 import { buildSystemPrompt, type Skill } from "./system-prompt.js";
 import { discoverSkills } from "./skills.js";
 import { trace, redactSecrets } from "./tracing.js";
-
-export { WorkerDeployer, parseFetchCall, fetchAgainstWorker };
-export type { DeployResult, FetchToolResult, ParsedFetch };
 
 const WORKSPACE   = "/workspace";
 const SKILLS_PATH = "/workspace/.agents/skills";
@@ -103,19 +86,24 @@ export class Agent extends Think<Env> {
   override maxSteps = 20;
 
   /**
-   * Our custom container-backed Workspace. Think types its own
-   * `workspace` property as `WorkspaceLike` from `@cloudflare/shell`,
-   * but ours owns a FUSE/capnweb sync to a sandbox container plus
-   * `exec`/`runWasm` — functionality the shell interface doesn't model.
-   * We override the type to `any` so the field carries our concrete
-   * shape; nothing in this class routes through Think's builtin file
-   * tools (we don't call `createWorkspaceTools` and we don't wire any
-   * shell-shaped consumers), so the type relaxation is safe.
+   * `WorkspaceStub` over RPC to this agent's assigned Sandbox DO.
+   * Built lazily on first use; rebuilt if the Sandbox cycles. The
+   * Workspace itself lives inside the Sandbox DO (because
+   * `CloudflareContainerBackend` is same-DO-only); this stub is
+   * what Think's `workspace` field carries.
+   *
+   * Typed `any` so the Think baseline's `WorkspaceLike` contract
+   * doesn't clash with our concrete shape. The few places Think
+   * touches it default tools never fire here because `getTools()`
+   * doesn't include any of them and `workspaceBash` is off.
    */
   declare workspace: any;
 
-  /** Lazily-constructed deployer for worker_deploy. */
-  private _deployer?: WorkerDeployer;
+  /** Cached Sandbox DO stub for this agent's session. */
+  private _sandboxStub: DurableObjectStub<Sandbox> | null = null;
+
+  /** Cached connected WorkspaceStub. */
+  private _workspaceStub: WorkspaceStub | null = null;
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
@@ -208,186 +196,76 @@ export class Agent extends Think<Env> {
     const self = this as any;
     const original = self._wrapToolsWithDecision.bind(this);
     self._wrapToolsWithDecision = splitStreamingTools(Agent.STREAMING_TOOLS, original);
-    this.workspace = new Workspace({
-      storage:   this.ctx.storage,
-      sandbox:   this.env.Sandbox,
-      sessionId: this.name,
-      resolveSessionId: (id) => resolveContainerId(this.env, id),
-      // Drop regenerable subtrees from the post-exec pull so we don't
-      // ship megabytes of node_modules through capnweb after every
-      // npm install. The bytes still exist on the container side for
-      // the next exec() to use; we just don't persist them into the
-      // DO's VFS. Sourced from WORKSPACE_IGNORE so the system prompt
-      // can advertise the same list to the model — see getSystemPrompt().
-      pullIgnore: WORKSPACE_IGNORE,
-      // R2-backed mount of the shared skills bucket. The agent reads
-      // SKILL.md bodies through this mount via the normal `read` tool;
-      // discovery below indexes the metadata for the system prompt.
-      mounts: this.env.SKILLS
-        ? { [SKILLS_PATH]: R2Mount(this.env.SKILLS) }
-        : {},
-    });
+    // Workspace lives in the Sandbox DO; the agent holds a stub
+    // fetched on first use via the warm pool. Skills discovery and
+    // mkdir(/workspace) used to happen at construction against the
+    // local Workspace; those are deferred to first turn now because
+    // we can't do RPC inside blockConcurrencyWhile against a DO
+    // we haven't been assigned yet.
+    this.workspace = null;
     this.ctx.blockConcurrencyWhile(async () => {
-      await this.workspace.mkdir(WORKSPACE);
-      // Index the skills mount once at construction so getSystemPrompt()
-      // stays synchronous and never serves an empty <available_skills>
-      // block after a cold start.
-      try {
-        this._skills = await discoverSkills(this.workspace);
-      } catch {
-        this._skills = [];
-      }
-      // Hydrate the cached roomId set on /seed so getSystemPrompt() can
-      // build deep-link examples without an async hop.
       this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
       this._roomName = (await this.ctx.storage.get<string>(Agent.ROOM_NAME_STORAGE_KEY)) ?? null;
     });
   }
 
-  private get deployer(): WorkerDeployer {
-    if (!this._deployer) {
-      this._deployer = new WorkerDeployer(this.workspace, this.env.LOADER);
-    }
-    return this._deployer;
+  /**
+   * Resolve the Workspace stub for this agent's session, going
+   * through the warm pool. Cached across calls; the cache is
+   * dropped when the underlying connection drops (heartbeat
+   * failure, container cycle), and the next call rebuilds.
+   */
+  private async getWorkspace(): Promise<WorkspaceStub> {
+    if (this._workspaceStub) return this._workspaceStub;
+    const name = await resolveContainerId(this.env, this.name);
+    const id = this.env.Sandbox.idFromName(name);
+    const stub = this.env.Sandbox.get(id);
+    this._sandboxStub = stub;
+    // Workers RPC wraps the returned WorkspaceStub in a Stub<>
+    // proxy that's structurally a superset of the RpcTarget but
+    // not assignable to it. Cast at this boundary; downstream
+    // consumers (the FS / shell tools) only touch the methods
+    // both shapes expose.
+    const ws = (await stub.getWorkspace()) as unknown as WorkspaceStub;
+    this._workspaceStub = ws;
+    this.workspace = ws;
+    return ws;
   }
 
   /**
-   * Lazily-built SQL-backed `ForkRegistry`. Lives on the same DO storage
-   * the Workspace uses but in its own `_git_forks` table.
+   * Best-effort warmup. Mirrors the old `Workspace.warmup()` call
+   * sites — hits the warm pool, primes the Sandbox container, and
+   * caches the resulting stub. Failures are swallowed at call sites
+   * (they're all `ctx.waitUntil(...).catch(() => {})`).
    */
-  private _forks?: ForkRegistry;
-  private _forkRegistry(): ForkRegistry {
-    if (!this._forks) {
-      const sql = (this.ctx.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
-      this._forks = createDoForkRegistry(sql);
-    }
-    return this._forks;
+  private async warmupWorkspace(): Promise<void> {
+    await this.getWorkspace();
   }
 
   onStart() {
-    // Pre-warm: kick off container boot in background, don't block.
-    this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
-    // Recover in-flight exec processes that were running when the DO
-    // last died. Don't block onStart; this can race with new turns and
-    // either path tolerates a stale inflight row.
-    this.ctx.waitUntil(this._recoverInflightExecs().catch(err => {
-      console.warn("[Agent] exec recovery failed:", err);
-    }));
+    // Pre-warm the container in the background. The new exec API
+    // doesn't support reattach-to-running-process across DO
+    // evictions, so the old _recoverInflightExecs path is gone; a
+    // wedged exec is now the user's Stop button to clear.
+    this.ctx.waitUntil(this.warmupWorkspace().catch(() => {}));
   }
 
-  /**
-   * Sweep the _exec_inflight table and reconcile each row with the
-   * sandbox's view of the process. Three cases:
+  /* Removed: exec inflight recovery.
    *
-   *   - sandbox.getProcess returns null     -> process is gone (sandbox
-   *     cycled or never had it). Patch the persisted tool part to
-   *     output-error with details: "process lost on restart". Clear
-   *     the inflight row.
-   *   - process completed                    -> patch the part to a
-   *     final output-available state built from sandbox logs. Clear.
-   *   - process still running                -> reattach, stream the
-   *     remaining logs into the persisted part via
-   *     updateMessageInHistory, then clear when it exits.
+   * The old @cloudflare/workspace exposed startProcess /
+   * streamProcessLogs / getProcess so a DO that died mid-exec could
+   * reattach to a still-running command on the next start. The
+   * next-branch WorkspaceShell only exposes a result-shaped exec
+   * surface (the underlying handle is a stream, but it's not
+   * carried across the DO/Sandbox RPC boundary today). Reattach is
+   * therefore unimplementable.
    *
-   * Patches go through updateMessageInHistory so subsequent reconnects
-   * and future turns see the correct state. Without recovery the
-   * orphan-tools safety net (beforeTurn) still rewrites the part to
-   * output-error; recovery just gives a nicer result when the process
-   * actually finished.
+   * If a turn wedges across a DO eviction the persisted tool part
+   * is left in `input-streaming`; `resolveOrphanToolCalls` in
+   * `beforeTurn` patches those to output-error: cancelled so the
+   * next model call sees a terminal answer for the part and the
+   * thread unwedges.
    */
-  private async _recoverInflightExecs(): Promise<void> {
-    return trace("agent.recoverInflightExecs", { "hackspace.thread_id": this.name }, async (span) => {
-      const inflight = this._inflight();
-      const rows = inflight.list();
-      span.set("hackspace.inflight_rows", () => rows.length);
-      if (rows.length === 0) return;
-      let recovered = 0;
-      let failed = 0;
-      for (const row of rows) {
-        try {
-          await this._recoverOneInflightExec(row.toolCallId, row.processId);
-          recovered++;
-        } catch (err) {
-          failed++;
-          console.warn(`[Agent] recovery for ${row.toolCallId} failed:`, err);
-        } finally {
-          inflight.clear(row.toolCallId);
-        }
-      }
-      span.set("hackspace.recovered", () => recovered);
-      span.set("hackspace.failed", () => failed);
-    });
-  }
-
-  private async _recoverOneInflightExec(toolCallId: string, processId: string): Promise<void> {
-    const ws = this.workspace;
-    // 1. Probe the sandbox.
-    const proc = await ws.getProcess(processId);
-    if (!proc) {
-      await this._patchExecPart(toolCallId, {
-        processId, running: false, stdout: "", stderr: "",
-        error: { details: "process lost on restart" },
-        exitCode: -1,
-      });
-      return;
-    }
-
-    // 2. Pull whatever logs are still buffered. The sandbox keeps them
-    //    even after exit, so this covers both running and completed.
-    const buf = new ExecOutputBuffer();
-    try {
-      const stream = await ws.streamProcessLogs(processId);
-      for await (const event of stream as AsyncIterable<LogEvent>) {
-        buf.apply(event);
-        if (event.type === "exit" || event.type === "error") break;
-      }
-    } catch (err) {
-      const details = err instanceof Error ? err.message : String(err);
-      await this._patchExecPart(toolCallId, {
-        ...buf.snapshot(processId), error: { details },
-      });
-      return;
-    }
-    // Pull dirty files; same rationale as the live tool's finally clause.
-    // Failures here mean the VFS stays out of sync with the container until
-    // the next exec — log them at warn so the asymmetry is visible instead of
-    // silently degrading.
-    try {
-      await ws.pullDirtyAfter();
-    } catch (err) {
-      console.warn("[Agent] pullDirtyAfter failed during exec recovery:", err);
-    }
-    await this._patchExecPart(toolCallId, buf.snapshot(processId));
-  }
-
-  /**
-   * Walk this.messages, find the assistant message that carries the
-   * tool part with matching toolCallId, and patch it to
-   * output-available with the supplied snapshot. Persisted via
-   * updateMessageInHistory so reconnects and future turns see it.
-   */
-  private async _patchExecPart(toolCallId: string, snap: unknown): Promise<void> {
-    for (const m of this.messages) {
-      if (m.role !== "assistant") continue;
-      let touched = false;
-      const parts = m.parts.map(p => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ap = p as any;
-        if (typeof ap.type === "string" && ap.type.startsWith("tool-") &&
-            ap.toolCallId === toolCallId) {
-          touched = true;
-          return { ...ap, state: "output-available", output: snap };
-        }
-        return p;
-      });
-      if (touched) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await this.updateMessageInHistory({ ...m, parts } as any);
-        return;
-      }
-    }
-  }
-
   // ── Think hooks ───────────────────────────────────────
 
   /**
@@ -452,7 +330,7 @@ export class Agent extends Think<Env> {
       "hackspace.continuation": ctx?.continuation ?? false,
     }, async (span) => {
       span.set("hackspace.messages", () => this.messages.length);
-      this.ctx.waitUntil(this.workspace.warmup().catch(() => {}));
+      this.ctx.waitUntil(this.warmupWorkspace().catch(() => {}));
 
       // Patch dangling tool calls before the model sees them. A tool
       // result that never lands (exec timeout, container loss, DO eviction
@@ -780,10 +658,21 @@ export class Agent extends Think<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/vfs")) {
+      const ws = await this.getWorkspace();
+      const matches = await ws.fs.find(WORKSPACE, "");
       const entries: Array<{ path: string; type: string; size: number; mtime: number }> = [];
-      for (const e of this.workspace.vfs.snapshot().entries) {
-        const stat = await this.workspace.stat(e.path);
-        entries.push({ path: e.path, type: e.type, size: stat?.size ?? 0, mtime: e.mtime });
+      for (const m of matches) {
+        try {
+          const s = await ws.fs.stat(m.path);
+          entries.push({
+            path: m.path,
+            type: s.isDirectory ? "dir" : "file",
+            size: s.size ?? 0,
+            mtime: s.mtime ?? 0,
+          });
+        } catch {
+          // entry vanished between find and stat; skip
+        }
       }
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
     }
@@ -798,9 +687,16 @@ export class Agent extends Think<Env> {
       }
       const limitRaw = url.searchParams.get("limit");
       const limit = Math.min(Math.max(parseInt(limitRaw ?? "20", 10) || 20, 1), 100);
+      const ws = await this.getWorkspace();
+      const matches = await ws.fs.find(WORKSPACE, "");
       const all: ListingEntry[] = [];
-      for (const e of this.workspace.vfs.snapshot().entries) {
-        all.push({ path: e.path, type: e.type === "dir" ? "dir" : "file" });
+      for (const m of matches) {
+        try {
+          const s = await ws.fs.stat(m.path);
+          all.push({ path: m.path, type: s.isDirectory ? "dir" : "file" });
+        } catch {
+          // skip vanished entries
+        }
       }
       const result = buildListing(all, prefix, limit);
       return Response.json(result, { headers: { "cache-control": "no-store" } });
@@ -822,12 +718,16 @@ export class Agent extends Think<Env> {
       if (abs.split("/").includes("..")) {
         return new Response("bad path", { status: 400 });
       }
-      const stat = await this.workspace.stat(abs);
-      if (!stat || stat.type !== "file") {
+      const ws = await this.getWorkspace();
+      let stat;
+      try {
+        stat = await ws.fs.stat(abs);
+      } catch {
         return new Response("not found", { status: 404 });
       }
-      // For HEAD we still want to report content-length, so stat is
-      // enough — skip the readFile.
+      if (!stat.isFile) {
+        return new Response("not found", { status: 404 });
+      }
       const filename = abs.slice(abs.lastIndexOf("/") + 1);
       const download = url.searchParams.get("download") !== null;
       const headers: Record<string, string> = {
@@ -839,29 +739,22 @@ export class Agent extends Think<Env> {
           : `inline; filename="${filename.replace(/"/g, "")}"`,
       };
       if (isHead) return new Response(null, { headers });
-      const bytes = await this.workspace.readFile(abs);
-      if (!bytes) return new Response("not found", { status: 404 });
-      return new Response(bytes as BodyInit, { headers });
+      try {
+        const stream = await ws.fs.readFile(abs);
+        return new Response(stream, { headers });
+      } catch {
+        return new Response("not found", { status: 404 });
+      }
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/tar")) {
-      const tar = await buildSessionTar({
-        agentName: this.name,
-        metadata:  {
-          agent:      this.name,
-          model:     currentModelId(this.env),
-          messageCount: this.messages.length,
-          capturedAt: new Date().toISOString(),
-        },
-        messages:  this.messages,
-        workspace: this.workspace,
-      });
-      return new Response(tar as BodyInit, {
-        headers: {
-          "content-type":        "application/x-tar",
-          "content-disposition": `attachment; filename="${this.name}.tar"`,
-          "cache-control":       "no-store",
-        },
+      // /tar built a debug tarball over the old Workspace.find +
+      // readFile surface. It hasn't been ported to the new
+      // Workspace.fs API yet; returning 501 keeps the route
+      // honest until the rebuild lands.
+      return new Response("tar export not yet ported to new workspace", {
+        status: 501,
+        headers: { "content-type": "text/plain" },
       });
     }
 
@@ -949,25 +842,18 @@ export class Agent extends Think<Env> {
   }
 
   private buildTools() {
-    const ws = this.workspace;
+    // Resolve the WorkspaceStub once per turn; tools below close over
+    // getWs and re-await it on each call. The cache lives in
+    // this._workspaceStub so the underlying RPC handshake only runs
+    // on first contact.
+    const getWs = () => this.getWorkspace();
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
       ({ [name]: def });
-    // Shared shape for every git tool. Carries the session id (for
-    // per-session fork naming), the raw VFS (for isomorphic-git via the
-    // workspace fs adapter), an mkdir hook, and a SQLite-backed
-    // ForkRegistry so push/share calls remember which fork belongs to
-    // this session across DO restarts.
-    const gitWorkspace = {
-      sessionId: this.name,
-      vfs:       ws.vfs,
-      mkdir:     (p: string) => ws.mkdir(p),
-      forkRegistry: this._forkRegistry(),
-    };
 
     return {
-      ...pick("read",  createReadTool({ store: new WorkspaceFileStore(ws) })),
-      ...pick("write", createWriteTool({ store: new WorkspaceFileStore(ws) })),
-      ...pick("edit",  createEditTool({ store: new WorkspaceFileStore(ws) })),
+      ...pick("read",  createReadTool({ store: makeLazyStore(getWs) })),
+      ...pick("write", createWriteTool({ store: makeLazyStore(getWs) })),
+      ...pick("edit",  createEditTool({ store: makeLazyStore(getWs) })),
       ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
       ...(this.env.BRAVE_API_KEY
         ? pick("websearch", createWebSearchTool({
@@ -978,29 +864,44 @@ export class Agent extends Think<Env> {
       ...pick("ls", tool({
         description: "List files and directories at a path",
         inputSchema: z.object({ path: z.string().describe("Absolute directory path, e.g. /workspace") }),
-        execute: async ({ path }) => ({ path, entries: await ws.readdir(path) }),
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          return { path, entries: await ws.fs.readdir(path) };
+        },
       })),
 
       ...pick("stat", tool({
         description: "Get metadata for a file or directory: type, size, mtime",
         inputSchema: z.object({ path: z.string().describe("Absolute path") }),
         execute: async ({ path }) => {
-          const s = await ws.stat(path);
-          if (!s) return { error: `Not found: ${path}` };
-          return { path, ...s };
+          const ws = await getWs();
+          try {
+            const s = await ws.fs.stat(path);
+            return { path, type: s.isDirectory ? "dir" : "file", size: s.size, mtime: s.mtime, mode: s.mode };
+          } catch {
+            return { error: `Not found: ${path}` };
+          }
         },
       })),
 
       ...pick("mkdir", tool({
         description: "Create a directory (including parent directories)",
         inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => { await ws.mkdir(path); return { path, created: true }; },
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          await ws.fs.mkdir(path, { recursive: true });
+          return { path, created: true };
+        },
       })),
 
       ...pick("rm", tool({
         description: "Delete a file or directory (recursive)",
         inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
-        execute: async ({ path }) => { await ws.deleteFile(path); return { path, deleted: true }; },
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          await ws.fs.rm(path, { recursive: true, force: true });
+          return { path, deleted: true };
+        },
       })),
 
       ...pick("find", tool({
@@ -1009,10 +910,10 @@ export class Agent extends Think<Env> {
           directory: z.string().describe("Directory to search under, e.g. /workspace"),
           pattern:   z.string().optional().describe("Substring to match against filename, e.g. '.zig' or '.go'"),
         }),
-        execute: async ({ directory, pattern }) => ({
-          directory, pattern,
-          matches: await ws.findFiles(directory, pattern),
-        }),
+        execute: async ({ directory, pattern }) => {
+          const ws = await getWs();
+          return { directory, pattern, matches: await ws.fs.find(directory, pattern ?? "") };
+        },
       })),
 
       ...pick("grep", tool({
@@ -1022,96 +923,32 @@ export class Agent extends Think<Env> {
           path:       z.string().describe("File or directory to search"),
           ignoreCase: z.boolean().optional().describe("Case-insensitive search"),
         }),
-        execute: async ({ pattern, path, ignoreCase }) => ({
-          pattern, path,
-          matches: await ws.grep(pattern, path, { ignoreCase }),
-        }),
+        execute: async ({ pattern, path, ignoreCase }) => {
+          const ws = await getWs();
+          return {
+            pattern, path,
+            matches: await ws.fs.grep(pattern, path, ignoreCase ? { ignoreCase } : {}),
+          };
+        },
       })),
 
       ...pick("exec", tool({
         description:
           "Run a shell command in the workspace sandbox. " +
           "Prefer the dedicated tools first: read/write/edit/ls/stat/" +
-          "mkdir/rm/find/grep for file ops, worker_deploy/worker_fetch " +
-          "for Cloudflare Workers, run for compiled WASM binaries. " +
-          "Primary use: compilation and build-tool invocation (zig, go, npm, etc.). " +
-          "Fallback use: after the same dedicated tool has failed at least twice " +
-          "in a row on the same input with errors that look like tool-level bugs " +
-          "(not user input errors), it is acceptable to drop down to `exec` to " +
-          "achieve the same effect \u2014 e.g. `cat`/`sed`/`mv` when `read`/`edit` " +
-          "keeps erroring, shell `ls` when the `ls` tool fails. When you do this, " +
-          "say so briefly in your response so the human can see the workaround " +
-          "and report the underlying bug. Do not use `exec` as a first attempt " +
-          "for anything a dedicated tool covers.",
+          "mkdir/rm/find/grep for file ops. " +
+          "Primary use: compilation and build-tool invocation (zig, go, npm, etc.).",
         inputSchema: z.object({
-          command: z.string().describe(
-            "Build command, e.g. 'zig build-exe /workspace/main.zig -target wasm32-wasi -O ReleaseSmall -femit-bin=/workspace/main.wasm'",
-          ),
-          cwd: z.string().optional().describe("Working directory, defaults to /tmp"),
+          command: z.string().describe("Build command, e.g. 'zig build-exe ...'"),
+          cwd:     z.string().optional().describe("Working directory, defaults to /workspace"),
         }),
-        execute: this._execStreamingTool(ws),
+        execute: this._execTool(),
       })),
 
-      ...pick("git_clone", createGitCloneTool({
-        workspace: gitWorkspace,
-        artifacts: this.env.Artifacts,
-      })),
-      ...pick("git_create_repo", createGitCreateRepoTool({
-        workspace: gitWorkspace,
-        artifacts: this.env.Artifacts,
-      })),
-      ...pick("git_list_repos", createGitListReposTool({
-        artifacts: this.env.Artifacts,
-      })),
-      ...pick("git_commit", createGitCommitTool({
-        workspace: gitWorkspace,
-      })),
-      ...pick("git_push", createGitPushTool({
-        workspace: gitWorkspace,
-        artifacts: this.env.Artifacts,
-      })),
-      ...pick("git_share", createGitShareTool({
-        workspace: gitWorkspace,
-        artifacts: this.env.Artifacts,
-      })),
-
-      ...pick("worker_deploy", tool({
-        description:
-          "Build a Cloudflare Worker from a wrangler.jsonc in /workspace and load it into an " +
-          "isolated Dynamic Worker. Repeated calls on the same bundle reuse the warm isolate.",
-        inputSchema: z.object({
-          config: z.string().describe("Path to wrangler.jsonc, e.g. /workspace/wrangler.jsonc"),
-        }),
-        execute: async ({ config }, opts) => {
-          return this.runCancellable(opts, () => this.deployer.deploy(config), {
-            onError: err => ({ ok: false, error: String(err) }),
-          });
-        },
-      })),
-
-      ...pick("worker_fetch", tool({
-        description:
-          "Send a fetch() request to the currently-deployed Worker. The argument must be a " +
-          "static fetch() call expression — no variables or function calls, just string/number/" +
-          "object/array literals.",
-        inputSchema: z.object({
-          request: z.string().describe(
-            "A fetch() call expression, e.g. fetch('https://w/api', { method: 'POST', body: '{}' })",
-          ),
-        }),
-        execute: async ({ request }, opts) => {
-          const worker = this.deployer.current;
-          if (!worker) {
-            return { error: "no worker deployed — call worker_deploy first" };
-          }
-          let parsed;
-          try { parsed = parseFetchCall(request); }
-          catch (err) { return { error: `bad fetch call: ${(err as Error).message}` }; }
-          return this.runCancellable(opts, () => fetchAgainstWorker(worker, parsed), {
-            onError: err => ({ error: String(err) }),
-          });
-        },
-      })),
+      // git_clone is temporarily disabled. The clone tool wants the
+      // dofs SQLiteWorkspaceProvider, which lives inside the Sandbox
+      // DO and isn't reachable across DO RPC today. Re-enabled when
+      // we add a streaming/provider passthrough on Sandbox.
     };
   }
 
@@ -1128,212 +965,51 @@ export class Agent extends Think<Env> {
   // sees a terminal answer and the queue drains.
 
   /**
-   * Build the streaming exec tool's execute function.
+  /**
+   * Build the (non-streaming) exec tool execute function.
    *
-   * Returned function is an async generator: each yield is a cumulative
-   * snapshot of the running process. The AI SDK's tool layer emits each
-   * preliminary yield as a `tool-output-available` chunk with
-   * `preliminary: true` so the UI sees live state; the model only ever
-   * sees the final yield. Think's default `_wrapToolsWithDecision`
-   * would drain the iterator before the AI SDK sees it; the constructor
-   * monkey-patches around that for exec (see STREAMING_TOOLS).
-   *
-   * Lifecycle:
-   *   1. startProcess (pushes DO→container delta first)
-   *   2. record toolCallId→processId in the inflight table
-   *   3. loop on streamProcessLogs, fold each LogEvent into the buffer,
-   *      yield throttled snapshots (every 100 ms, or immediately on
-   *      exit/error)
-   *   4. on abort: kill SIGTERM, wait briefly, fall through to yield an
-   *      aborted snapshot
-   *   5. always: clear the inflight row and pull dirty files back into
-   *      the VFS so the model sees what the command wrote
+   * The new @cloudflare/workspace exec surface returns a stream
+   * client-side, but only the result() shape survives the Workers
+   * RPC boundary between the Agent DO and the Sandbox DO. Until a
+   * byte-framed streaming exec lands on WorkspaceShellStub, the
+   * agent runs commands to completion and emits a single tool
+   * result. This drops live-output streaming in the UI for long
+   * builds; turn-level Stop still cancels via runCancellable.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _execStreamingTool(ws: any) {
+  private _execTool() {
     const self = this;
-    const FLUSH_MS = 100;
-    // The tool returned to the AI SDK is an async generator: the SDK
-    // pulls snapshots out of it as the underlying process emits log
-    // events. The Workers `tracing.enterSpan(name, cb)` API ends the
-    // span when `cb`'s returned promise settles, which means we can't
-    // `yield` from inside the trace callback — generators and
-    // callback-style tracing don't compose directly.
-    //
-    // Solution: a queue bridge. The trace callback runs the original
-    // generator body and pushes each snapshot into a queue; the outer
-    // generator returned to the SDK drains the queue with a wake-up
-    // semaphore. The span lives for the inner-body promise's lifetime,
-    // which is exactly what we want for the tool span's duration.
-    // Workspace-level spans (startProcess, streamProcessLogs,
-    // pullDirty) nest naturally inside that lifetime.
-    return async function* (
+    return async (
       { command, cwd }: { command: string; cwd?: string },
       opts: { toolCallId: string; abortSignal?: AbortSignal },
-    ) {
-      const queue: ReturnType<ExecOutputBuffer["snapshot"]>[] = [];
-      let wake: (() => void) | null = null;
-      let done = false;
-      let finalError: unknown = null;
-      const wakeup = () => { const w = wake; wake = null; w?.(); };
-
-      const work = trace("tool.exec", {
-        "hackspace.thread_id": self.name,
-        "hackspace.tool_call_id": opts.toolCallId,
-        "hackspace.cwd": cwd ?? "/tmp",
-      }, async (span) => {
-        span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
-
-        const buf = new ExecOutputBuffer();
-        const startedAt = Date.now();
-        const inflight = self._inflight();
-
-        // 1. Start the process. A failure here is a tool-level error;
-        //    push one snapshot and exit.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let proc: any;
-        try {
-          proc = await ws.startProcess(command, { cwd: cwd ?? "/tmp" });
-        } catch (err) {
-          span.set("hackspace.terminated_by", () => "start-failed");
-          span.setError(err);
-          const details = err instanceof Error ? err.message : String(err);
-          queue.push(buf.snapshot("", { error: { details }, exitCode: -1, durationMs: Date.now() - startedAt }));
-          wakeup();
-          return;
-        }
-        span.set("hackspace.process_id", () => proc.id);
-
-        // 2. Record so onStart can recover us if the DO is evicted mid-run.
-        inflight.record(opts.toolCallId, proc.id);
-
-        // 3. Stream logs. Push an initial running snapshot so the UI
-        //    transitions to the live view immediately.
-        queue.push(buf.snapshot(proc.id));
-        wakeup();
-        let lastFlush = Date.now();
-
-        // Wire turn-level abort to SIGTERM. We don't await the kill — the
-        // stream's exit/error event will close the loop naturally.
-        const onAbort = () => {
-          try { proc.kill("SIGTERM"); } catch { /* best effort */ }
-        };
-        if (opts.abortSignal) {
-          if (opts.abortSignal.aborted) onAbort();
-          else opts.abortSignal.addEventListener("abort", onAbort, { once: true });
-        }
-
-        // `terminated_by` defaults to "stream-closed" if neither the
-        // exit/error branch nor the abort branch fires — e.g. the stream
-        // disconnected mid-flight. Overwritten below in the normal paths.
-        let terminatedBy: "exit" | "error" | "abort" | "stream-error" | "stream-closed" = "stream-closed";
-        let exitCode: number | undefined;
-        try {
-          const stream = await ws.streamProcessLogs(proc.id, { signal: opts.abortSignal });
-          for await (const event of stream as AsyncIterable<LogEvent>) {
-            buf.apply(event);
-            const now = Date.now();
-            const terminal = event.type === "exit" || event.type === "error";
-            if (terminal || now - lastFlush >= FLUSH_MS) {
-              lastFlush = now;
-              queue.push(buf.snapshot(proc.id, { durationMs: now - startedAt }));
-              wakeup();
-            }
-            if (terminal) {
-              terminatedBy = event.type === "exit" ? "exit" : "error";
-              if (event.type === "exit") exitCode = event.exitCode;
-              break;
-            }
-          }
-        } catch (err) {
-          if (opts.abortSignal?.aborted) {
-            terminatedBy = "abort";
-            exitCode = 143;
-            queue.push(buf.snapshot(proc.id, {
-              error: { details: "aborted" },
-              exitCode: 143,
-              durationMs: Date.now() - startedAt,
-            }));
-          } else {
-            terminatedBy = "stream-error";
-            span.setError(err);
-            const details = err instanceof Error ? err.message : String(err);
-            queue.push(buf.snapshot(proc.id, {
-              error: { details },
-              durationMs: Date.now() - startedAt,
-            }));
-          }
-          wakeup();
-        } finally {
-          if (opts.abortSignal) {
-            opts.abortSignal.removeEventListener("abort", onAbort);
-          }
-          inflight.clear(opts.toolCallId);
-          span.set("hackspace.terminated_by", () => terminatedBy);
-          span.set("hackspace.exit_code", () => exitCode);
-          // Buffer's snapshot exposes accumulated bytes; record both so
-          // a dashboard can spot commands that produce massive stdout
-          // (the buffer caps at 2 MiB/side anyway, but the truncation
-          // flag is worth surfacing too).
-          const snap = buf.snapshot(proc.id);
-          span.set("hackspace.stdout_bytes", () => snap.stdout.length);
-          span.set("hackspace.stderr_bytes", () => snap.stderr.length);
-          // Pull files the container wrote back into the VFS. Errors leave the
-          // VFS out of sync with the container until the next exec — log them
-          // at warn so the asymmetry is visible instead of silently degrading.
-          const pullStart = Date.now();
-          try {
-            await ws.pullDirtyAfter();
-            span.set("hackspace.pull_duration_ms", () => Date.now() - pullStart);
-          } catch (err) {
-            span.set("hackspace.pull_duration_ms", () => Date.now() - pullStart);
-            span.set("hackspace.pull_failed", () => true);
-            console.warn("[Agent] pullDirtyAfter failed after exec:", err);
-          }
-        }
-      }).catch((err) => {
-        // Errors that escape the trace callback are unexpected (the
-        // body catches everything). Surface them as the generator's
-        // final throw so the SDK sees a real error rather than a
-        // silent truncation.
-        finalError = err;
-      }).finally(() => {
-        done = true;
-        wakeup();
-      });
-
-      // Drain loop: yield queued snapshots, sleep on the wake semaphore
-      // when the queue empties. Done when the inner work resolves.
-      try {
-        while (true) {
-          while (queue.length) yield queue.shift()!;
-          if (done) break;
-          await new Promise<void>((r) => { wake = r; });
-        }
-      } finally {
-        // Always wait for the inner work to finish so the span ends
-        // before the generator returns to the SDK, even if the SDK
-        // aborts iteration early.
-        await work;
-      }
-      if (finalError) throw finalError;
+    ) => {
+      return self.runCancellable(
+        opts,
+        async () => {
+          const ws = await self.getWorkspace();
+          const handle = await ws.shell.exec(command, {
+            cwd,
+            encoding: "utf8",
+          });
+          const result = await handle.result();
+          return {
+            command,
+            cwd: cwd ?? null,
+            exitCode: result.exitCode,
+            stdout: truncateExecStream(result.stdout),
+            stderr: truncateExecStream(result.stderr),
+          };
+        },
+        {
+          onError: (err) => ({
+            command,
+            cwd: cwd ?? null,
+            error: { details: err instanceof Error ? err.message : String(err) },
+          }),
+        },
+      );
     };
   }
 
-  /**
-   * Lazily build the ExecInflight tracker. The table is created on
-   * first access and reused across calls.
-   */
-  private _inflightCache: ExecInflight | null = null;
-  private _inflight(): ExecInflight {
-    if (!this._inflightCache) {
-      // SqlStorage is structurally compatible with our SqlStorageLike.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      this._inflightCache = new ExecInflight((this.ctx.storage as any).sql);
-      this._inflightCache.ensureTable();
-    }
-    return this._inflightCache;
-  }
 
   /**
    * Wrap a tool's work so it observes both the turn-level abort signal and a
@@ -1624,4 +1300,59 @@ export function renderTranscriptForSummary(
     lines.push(`${speaker}: ${text}`);
   }
   return lines.join("\n");
+}
+
+// ── helpers for the buildTools rewrite ──────────────────────────
+
+/**
+ * Build a `FileStore` that lazily resolves the underlying
+ * `WorkspaceFileStore` per call. Lets the fs-tools (`read` /
+ * `write` / `edit`) close over a getter rather than a stub fixed at
+ * tool-construction time — important because the agent's Workspace
+ * stub is resolved asynchronously through the warm pool and the
+ * cache can drop on a Sandbox cycle.
+ */
+function makeLazyStore(
+  getWs: () => Promise<WorkspaceStub>,
+): FileStore {
+  // Build the inner store on first use, but rebuild if the cached
+  // WorkspaceStub identity changes (a sandbox cycle clears the
+  // cache; the next call returns a new stub).
+  let cached: { stub: WorkspaceStub; store: FileStore } | null = null;
+  const get = async (): Promise<FileStore> => {
+    const stub = await getWs();
+    if (!cached || cached.stub !== stub) {
+      cached = { stub, store: new WorkspaceFileStore(adaptForFsTools(stub)) };
+    }
+    return cached.store;
+  };
+  return {
+    async stat(path) {
+      return (await get()).stat(path);
+    },
+    async readAll(path) {
+      return (await get()).readAll(path);
+    },
+    async write(path, content, opts) {
+      return (await get()).write(path, content, opts);
+    },
+    async *readChunks(path, off, len) {
+      const store = await get();
+      for await (const chunk of store.readChunks(path, off, len)) {
+        yield chunk;
+      }
+    },
+  };
+}
+
+/**
+ * Soft cap on the bytes echoed back into the model's tool result for
+ * exec stdout/stderr. The new `WorkspaceShellStub.exec` collects the
+ * full output before returning; without this a `git log` or `npm
+ * install` could spend the entire input window on a single tool reply.
+ */
+function truncateExecStream(value: string, maxBytes = 64 * 1024): string {
+  if (!value) return value;
+  if (value.length <= maxBytes) return value;
+  return `${value.slice(0, maxBytes)}\n\n[truncated, ${value.length - maxBytes} more chars]`;
 }

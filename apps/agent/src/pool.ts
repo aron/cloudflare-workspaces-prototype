@@ -85,5 +85,8 @@ export async function sandboxForSession(
 ): Promise<WorkspaceStub> {
   const name = await resolveContainerId(env, sessionId);
   const stub = env.Sandbox.get(env.Sandbox.idFromName(name));
-  return stub.getWorkspace();
+  // Workers RPC returns a Stub<WorkspaceStub>; structurally a
+  // superset of WorkspaceStub but not assignable to it. Same
+  // cast pattern as Agent.getWorkspace().
+  return (await stub.getWorkspace()) as unknown as WorkspaceStub;
 }

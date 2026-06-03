@@ -11,16 +11,12 @@
 import { routeAgentRequest } from "agents";
 
 export { Agent, SubAgent } from "../../src/agent.js";
-export { MountHost } from "./mount-host.js";
 
 import type { Agent, SubAgent } from "../../src/agent.js";
-import type { MountHost } from "./mount-host.js";
 
 export type Env = {
   Agent: DurableObjectNamespace<Agent>;
   SubAgent: DurableObjectNamespace<SubAgent>;
-  MountHost: DurableObjectNamespace<MountHost>;
-  LOADER: WorkerLoader;
 };
 
 export default {

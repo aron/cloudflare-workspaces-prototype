@@ -73,9 +73,17 @@ export class Sandbox extends DurableObject<SandboxEnv> {
           "for a `containers` entry whose class_name is `Sandbox`.",
       );
     }
+    // `ctx.exports` carries loopback bindings for every top-level
+    // class exported from the Worker entrypoint. The runtime is
+    // newer than the @cloudflare/workers-types we pin, so cast
+    // through `any` here. Drop the cast when types catch up.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const exports = (ctx as any).exports as {
+      WorkspaceProxy: (init: { props: Record<string, unknown> }) => Fetcher;
+    };
     this.#backend = new CloudflareContainerBackend({
       container: () => container,
-      egress: ctx.exports.WorkspaceProxy({
+      egress: exports.WorkspaceProxy({
         props: { binding: "Sandbox", id: ctx.id.toString() },
       }),
     });
