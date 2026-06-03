@@ -10,10 +10,11 @@
 // either we forgot to dispose a result envelope on the caller side,
 // or the disposal contract broke.
 
-// Read the flag once. Both Node (process.env) and workerd
-// (globalThis env-style access via the runtime) are tolerated; if
-// neither path resolves to "1" we no-op.
-const TRACKING_ENABLED: boolean = readFlag();
+// Read the flag at module init. Both Node (process.env) and
+// workerd (globalThis override) are tolerated; runtimes without
+// either surface (notably workerd, where env vars only land on
+// the binding object) can call enableStubTracking() programmatically.
+let trackingEnabled: boolean = readFlag();
 
 function readFlag(): boolean {
   try {
@@ -23,21 +24,26 @@ function readFlag(): boolean {
   } catch {
     // ignore — process isn't available in this runtime
   }
-  // Allow a globalThis override for runtimes without process.env.
   const override = (globalThis as { CAPNWEB_TRACK_STUBS?: unknown }).CAPNWEB_TRACK_STUBS;
   return override === "1" || override === true;
+}
+
+// Force tracking on. Useful for workerd-based tests where the env
+// var doesn't reach process.env or globalThis. Idempotent.
+export function enableStubTracking(): void {
+  trackingEnabled = true;
 }
 
 const counters = new Map<string, number>();
 
 export function trackStub(target: object): void {
-  if (!TRACKING_ENABLED) return;
+  if (!trackingEnabled) return;
   const name = target.constructor?.name ?? "anonymous";
   counters.set(name, (counters.get(name) ?? 0) + 1);
 }
 
 export function untrackStub(target: object): void {
-  if (!TRACKING_ENABLED) return;
+  if (!trackingEnabled) return;
   const name = target.constructor?.name ?? "anonymous";
   const current = counters.get(name) ?? 0;
   if (current <= 1) counters.delete(name);
@@ -53,8 +59,9 @@ export function stubSnapshot(): Record<string, number> {
   return out;
 }
 
-// True iff CAPNWEB_TRACK_STUBS=1 (or the globalThis override). Useful
-// for skipping diagnostic surfaces when tracking is off.
+// True iff tracking is on (env flag, globalThis override, or
+// enableStubTracking() was called). Useful for skipping diagnostic
+// surfaces when tracking is off.
 export function isStubTrackingEnabled(): boolean {
-  return TRACKING_ENABLED;
+  return trackingEnabled;
 }

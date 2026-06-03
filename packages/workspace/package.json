@@ -24,7 +24,8 @@
   "scripts": {
     "build": "rolldown -c",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
-    "test": "vitest run && vitest run --config vitest.config.proxy.ts",
+    "test": "vitest run && vitest run --config vitest.config.proxy.ts && vitest run --config vitest.config.stub-soak.ts",
+    "test:stub-soak": "vitest run --config vitest.config.stub-soak.ts",
     "test:harness": "./test-harness/run-harness.sh",
     "bench:harness": "./test-harness/run-harness.sh bench",
     "prepublishOnly": "npm run build && npm test"

@@ -36,8 +36,7 @@ import WebSocket from "ws";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
-const WSD_BINARY =
-  process.env.WSD_BINARY ?? join(REPO_ROOT, "packages/wsd/dist/cli/wsd.cjs");
+const WSD_BINARY = process.env.WSD_BINARY ?? join(REPO_ROOT, "packages/wsd/dist/cli/wsd.cjs");
 
 const SYNC_TICKS = Number(process.env.SOAK_SYNC_TICKS ?? "50");
 const EXEC_CALLS = Number(process.env.SOAK_EXEC_CALLS ?? "100");
@@ -363,11 +362,7 @@ async function main() {
     console.error("\n[soak] growth vs afterFirstCall:");
     for (const g of summary.growth) {
       const tag =
-        g.imports === 0 && g.exports === 0
-          ? "  "
-          : g.imports > 0 || g.exports > 0
-            ? "↑ "
-            : "↓ ";
+        g.imports === 0 && g.exports === 0 ? "  " : g.imports > 0 || g.exports > 0 ? "↑ " : "↓ ";
       console.error(
         `  ${tag}${g.label.padEnd(22)} Δimports=${String(g.imports).padStart(4)}  Δexports=${String(g.exports).padStart(4)}`,
       );
