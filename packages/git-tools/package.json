@@ -2,7 +2,7 @@
   "name": "@cloudflare/git-tools",
   "version": "0.1.0",
   "type": "module",
-  "description": "AI-SDK tools that drive isomorphic-git against Cloudflare Artifacts repos. Provides gitClone today; gitStatus / gitCommit / gitPush / gitDiff / gitLog / gitBranch slots in next.",
+  "description": "AI-SDK tools that drive isomorphic-git against @cloudflare/workspace-backed filesystems. Currently exposes gitClone only.",
   "exports": {
     ".": { "import": "./src/index.ts", "types": "./src/index.ts" }
   },
@@ -13,20 +13,23 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "@platformatic/vfs":   "^0.4.0",
+    "zod":                 "^4.4.3"
   },
   "peerDependencies": {
-    "ai":                  "^6.0.0",
+    "ai":                    "^6.0.0",
+    "@cloudflare/dofs":      "*",
     "@cloudflare/workspace": "*",
-    "isomorphic-git":      "^1.38.0"
+    "isomorphic-git":        "^1.38.0"
   },
   "devDependencies": {
-    "@cloudflare/workspace": "*",
+    "@cloudflare/dofs":          "*",
+    "@cloudflare/workspace":     "*",
     "@cloudflare/workers-types": "^4.20250410.0",
-    "@types/node":         "^20.0.0",
-    "ai":                  "^6.0.188",
-    "isomorphic-git":      "^1.38.0",
-    "typescript":          "^5.7.0",
-    "vitest":              "^4.1.0"
+    "@types/node":               "^22.0.0",
+    "ai":                        "^6.0.188",
+    "isomorphic-git":            "^1.38.0",
+    "typescript":                "^5.7.0",
+    "vitest":                    "^4.1.0"
   }
 }
