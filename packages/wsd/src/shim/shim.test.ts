@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
-const { createNodeVirtualFileSystem } = require("../../dist/fuse/index.js");
+const { createNodeVirtualFileSystem, createMountedVfs } = require("../../dist/fuse/index.js");
 const { mountShim } = require("../../dist/shim/index.js");
 
 // Poll cadence for the assertions below. We pass the same value into
@@ -30,10 +30,18 @@ async function eventually(
   throw new Error("eventually(): condition never became true");
 }
 
-async function setup(t: any) {
-  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-"));
+async function setup(
+  t: { after(fn: () => Promise<void> | void): void },
+  options: { prefix?: string; pollIntervalMs?: number; vfsRoot?: string } = {},
+) {
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), options.prefix ?? "wsd-shim-"));
   const { vfs } = await createNodeVirtualFileSystem();
-  const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: TICK_MS });
+  const mountedVfs = options.vfsRoot ? createMountedVfs(vfs, options.vfsRoot) : vfs;
+  const shim = await mountShim({
+    vfs: mountedVfs,
+    mountPoint,
+    pollIntervalMs: options.pollIntervalMs ?? TICK_MS,
+  });
   t.after(async () => {
     await shim.unmount();
     await fs.rm(mountPoint, { recursive: true, force: true });
@@ -168,4 +176,36 @@ test("shim.flush() resolves on an unmounted shim without throwing", async (t) =>
   });
   await shim.unmount();
   await shim.flush();
+});
+
+test("shim consumes a VFS view of the mounted subtree", async (t) => {
+  const { vfs, mountPoint, shim } = await setup(t, {
+    prefix: "wsd-shim-root-",
+    vfsRoot: "/workspace",
+    pollIntervalMs: 60_000,
+  });
+
+  vfs.mkdirSync("/workspace/repo", { recursive: true });
+  vfs.writeFileSync("/workspace/repo/a.txt", Buffer.from("alpha"));
+
+  await shim.flush();
+
+  assert.equal(await fs.readFile(path.join(mountPoint, "repo", "a.txt"), "utf8"), "alpha");
+  await assert.rejects(fs.access(path.join(mountPoint, "workspace", "repo", "a.txt")), /ENOENT/);
+});
+
+test("shim writes disk changes into a mounted VFS view", async (t) => {
+  const { vfs, mountPoint } = await setup(t, {
+    prefix: "wsd-shim-root-disk-",
+    vfsRoot: "/workspace",
+  });
+
+  await fs.mkdir(path.join(mountPoint, "repo"), { recursive: true });
+  await fs.writeFile(path.join(mountPoint, "repo", "b.txt"), "bravo");
+
+  await eventually(() => {
+    assert.equal(vfs.readFileSync("/workspace/repo/b.txt").toString(), "bravo");
+    return true;
+  });
+  assert.equal(vfs.existsSync("/repo/b.txt"), false);
 });

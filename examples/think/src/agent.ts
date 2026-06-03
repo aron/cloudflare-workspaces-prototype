@@ -327,8 +327,7 @@ export class TriageAgent extends Think<Env> {
         return {
           status: "failed",
           text: collectAssistantText(this.messages),
-          reason:
-            `Agent turn ended in status=${insp.status}` + (insp.error ? `: ${insp.error}` : ""),
+          reason: `Agent turn ended in status=${insp.status}${insp.error ? `: ${insp.error}` : ""}`,
         };
       }
       await sleep(POLL_MS);

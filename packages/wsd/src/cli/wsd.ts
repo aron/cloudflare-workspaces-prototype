@@ -13,11 +13,13 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
 import {
+  createMountedVfs,
   createNodeVirtualFileSystem,
   detectFUSEBackend,
   type FUSEBackend,
   type FuseMount,
   mountFuse,
+  normaliseVfsRoot,
 } from "../fuse/index.js";
 import { mountShim, type ShimMount } from "../shim/index.js";
 import { installLogging } from "./logger.js";
@@ -55,6 +57,11 @@ function parseMountPoint(value: string | undefined): string {
   return mountPoint;
 }
 
+function parseVfsRoot(value: string | undefined, mountPoint: string): string {
+  const vfsRoot = value === undefined || value === "" ? mountPoint : value;
+  return normaliseVfsRoot(vfsRoot);
+}
+
 function send(
   response: ServerResponse,
   statusCode: number,
@@ -76,6 +83,7 @@ function requestPath(request: IncomingMessage): string {
 interface WSDInfo {
   backend: FUSEBackend;
   mountPoint: string;
+  vfsRoot: string;
   port: number;
 }
 
@@ -350,6 +358,7 @@ async function main(): Promise<void> {
 
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
+  const vfsRoot = parseVfsRoot(process.env.VFS_ROOT, mountPoint);
   // DISABLE_FUSE=1 skips the FUSE mount entirely. The HTTP server +
   // /api and /ws endpoints stay up so tests and tooling can talk to
   // wsd's RPC surface without needing /dev/fuse. The in-memory store
@@ -391,7 +400,7 @@ async function main(): Promise<void> {
   const { vfs, db, stopSync } = await createNodeVirtualFileSystem({
     upstream: upstreamClient?.sync,
   });
-  const info: WSDInfo = { backend, mountPoint, port };
+  const info: WSDInfo = { backend, mountPoint, vfsRoot, port };
 
   let fuse: FuseMount | undefined;
   // When running on the userspace shim, capture the typed handle
@@ -399,17 +408,21 @@ async function main(): Promise<void> {
   // hook below. A real FUSE mount serves reads straight from the
   // VFS, so it doesn't need an explicit settle.
   let shim: ShimMount | undefined;
-  if (backend.kind === "shim") {
+  if (backend.kind !== "none") {
+    if (vfsRoot !== "/") vfs.mkdirSync(vfsRoot, { recursive: true });
+    const mountedVfs = createMountedVfs(vfs, vfsRoot);
     await mkdir(mountPoint, { recursive: true });
-    shim = await mountShim({ vfs, mountPoint });
-    fuse = shim;
-  } else if (!fuseDisabled && backend.kind !== "none") {
-    await mkdir(mountPoint, { recursive: true });
-    fuse = await mountFuse({
-      backend: backend as Exclude<FUSEBackend, { kind: "none" } | { kind: "shim" }>,
-      mountPoint,
-      vfs,
-    });
+
+    if (backend.kind === "shim") {
+      shim = await mountShim({ vfs: mountedVfs, mountPoint });
+      fuse = shim;
+    } else {
+      fuse = await mountFuse({
+        backend,
+        mountPoint,
+        vfs: mountedVfs,
+      });
+    }
   }
   // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
   // without rebuilding the binary. Default lives in the Runner.
@@ -436,7 +449,7 @@ async function main(): Promise<void> {
     // exec()/read against the host fs after a push sees the new
     // files. Real FUSE doesn't need this — the kernel-FUSE driver
     // serves reads from the VFS directly.
-    ...(shim ? { afterApply: () => shim!.flush() } : {}),
+    ...(shim ? { afterApply: () => shim.flush() } : {}),
   });
   const http = createHTTPServer(info, rpc);
 
@@ -481,7 +494,7 @@ async function main(): Promise<void> {
       const boundPort = typeof address === "object" && address !== null ? address.port : port;
       info.port = boundPort;
       console.log(
-        `wsd listening on ${HOST}:${boundPort} mount=${fuseDisabled ? "(disabled)" : mountPoint} backend=${backend.kind}`,
+        `wsd listening on ${HOST}:${boundPort} mount=${fuseDisabled ? "(disabled)" : mountPoint} vfsRoot=${vfsRoot} backend=${backend.kind}`,
       );
       resolve();
     });

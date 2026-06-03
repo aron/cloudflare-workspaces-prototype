@@ -96,6 +96,12 @@ export interface FuseMount {
   unmount(): Promise<void>;
 }
 
+interface FuseNativeInstance {
+  mount(cb: (error: Error | null) => void): void;
+  unmount(cb: (error: Error | null) => void): void;
+  _fuseOptions(): string;
+}
+
 export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
   const handles = new Map<number, string>();
   let nextHandle = 1;
@@ -518,8 +524,7 @@ export async function mountFuse(options: {
   const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
     autoUnmount: true,
     debug: false,
-    // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
-  }) as any;
+  }) as FuseNativeInstance;
 
   // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read
   // through opts, so monkey-patch _fuseOptions() to append them. big_writes

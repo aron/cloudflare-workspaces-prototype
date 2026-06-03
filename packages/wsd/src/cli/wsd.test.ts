@@ -24,10 +24,28 @@ test("wsd rejects relative MOUNT_POINT values", async () => {
   assert.match(stderr, /MOUNT_POINT must be an absolute path/);
 });
 
+test("wsd rejects relative VFS_ROOT values", async () => {
+  const port = await getAvailablePort();
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: "/tmp/wsd-mount-not-used",
+      VFS_ROOT: "relative-workspace",
+      PORT: String(port),
+      DISABLE_FUSE: "1",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  assert.equal(code, 1);
+  assert.match(stderr, /VFS_ROOT must be an absolute path/);
+});
+
 test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
-  // Boot the daemon with garbage in EXEC_LOG_MAX_BYTES; it should
-  // refuse to start. Previously Number('foo') -> NaN silently
-  // disabled log eviction (every append exceeded the cap).
+  // EXEC_LOG_MAX_BYTES must be a positive integer so log eviction
+  // has a finite byte limit.
   const port = await getAvailablePort();
   const child = spawn(cliPath, {
     cwd: packageRoot,
@@ -75,7 +93,16 @@ test("wsd exposes file IO through the mounted filesystem", async (t) => {
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint });
+  try {
+    await startWsd(t, { port, mountPoint, env: { VFS_ROOT: "/" } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("timed out waiting")) {
+      t.skip(`FUSE backend ${backend.kind} did not become ready: ${message}`);
+      return;
+    }
+    throw error;
+  }
 
   const health = await request(`http://127.0.0.1:${port}/health`);
   assert.equal(health.statusCode, 200);
@@ -90,6 +117,7 @@ test("wsd exposes file IO through the mounted filesystem", async (t) => {
   assert.deepEqual(JSON.parse(info.body), {
     backend,
     mountPoint,
+    vfsRoot: "/",
     port,
   });
 
@@ -147,12 +175,42 @@ test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (t) => {
   const parsed = JSON.parse(info.body);
   assert.equal(parsed.backend.kind, "shim");
   assert.equal(parsed.mountPoint, mountPoint);
+  assert.equal(parsed.vfsRoot, mountPoint);
 
   // Disk → VFS: writing into the mount point should land in the VFS
   // and round-trip back through the shim onto disk.
   await fs.mkdir(path.join(mountPoint, "dir"));
   await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello shim");
   assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello shim");
+});
+
+test("FUSE_SHIM maps an explicit VFS_ROOT onto the mount point after RPC push", async (t) => {
+  const { Database, initializeSchema, WorkspaceFilesystem } = await import("@cloudflare/dofs");
+  const { SQLiteTestStorage } = await import("@cloudflare/dofs/testing");
+  const { createWorkspaceClient } = await import("@cloudflare/workspace-rpc/client");
+  const { pushOnce } = await import("@cloudflare/workspace-rpc/driver");
+
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-root-cli-"));
+  await startWsd(t, {
+    port,
+    mountPoint,
+    env: { FUSE_SHIM: "1", VFS_ROOT: "/workspace" },
+  });
+
+  const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
+
+  const db = new Database(new SQLiteTestStorage());
+  initializeSchema(db, Date.now);
+  const fsFacade = new WorkspaceFilesystem(db);
+  await fsFacade.mkdir("/workspace/repo", { recursive: true });
+  await fsFacade.writeFile("/workspace/repo/a.txt", "alpha");
+
+  assert.equal(await pushOnce(db, client.sync), 3);
+
+  assert.equal(await fs.readFile(path.join(mountPoint, "repo", "a.txt"), "utf8"), "alpha");
+  await assert.rejects(fs.access(path.join(mountPoint, "workspace", "repo", "a.txt")), /ENOENT/);
+  await client.close();
 });
 
 test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {

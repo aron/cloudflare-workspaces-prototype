@@ -5,9 +5,10 @@
   "type": "module",
   "description": "@cloudflare/think + Workflows triage bot. Worker accepts POST /issue, clones a repo into a container-backed Workspace, triages the issue, attempts a fix, and posts a patch + DONE to a webhook.",
   "scripts": {
+    "build:deps": "npm run build --workspace @cloudflare/dofs && npm run build --workspace @cloudflare/workspace-rpc && npm run build --workspace @cloudflare/workspace",
     "build:wsd": "npm run build:docker --workspace @cloudflare/workspace-wsd",
-    "predev": "npm run build:wsd",
-    "predeploy": "npm run build:wsd",
+    "predev": "npm run build:deps && npm run build:wsd",
+    "predeploy": "npm run build:deps && npm run build:wsd",
     "dev": "wrangler dev --ip 0.0.0.0",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit"

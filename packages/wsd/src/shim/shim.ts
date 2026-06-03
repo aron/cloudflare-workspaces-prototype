@@ -32,7 +32,7 @@ import {
   stat as fsStat,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import type { NodeVirtualFileSystem } from "../fuse/vfs.js";
 
 export interface ShimMount {
@@ -127,8 +127,9 @@ export async function mountShim(options: MountShimOptions): Promise<ShimMount> {
       for await (const event of watcher) {
         if (stopped) break;
         const vfsPath = normaliseVfsPath(event.filename);
-        // Skip the root itself — watchAsync emits filename="" for
-        // it on some operations and we don't materialise "/".
+        // watchAsync emits filename="" for the watched root on some
+        // operations; the mount point itself is not materialised as a
+        // child of the mount point.
         if (vfsPath === "/") continue;
         await run(() => syncVfsPathToDisk(vfs, mountPoint, vfsPath, shadow));
       }
@@ -206,7 +207,6 @@ async function materialiseVfsToDisk(
         queue.push(vfsPath);
       } else if (stat.isFile()) {
         const bytes = Buffer.from(vfs.readFileSync(vfsPath) as Buffer);
-        await fsMkdir(dirnamePosix(hostPath), { recursive: true });
         await fsWriteFile(hostPath, bytes);
         const after = await fsStat(hostPath);
         shadow.set(vfsPath, {
@@ -292,7 +292,7 @@ async function syncVfsPathToDisk(
     // disk-poll tick.
     const current = await readIfFile(hostPath);
     if (current === undefined || !buffersEqual(current, bytes)) {
-      await fsMkdir(dirnamePosix(hostPath), { recursive: true });
+      await fsMkdir(dirname(hostPath), { recursive: true });
       await fsWriteFile(hostPath, bytes);
     }
     const after = await fsStat(hostPath);
@@ -445,8 +445,8 @@ async function walkDisk(
 // --- helpers --------------------------------------------------------------
 
 function toHostPath(mountPoint: string, vfsPath: string): string {
-  // vfsPath is always "/foo/bar". Strip the leading slash and join.
-  return join(mountPoint, vfsPath.slice(1));
+  const rel = vfsPath.replace(/^\/+/, "");
+  return rel === "" ? mountPoint : join(mountPoint, rel);
 }
 
 function toVfsPath(mountPoint: string, hostPath: string): string {
@@ -454,18 +454,13 @@ function toVfsPath(mountPoint: string, hostPath: string): string {
   // Normalise Windows-style separators just in case; the rest of the
   // codebase assumes POSIX paths inside the VFS.
   const normalised = rel.replace(/\\/g, "/");
-  return normalised.startsWith("/") ? normalised : `/${normalised}`;
+  const suffix = normalised.startsWith("/") ? normalised : `/${normalised}`;
+  return suffix;
 }
 
 function normaliseVfsPath(filename: string): string {
   if (filename === "" || filename === "/") return "/";
   return filename.startsWith("/") ? filename : `/${filename}`;
-}
-
-function dirnamePosix(p: string): string {
-  const idx = p.lastIndexOf("/");
-  if (idx <= 0) return "/";
-  return p.slice(0, idx);
 }
 
 function dirShadow(mtimeMs: number): ShadowEntry {

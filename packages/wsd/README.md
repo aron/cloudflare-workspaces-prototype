@@ -6,7 +6,7 @@ Workspace daemon CLI and FUSE mount package.
 
 `wsd` starts a FUSE-backed virtual filesystem and an HTTP server. The filesystem is backed by `@platformatic/vfs`, while the FUSE mount is provided by `fuse-native`.
 
-The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `45678`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`.
+The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `45678`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`. By default `VFS_ROOT` also resolves to `MOUNT_POINT`, so VFS `/workspace/repo` is visible to container processes as `/workspace/repo`. Set `VFS_ROOT=/` to expose the whole VFS root at the mount point instead.
 
 ```sh
 PORT=45678 MOUNT_POINT=/tmp/workspace npx -p @cloudflare/workspace-wsd wsd
@@ -15,7 +15,7 @@ PORT=45678 MOUNT_POINT=/tmp/workspace npx -p @cloudflare/workspace-wsd wsd
 Current endpoints:
 
 - `GET /health` returns `200 OK` with `ok\n` once the HTTP server is up (it does not currently block on FUSE readiness).
-- `GET /__wsd/info` returns JSON with the selected FUSE backend, mount point, and bound port.
+- `GET /__wsd/info` returns JSON with the selected FUSE backend, mount point, VFS root, and bound port.
 - `GET /` returns `200 OK` with an empty JSON object: `{}`.
 - `POST /api` is a capnweb HTTP-batch RPC endpoint backed by `@cloudflare/workspace-rpc`. Non-POST methods return `405`.
 - `GET /ws` upgrades to a WebSocket carrying the same capnweb RPC surface. This is the container's primary sync carrier.
@@ -83,6 +83,7 @@ Additional environment variables:
 ```sh
 DISABLE_FUSE=1                   # skip the FUSE mount; keep HTTP + RPC running
 FUSE_SHIM=1                      # opt into the userspace dev shim (no FUSE)
+VFS_ROOT=/workspace              # VFS subtree exposed at MOUNT_POINT; defaults to MOUNT_POINT
 UPSTREAM_URL=https://example/ws  # open a SyncClient against this capnweb endpoint
 EXEC_LOG_MAX_BYTES=1048576       # cap the in-memory exec log buffer (bytes)
 ```
@@ -91,11 +92,11 @@ If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain
 
 ## `FUSE_SHIM=1` — userspace dev shim
 
-When `FUSE_SHIM=1` is set, `wsd` materialises the VFS at `MOUNT_POINT` on the host filesystem and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
+When `FUSE_SHIM=1` is set, `wsd` materialises the VFS subtree rooted at `VFS_ROOT` onto `MOUNT_POINT` on the host filesystem and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
 
 How it works:
 
-- On boot, `wsd` walks the VFS and writes every file out to `MOUNT_POINT`.
+- On boot, `wsd` walks `VFS_ROOT` in the VFS and writes every file out to `MOUNT_POINT`.
 - `vfs.watchAsync("/", { recursive: true })` drives VFS → disk: each VFS revision turns into a host-fs `writeFile`/`mkdir`/`rm`.
 - A periodic poll (~250 ms) walks `MOUNT_POINT`, diffs it against a content-hash shadow, and pushes any new or changed entries into the VFS.
 - The shadow doubles as a loop suppressor: after a write in either direction the shadow matches both sides, so the next tick on the opposite side sees no diff.

@@ -13,7 +13,7 @@ FROM --platform=linux/amd64 debian:stable-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 libfuse2t64 ca-certificates git \
+      fuse3 libfuse2t64 ca-certificates git nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd

@@ -74,9 +74,10 @@ No Cloudflare Artifacts binding required.
 ```sh
 # From the repo root:
 npm install
-npm run build:wsd --workspace @cloudflare/example-think
 
-# Two terminals — worker on one, CLI on the other.
+# Two terminals — worker on one, CLI on the other. `npm run dev`
+# builds the local workspace packages and the wsd Docker image
+# before starting wrangler.
 cd examples/think
 npm run dev                                            # terminal 1
 ./cli/triage.mjs https://github.com/owner/repo/issues/42   # terminal 2

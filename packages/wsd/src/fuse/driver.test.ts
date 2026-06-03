@@ -1,7 +1,11 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
-const { createNodeVirtualFileSystem, makeFUSEOps } = require("../../dist/fuse/index.js");
+const {
+  createNodeVirtualFileSystem,
+  createMountedVfs,
+  makeFUSEOps,
+} = require("../../dist/fuse/index.js");
 
 const callback = (fn: (cb: (errno: number, result: unknown) => void) => void) =>
   new Promise<{ errno: number; result: unknown }>((resolve) =>
@@ -185,6 +189,41 @@ test("implemented FUSE ops all have explicit current expectations", async () => 
   assert.deepEqual(vfs.readdirSync("/dir"), []);
   assert.equal(await status((cb) => ops.rmdir("/dir", cb)), 0);
   assert.deepEqual(vfs.readdirSync("/"), []);
+});
+
+test("FUSE ops consume a VFS view of the mounted subtree", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(createMountedVfs(vfs, "/workspace"));
+
+  vfs.mkdirSync("/workspace/repo", { recursive: true });
+  vfs.writeFileSync("/workspace/repo/a.txt", Buffer.from("alpha"));
+
+  const dir = await callback((cb) => ops.readdir("/repo", cb));
+  assert.equal(dir.errno, 0);
+  assert.deepEqual(dir.result, ["a.txt"]);
+
+  const open = await callback((cb) => ops.open("/repo/a.txt", 0, cb));
+  assert.equal(open.errno, 0);
+  const readBuffer = Buffer.alloc(5);
+  assert.equal(
+    await status((cb) => ops.read("/repo/a.txt", open.result as number, readBuffer, 5, 0, cb)),
+    5,
+  );
+  assert.equal(readBuffer.toString(), "alpha");
+
+  const create = await callback((cb) => ops.create("/repo/b.txt", 0o644, cb));
+  assert.equal(create.errno, 0);
+  const payload = Buffer.from("bravo");
+  assert.equal(
+    await status((cb) =>
+      ops.write("/repo/b.txt", create.result as number, payload, payload.length, 0, cb),
+    ),
+    payload.length,
+  );
+  assert.equal(await status((cb) => ops.release("/repo/b.txt", create.result as number, cb)), 0);
+
+  assert.equal(vfs.readFileSync("/workspace/repo/b.txt").toString(), "bravo");
+  assert.equal(vfs.existsSync("/repo/b.txt"), false);
 });
 
 test("FUSE ops return errno values instead of throwing for expected filesystem errors", async () => {
