@@ -24,7 +24,7 @@
  *     durable storage so a recovered turn keeps the right tools.
  */
 
-import type { WorkspaceLike as ThinkWorkspaceLike } from "@cloudflare/think";
+import type { StepContext, WorkspaceLike as ThinkWorkspaceLike } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
 import {
   CloudflareContainerBackend,
@@ -464,10 +464,21 @@ export class TriageAgent extends Think<Env> {
 
   // ── Debug hooks ────────────────────────────────────────────────
   //
-  // When `context.debug` is set, every tool call and every final
+  // When `context.debug` is set, every tool call and every step's
   // assistant text gets POSTed to the webhook as a `type:"debug"`
   // event so the caller can watch the agent think. The terminal
   // notify-done payload is unchanged.
+  //
+  // Hooks used:
+  //   afterToolCall  — fires once per tool execution.
+  //   onStepFinish   — fires once per model round (a "step" in
+  //                    AI-SDK terms). This is the right hook for
+  //                    intermediate assistant text: between tool
+  //                    calls the model often produces reasoning
+  //                    or partial text, and onChatResponse only
+  //                    fires at the very end of the whole
+  //                    submission, so it skips everything in
+  //                    between.
 
   override async afterToolCall(ctx: {
     toolName: string;
@@ -488,11 +499,31 @@ export class TriageAgent extends Think<Env> {
     });
   }
 
+  override async onStepFinish(ctx: StepContext): Promise<void> {
+    if (!this.#context?.debug) return;
+    const text = typeof ctx.text === "string" ? ctx.text.trim() : "";
+    const reasoning = extractReasoning(ctx);
+    const toolCalls = Array.isArray(ctx.toolCalls)
+      ? ctx.toolCalls.map((c) => c.toolName).filter((n): n is string => typeof n === "string")
+      : [];
+    // Skip empty steps — pure-control steps with no text, no
+    // reasoning, and no tool calls don't help the watcher.
+    if (text.length === 0 && reasoning.length === 0 && toolCalls.length === 0) return;
+    await this.#postDebug({
+      kind: "step",
+      text,
+      reasoning,
+      toolCalls,
+      finishReason: typeof ctx.finishReason === "string" ? ctx.finishReason : undefined,
+    });
+  }
+
   override async onChatResponse(_result: unknown): Promise<void> {
     if (!this.#context?.debug) return;
-    const text = collectAssistantText(this.messages);
-    if (text.trim().length === 0) return;
-    await this.#postDebug({ kind: "assistant-text", text });
+    // Submission boundary marker. Per-step content is emitted by
+    // onStepFinish above; this just lets the CLI know the agent's
+    // current submission has reached a terminal state.
+    await this.#postDebug({ kind: "submission-complete" });
   }
 
   async #postDebug(payload: Record<string, unknown>): Promise<void> {
@@ -668,6 +699,32 @@ function createLsTool(ws: Workspace) {
  * parts are dropped — the structuring step / debug stream only care
  * about the model's natural-language response.
  */
+/**
+ * Pull a flat reasoning string out of a StepContext. Providers vary:
+ * some expose `reasoning` as a single string, some as an array of
+ * `{ type: "reasoning", text }` parts, some put the same content on
+ * `reasoningText`. We coalesce all three shapes into one string and
+ * leave the consumer to decide whether to print it.
+ */
+function extractReasoning(ctx: unknown): string {
+  const record = ctx as { reasoning?: unknown; reasoningText?: unknown };
+  const raw = record.reasoning ?? record.reasoningText ?? "";
+  if (typeof raw === "string") return raw.trim();
+  if (Array.isArray(raw)) {
+    return raw
+      .map((r) => {
+        if (typeof r === "string") return r;
+        if (r && typeof r === "object" && typeof (r as { text?: unknown }).text === "string") {
+          return (r as { text: string }).text;
+        }
+        return "";
+      })
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
 function collectAssistantText(
   messages: ReadonlyArray<{ role: string; parts: Array<{ type: string; text?: string }> }>,
 ): string {

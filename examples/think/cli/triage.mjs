@@ -117,6 +117,28 @@ function printDebug(payload) {
     );
     return;
   }
+  if (payload.kind === "step") {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    const reasoning = typeof payload.reasoning === "string" ? payload.reasoning : "";
+    if (text) {
+      process.stdout.write(
+        `${dim(`[${stamp} step${phase}]`)} ${italic("assistant")}: ${text.slice(0, 800)}\n`,
+      );
+    }
+    // Reasoning is verbose and provider-dependent; gate it on an
+    // env knob so the default debug stream stays readable.
+    if (reasoning && (env.TRIAGE_REASONING === "1" || env.TRIAGE_REASONING === "true")) {
+      process.stdout.write(
+        `${dim(`[${stamp} reasoning${phase}]`)} ${dim(reasoning.slice(0, 1200))}\n`,
+      );
+    }
+    return;
+  }
+  if (payload.kind === "submission-complete") {
+    process.stdout.write(`${dim(`[${stamp} debug${phase}] submission complete`)}\n`);
+    return;
+  }
+  // Back-compat: older workers still emit assistant-text.
   if (payload.kind === "assistant-text") {
     const text = typeof payload.text === "string" ? payload.text : "";
     process.stdout.write(
