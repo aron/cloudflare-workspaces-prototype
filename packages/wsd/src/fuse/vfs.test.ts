@@ -1,7 +1,7 @@
-const assert = require("node:assert/strict");
-const { test } = require("node:test");
+import { createHash } from "node:crypto";
+import { describe, expect, test } from "vitest";
 
-const { createNodeVirtualFileSystem } = require("../../dist/fuse/index.js");
+import { createNodeVirtualFileSystem } from "./index.js";
 
 test("createNodeVirtualFileSystem returns a @platformatic/vfs filesystem", async () => {
   const { vfs } = await createNodeVirtualFileSystem();
@@ -9,20 +9,19 @@ test("createNodeVirtualFileSystem returns a @platformatic/vfs filesystem", async
   vfs.mkdirSync("/project", { recursive: true });
   vfs.writeFileSync("/project/hello.txt", Buffer.from("hello"));
 
-  assert.deepEqual(vfs.readdirSync("/"), ["project"]);
-  assert.deepEqual(vfs.readdirSync("/project"), ["hello.txt"]);
-  assert.equal(vfs.readFileSync("/project/hello.txt").toString(), "hello");
+  expect(vfs.readdirSync("/")).toEqual(["project"]);
+  expect(vfs.readdirSync("/project")).toEqual(["hello.txt"]);
+  expect(vfs.readFileSync("/project/hello.txt").toString()).toBe("hello");
 
   vfs.renameSync("/project/hello.txt", "/project/greeting.txt");
-  assert.equal(vfs.existsSync("/project/hello.txt"), false);
-  assert.equal(vfs.readFileSync("/project/greeting.txt").toString(), "hello");
+  expect(vfs.existsSync("/project/hello.txt")).toBe(false);
+  expect(vfs.readFileSync("/project/greeting.txt").toString()).toBe("hello");
 
   vfs.unlinkSync("/project/greeting.txt");
-  assert.deepEqual(vfs.readdirSync("/project"), []);
+  expect(vfs.readdirSync("/project")).toEqual([]);
 });
 
 test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC", async () => {
-  const { createHash } = require("node:crypto");
   const bytes = Buffer.from("hi");
   const hash = new Uint8Array(createHash("sha256").update(bytes).digest());
 
@@ -69,6 +68,6 @@ test("createNodeVirtualFileSystem pulls initial state from an upstream SyncRPC",
   };
 
   const { vfs } = await createNodeVirtualFileSystem({ upstream });
-  assert.equal(fetchChangesCalls, 1);
-  assert.equal(vfs.readFileSync("/hi.txt").toString(), "hi");
+  expect(fetchChangesCalls).toBe(1);
+  expect(vfs.readFileSync("/hi.txt").toString()).toBe("hi");
 });

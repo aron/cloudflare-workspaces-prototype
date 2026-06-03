@@ -1,23 +1,8 @@
-const assert = require("node:assert/strict");
-const { test, before } = require("node:test");
+import { Database } from "@cloudflare/dofs";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
+import { beforeAll, describe, expect, test } from "vitest";
 
-// @cloudflare/dofs is ESM-only; load it through a dynamic
-// import (this file runs as CommonJS because the wsd package is
-// declared "type": "commonjs").
-import type { Database as DatabaseT } from "@cloudflare/workspace-fs";
-import type { SQLiteTestStorage as SQLiteTestStorageT } from "@cloudflare/workspace-fs/testing";
-import type { Runner as RunnerT } from "../../src/exec/runner.js";
-
-let Database: typeof DatabaseT;
-let SQLiteTestStorage: typeof SQLiteTestStorageT;
-before(async () => {
-  ({ Database } = await import("@cloudflare/dofs"));
-  ({ SQLiteTestStorage } = await import("@cloudflare/dofs/testing"));
-});
-
-const { Runner } = require("../../dist/exec/index.js") as {
-  Runner: typeof RunnerT;
-};
+import { Runner } from "./runner.js";
 
 type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
@@ -25,8 +10,8 @@ type ExecEvent =
   | { id: string; seq: number; name: "exit"; value: number };
 
 function fixture(options: Record<string, unknown> = {}): {
-  runner: InstanceType<typeof RunnerT>;
-  db: DatabaseT;
+  runner: InstanceType<typeof Runner>;
+  db: Database;
   dispose: () => void;
 } {
   const storage = new SQLiteTestStorage();
@@ -75,15 +60,15 @@ test("exec captures stdout and propagates exit code", async () => {
       .map((e) => decode(e.value as Uint8Array))
       .join("");
     const exit = events.find((e) => e.name === "exit");
-    assert.equal(stdout, "hello\n");
-    assert.equal(stderr, "world\n");
-    assert.equal(exit?.value, 3);
+    expect(stdout).toBe("hello\n");
+    expect(stderr).toBe("world\n");
+    expect(exit?.value).toBe(3);
     // seq is monotonic per-id starting at 1.
     const seqs = events.map((e) => e.seq);
     for (let i = 1; i < seqs.length; i++) {
-      assert.ok(seqs[i] > seqs[i - 1], `seq ${seqs[i]} > ${seqs[i - 1]}`);
+      expect(seqs[i] > seqs[i - 1]).toBeTruthy();
     }
-    assert.equal(seqs[0], 1);
+    expect(seqs[0]).toBe(1);
   } finally {
     dispose();
   }
@@ -93,13 +78,12 @@ test("reusing a live id throws EEXEC_BUSY", async () => {
   const { runner, dispose } = fixture();
   try {
     const handle = runner.exec("sleep 0.5", { id: "busy" });
-    assert.throws(
-      () => runner.exec("echo nope", { id: "busy" }),
-      (err: ExecError) => {
-        assert.equal(err.code, "EEXEC_BUSY");
-        return true;
-      },
-    );
+    try {
+      runner.exec("echo nope", { id: "busy" });
+      throw new Error("expected to throw");
+    } catch (err) {
+      expect((err as ExecError).code).toBe("EEXEC_BUSY");
+    }
     await drain(handle.events);
   } finally {
     dispose();
@@ -111,20 +95,17 @@ test("get() replays a completed exec by seq", async () => {
   try {
     const first = runner.exec("printf 'a\\nb\\nc\\n'", { id: "replay" });
     const original = await drain(first.events);
-    assert.ok(original.length >= 2);
+    expect(original.length >= 2).toBeTruthy();
 
     // Resume from seq=0 — should get everything.
     const full = await drain(runner.get("replay", { after: 0 }).events);
-    assert.equal(full.length, original.length);
-    assert.deepEqual(
-      full.map((e) => e.seq),
-      original.map((e) => e.seq),
-    );
+    expect(full.length).toBe(original.length);
+    expect(full.map((e) => e.seq)).toEqual(original.map((e) => e.seq));
 
     // Resume from seq=1 — should skip the first event.
     const tail = await drain(runner.get("replay", { after: 1 }).events);
-    assert.equal(tail.length, original.length - 1);
-    assert.equal(tail[0].seq, original[1].seq);
+    expect(tail.length).toBe(original.length - 1);
+    expect(tail[0].seq).toBe(original[1].seq);
   } finally {
     dispose();
   }
@@ -133,13 +114,12 @@ test("get() replays a completed exec by seq", async () => {
 test("get() throws ENOENT for unknown id", async () => {
   const { runner, dispose } = fixture();
   try {
-    assert.throws(
-      () => runner.get("never"),
-      (err: ExecError) => {
-        assert.equal(err.code, "ENOENT");
-        return true;
-      },
-    );
+    try {
+      runner.get("never");
+      throw new Error("expected to throw");
+    } catch (err) {
+      expect((err as ExecError).code).toBe("ENOENT");
+    }
   } finally {
     dispose();
   }
@@ -152,9 +132,9 @@ test("kill() terminates a running exec", async () => {
     runner.kill("killme", "SIGTERM");
     const events = await drain(handle.events);
     const exit = events.find((e) => e.name === "exit");
-    assert.ok(exit !== undefined);
+    expect(exit !== undefined).toBeTruthy();
     // SIGTERM → 143 per the mapping in runner.ts.
-    assert.equal(exit?.value, 143);
+    expect(exit?.value).toBe(143);
   } finally {
     dispose();
   }
@@ -168,9 +148,9 @@ test("exec times out at timeoutMs and exits 143", async () => {
     const handle = runner.exec("sleep 30", { id: "slow", timeoutMs: 100 });
     const events = await drain(handle.events);
     const exit = events.find((e) => e.name === "exit");
-    assert.ok(exit !== undefined, "expected exit event");
+    expect(exit !== undefined).toBeTruthy();
     // SIGTERM → 143 per mapExitCode.
-    assert.equal(exit?.value, 143);
+    expect(exit?.value).toBe(143);
   } finally {
     dispose();
   }
@@ -182,8 +162,8 @@ test("exec uses defaultTimeoutMs from the runner when no per-call value", async 
     const handle = runner.exec("sleep 30", { id: "slow" });
     const events = await drain(handle.events);
     const exit = events.find((e) => e.name === "exit");
-    assert.ok(exit !== undefined);
-    assert.equal(exit?.value, 143);
+    expect(exit !== undefined).toBeTruthy();
+    expect(exit?.value).toBe(143);
   } finally {
     dispose();
   }
@@ -196,7 +176,7 @@ test("per-call timeoutMs overrides the runner default", async () => {
     const start = Date.now();
     const handle = runner.exec("sleep 30", { id: "override", timeoutMs: 100 });
     await drain(handle.events);
-    assert.ok(Date.now() - start < 2_000, "should have killed well before 5s");
+    expect(Date.now() - start < 2_000).toBeTruthy();
   } finally {
     dispose();
   }
@@ -209,7 +189,7 @@ test("timeoutMs: 0 disables the timeout", async () => {
     const handle = runner.exec("echo hi", { id: "noto", timeoutMs: 0 });
     const events = await drain(handle.events);
     const exit = events.find((e) => e.name === "exit");
-    assert.equal(exit?.value, 0);
+    expect(exit?.value).toBe(0);
   } finally {
     dispose();
   }
@@ -221,13 +201,12 @@ test("dispose() removes the log and subsequent get() throws ENOENT", async () =>
     const handle = runner.exec("echo done", { id: "gone" });
     await drain(handle.events);
     runner.dispose("gone");
-    assert.throws(
-      () => runner.get("gone"),
-      (err: ExecError) => {
-        assert.equal(err.code, "ENOENT");
-        return true;
-      },
-    );
+    try {
+      runner.get("gone");
+      throw new Error("expected to throw");
+    } catch (err) {
+      expect((err as ExecError).code).toBe("ENOENT");
+    }
   } finally {
     dispose();
   }
@@ -244,7 +223,7 @@ test("log eviction past maxBytes yields ELOG_TRUNCATED on replay", async () => {
     );
     const events = await drain(handle.events);
     // Live stream still saw events (eviction doesn't gate live).
-    assert.ok(events.some((e) => e.name === "stdout"));
+    expect(events.some((e) => e.name === "stdout")).toBeTruthy();
     // Replay should fail with ELOG_TRUNCATED. The throw happens
     // inside the pull callback when we walk the (gone) log rows.
     let caught: unknown;
@@ -253,8 +232,8 @@ test("log eviction past maxBytes yields ELOG_TRUNCATED on replay", async () => {
     } catch (err) {
       caught = err;
     }
-    assert.ok(caught !== undefined, "replay should throw after eviction");
-    assert.equal((caught as { code?: string }).code, "ELOG_TRUNCATED");
+    expect(caught !== undefined).toBeTruthy();
+    expect((caught as { code?: string }).code).toBe("ELOG_TRUNCATED");
   } finally {
     dispose();
   }
@@ -272,13 +251,12 @@ test("retention sweep evicts records past TTL", async () => {
     // Advance past the TTL window and sweep.
     nowMs += 500;
     runner.sweep();
-    assert.throws(
-      () => runner.get("ttl"),
-      (err: ExecError) => {
-        assert.equal(err.code, "ENOENT");
-        return true;
-      },
-    );
+    try {
+      runner.get("ttl");
+      throw new Error("expected to throw");
+    } catch (err) {
+      expect((err as ExecError).code).toBe("ENOENT");
+    }
   } finally {
     dispose();
   }
@@ -312,8 +290,8 @@ test("exit-event surfaces an error on the subscriber when setExit throws", async
     } finally {
       reader.releaseLock();
     }
-    assert.ok(caught instanceof Error, "subscriber stream should surface the error");
-    assert.match((caught as Error).message, /setExit after dispose/);
+    expect(caught instanceof Error).toBeTruthy();
+    expect((caught as Error).message).toMatch(/setExit after dispose/);
   } finally {
     dispose();
   }
