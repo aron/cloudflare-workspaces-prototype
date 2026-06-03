@@ -17,11 +17,11 @@
   },
   "peerDependencies": {
     "ai":                  "^6.0.0",
-    "@cloudflare/workspace": "^0.1.0",
+    "@cloudflare/workspace": "*",
     "isomorphic-git":      "^1.38.0"
   },
   "devDependencies": {
-    "@cloudflare/workspace": "^0.1.0",
+    "@cloudflare/workspace": "*",
     "@cloudflare/workers-types": "^4.20250410.0",
     "@types/node":         "^20.0.0",
     "ai":                  "^6.0.188",

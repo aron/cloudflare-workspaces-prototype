@@ -14,7 +14,12 @@ node_modules/
 
 # Build artifacts
 packages/workspace/dist/
+packages/dofs/dist/
+packages/workspace-rpc/dist/
+packages/wsd/dist/
 apps/agent/dist/
+artifacts/
+repos/
 
 # Captured `wrangler tail` JSON dumps for local inspection (see tail-agent.sh).
 logs.jsonl

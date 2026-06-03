@@ -1,1079 +1,298 @@
-/**
- * Workspace — Durable-Object-side facade combining:
- *   - a SQLite-backed VFS (Vfs)
- *   - incremental sync to a `@cloudflare/sandbox` container running the
- *     companion `container-sandbox` server
- *   - direct file ops that round-trip nothing through the container
- *
- * Construction is cheap: nothing networks until you call `exec()` or
- * `warmup()`. Sync watermarks (pushSeq / pullSinceRev) are persisted to the
- * DO storage so reconnects/restarts resume cleanly.
- */
+// Host-side Workspace facade.
+//
+// Runs inside a Cloudflare Worker / Durable Object. Owns a local
+// dofs Database (the host store) and a SyncRPC connection
+// to wsd. Filesystem operations on Workspace.fs mutate the local
+// store directly via the WorkspaceFilesystem class from
+// @cloudflare/dofs; sync between the host store and wsd
+// is driven explicitly via Workspace.push() / Workspace.pull().
+// The shell-side pre-exec push / post-exec pull bracket lives
+// on Workspace.shell.exec.
 
 import {
-  getSandbox,
-  parseSSEStream,
-  type LogEvent,
-  type Process,
-  type Sandbox,
-} from "@cloudflare/sandbox";
+  Database,
+  type DurableObjectStorageLike,
+  initializeSchema,
+  SQLiteWorkspaceProvider,
+  WorkspaceFilesystem,
+} from "@cloudflare/dofs";
+import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
-import { Vfs } from "./vfs.js";
-import { ContainerConnection } from "./container-connection.js";
-import { ensureWorkspaceServer } from "./container-startup.js";
-import type {
-  Mount,
-  MountInput,
-  MountContext,
-  MountWriteApi,
-} from "./mounts/index.js";
-import { asFactory } from "./mounts/index.js";
-import {
-  pathStartsWith,
-  type ContainerRpc,
-  type ExecResult,
-  type GrepHit,
-  type FileStat,
-  type VfsChange,
-} from "./shared/index.js";
-import { createQueue, serialize, type Queue } from "./serialize.js";
-import { parseWorkspacePath } from "./path.js";
-import { chunkHashUnion, assembleFileBytes, hashKey } from "./pull-assembly.js";
-import { trace, redactSecrets } from "./tracing.js";
+import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { WorkspaceShell } from "./shell.js";
+import { WorkspaceStub } from "./stub.js";
 
 export interface WorkspaceOptions {
-  /** DO storage to mount the VFS on. */
-  storage: DurableObjectStorage;
-  /** The @cloudflare/sandbox Durable Object namespace binding. */
-  sandbox: DurableObjectNamespace<Sandbox>;
-  /** Caller-side identifier (e.g. an agent's DO `name`). */
-  sessionId: string;
-  /** Container port the workspace server listens on. Defaults to 4567. */
-  port?: number;
-  /**
-   * Optional: resolve the caller's `sessionId` into the name passed to
-   * `getSandbox(sandbox, name)`. Use this to route through a warm pool.
-   * Called once on first use, cached for the lifetime of the Workspace.
-   * Defaults to identity (sessionId itself names the Sandbox DO).
-   */
-  resolveSessionId?: (sessionId: string) => Promise<string> | string;
-  /**
-   * Read-only mounts keyed by absolute VFS path (the mount root).
-   * Index (directory tree + file metadata) is fetched lazily on first use;
-   * file content is fetched per-file the first time something reads it.
-   * Writes anywhere under a mount root throw EROFS.
-   */
-  mounts?: Record<string, MountInput>;
-  /**
-   * Path segments excluded from the post-`exec()` pull. Default:
-   * `['node_modules']`. Matched against any path that contains
-   * `/<segment>/` or ends with `/<segment>`. Excluded paths never
-   * cross the wire from the container to the DO, so the bytes stay
-   * in the (ephemeral) container only. Anything that *uses* the
-   * excluded files (`exec("node ...")`, `runWasm`, etc.) still works
-   * because the bytes are already on the container side.
-   *
-   * Pass `[]` to disable the default and pull everything.
-   */
-  pullIgnore?: string[];
+  // Local store backing this Workspace. In a Durable Object, pass
+  // `ctx.storage`; in tests, pass a SQLiteTestStorage from
+  // @cloudflare/dofs/testing. The constructor opens a
+  // Database against it and runs initializeSchema (idempotent).
+  storage: DurableObjectStorageLike;
+
+  // Backends are tried in declared order. The first one whose
+  // connect() resolves wins; the rest are not consulted.
+  backends: WorkspaceBackend[];
+
+  // Clock used for mtime / last_seen on local FS writes. Defaults
+  // to Date.now. Override for deterministic tests.
+  now?: () => number;
+
+  // Bounded retry policy for ready(). When omitted, ready() runs
+  // the backend list once and surfaces the first failure — the
+  // shipped behaviour before retries existed. When set, a transient
+  // failure on every backend triggers a wait + retry, up to
+  // `attempts` total tries with exponential backoff. The delay
+  // starts at `initialDelayMs` and doubles each round, capped at
+  // `maxDelayMs`.
+  reconnect?: ReconnectOptions;
 }
 
-const WATERMARK_TABLE = `
-CREATE TABLE IF NOT EXISTS _workspace_watermark (
-  k TEXT PRIMARY KEY,
-  v INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS _workspace_mounts (
-  root     TEXT PRIMARY KEY,
-  kind     TEXT NOT NULL,
-  indexed  INTEGER NOT NULL DEFAULT 0
-);
-`;
-
-/**
- * One change to apply to the DO-side VFS during a pull. Produced by
- * `_pullDirtyV2` (manifest path) or `_pullDirtyLegacy` (bytes path) and
- * consumed by `vfs.applyChangesSync` and the writable-mount mirror loop.
- */
-type ApplyEntry = {
-  path: string;
-  op: "upsert" | "delete";
-  type?: "file" | "dir";
-  mode?: number;
-  mtime?: number;
-  bytes?: Uint8Array;
-};
-type MirrorEntry = ApplyEntry & { root: string; mount: Mount; relPath: string };
-
-/**
- * True if `err` is the capnweb-side error raised when the container's
- * `ContainerRpc` doesn't expose `method`. capnweb's read loop throws a
- * plain `TypeError` with the message `'<method>' is not a function.` when
- * the peer's bootstrap stub lacks the call, so we match by both the
- * TypeError shape and the literal method name. Anything else (real RPC
- * errors, transport failures, etc.) still propagates.
- */
-export function isMissingRpcMethod(err: unknown, method: string): boolean {
-  return (
-    err instanceof TypeError &&
-    err.message.includes(`'${method}' is not a function`)
-  );
+export interface ReconnectOptions {
+  // Total connect() attempts across the backend list. 1 means
+  // no retry (one pass). Default 1.
+  attempts: number;
+  // First backoff delay in ms. Doubles each round up to maxDelayMs.
+  initialDelayMs: number;
+  // Cap on the per-attempt backoff delay.
+  maxDelayMs: number;
 }
 
 export class Workspace {
-  readonly vfs: Vfs;
-  private opts: WorkspaceOptions & { port: number };
-  private sql: SqlStorage;
-  /** Cached result of resolveSessionId(opts.sessionId). null until first lookup. */
-  private resolvedSandboxName: string | null = null;
-
-  // Sync watermarks (persisted in _workspace_watermark)
-  private pushSeq = 0; // last VFS `seq` pushed to the container
-  // Last container-side monotonic revision seen on pull .
-  // Replaces the old wall-clock mtime watermark, which lost same-millisecond
-  // writes once it advanced past them.
-  private pullSinceRev = 0;
-
-  // ---- mounts ----
-  /** Normalized mount roots (no trailing slash), sorted longest-first for prefix matching. */
-  private mountRoots: string[] = [];
-  /** Per-mount index state. Once indexed, stays indexed for the DO lifetime. */
-  private mountIndexed = new Map<string, boolean>();
-  private indexingPromise: Promise<void> | null = null;
-  /** Per-file in-flight fetches — dedupes concurrent reads of the same stub. */
-  private contentFetches = new Map<string, Promise<void>>();
-  /** Bounded concurrency for batch hydration during exec(). */
-  private static readonly FETCH_CONCURRENCY = 8;
-
-  // ---- container connection ----
-  /** Cached connection to the container's workspace-server. Rebuilt lazily after close. */
-  private conn: ContainerConnection | null = null;
-  /** Memoised in-flight ensureContainerProcess promise; clears on rejection so callers can retry. */
-  private ensurePromise: Promise<void> | null = null;
-
-  // ---- per-workspace mutex ----
+  readonly #db: Database;
+  readonly #fs: WorkspaceFilesystem;
   /**
-   * FIFO queue serializing all mutating + sync entry points (exec,
-   * writeFile, mkdir, deleteFile).  Without this, concurrent calls
-   * could read overlapping watermarks, interleave mount-side writes,
-   * and race the Vfs.applying flag through async gaps.  Pure reads
-   * (readFile, readdir, stat, findFiles, grep, listFilesUnder) stay
-   * outside the queue — readers shouldn't wait on writers.
+   * Lazily-constructed dofs provider. Built on first `provider()`
+   * call; cached so repeated callers share the same instance.
    */
-  private mutex: Queue = createQueue();
+  #provider: SQLiteWorkspaceProvider | undefined;
+  readonly #backends: WorkspaceBackend[];
+  readonly #reconnect: ReconnectOptions;
+  readonly #now: () => number;
+  #handle: BackendHandle | undefined;
+  #shell: WorkspaceShell | undefined;
+  #readyPromise: Promise<void> | undefined;
+  // FIFO that serializes mutating entry points (push, pull, and the
+  // shell exec bracket which goes through them). Reads bypass the
+  // queue entirely — they hit the local store directly through
+  // Workspace.fs. The queue is a single tail-promise: each new caller
+  // chains its work onto the tail and updates it. See docs/02 "Concurrent
+  // mutators".
+  #mutationTail: Promise<unknown> = Promise.resolve();
 
-  constructor(opts: WorkspaceOptions) {
-    this.opts = { port: 4567, ...opts };
-    this.sql = (opts.storage as DurableObjectStorage & { sql: SqlStorage }).sql;
-    this.vfs = new Vfs(this.sql);
-    this.sql.exec(WATERMARK_TABLE);
-    for (const r of this.sql.exec(
-      `SELECT k, v FROM _workspace_watermark`,
-    ) as Iterable<{ k: string; v: number }>) {
-      if (r.k === "pushSeq") this.pushSeq = r.v;
-      // Stage-1 migration: read the new key if present,
-      // and tolerate the legacy `pullSinceMs` row by leaving the rev
-      // watermark at 0 (the next pull re-fetches everything from
-      // rev 0 — a one-time cost on the first boot post-upgrade).
-      if (r.k === "pullSinceRev") this.pullSinceRev = r.v;
+  constructor(options: WorkspaceOptions) {
+    if (options.backends.length === 0) {
+      throw new Error("Workspace requires at least one backend");
     }
-
-    // Normalize and reconcile configured mounts against the persisted state.
-    // Anything in the table that no longer matches the configured mount kind
-    // (or is no longer configured at all) gets its subtree wiped — we'll
-    // re-index on demand.
-    // Realize every factory once, with the session context, so the rest of
-    // the constructor (and the reconcile loop below) sees concrete Mounts.
-    // Factories are cheap — they just close over options; expensive work
-    // (list, fork, clone) is deferred to ensureMountsIndexed().
-    const configured = new Map<string, Mount>();
-    for (const [rawRoot, input] of Object.entries(opts.mounts ?? {})) {
-      const root = normalizeMountRoot(rawRoot);
-      if (configured.has(root))
-        throw new Error(`duplicate mount root: ${root}`);
-      const ctx: MountContext = {
-        sessionId: opts.sessionId,
-        root,
-        vfs: this.vfs,
-      };
-      configured.set(root, asFactory(input)(ctx));
-    }
-    // Reject overlapping mounts (one root being a prefix of another).
-    const roots = [...configured.keys()];
-    for (const a of roots)
-      for (const b of roots) {
-        if (a !== b && (b + "/").startsWith(a + "/")) {
-          throw new Error(`mount root ${a} overlaps with ${b}`);
-        }
-      }
-    this.mountRoots = roots.sort((a, b) => b.length - a.length);
-
-    const persisted = [
-      ...this.sql.exec<{ root: string; kind: string; indexed: number }>(
-        `SELECT root, kind, indexed FROM _workspace_mounts`,
-      ),
-    ];
-    for (const row of persisted) {
-      const m = configured.get(row.root);
-      if (!m || m.kind !== row.kind) {
-        // Configuration changed: purge stale subtree + row.
-        this.vfs.deleteFile(row.root);
-        this.sql.exec(`DELETE FROM _workspace_mounts WHERE root = ?`, row.root);
-      } else {
-        this.mountIndexed.set(row.root, row.indexed === 1);
-      }
-    }
-    for (const root of roots) {
-      if (!this.mountIndexed.has(root)) {
-        this.sql.exec(
-          `INSERT OR IGNORE INTO _workspace_mounts(root, kind, indexed) VALUES (?, ?, 0)`,
-          root,
-          configured.get(root)!.kind,
-        );
-        this.mountIndexed.set(root, false);
-      }
-    }
-    this.configuredMounts = configured;
+    this.#now = options.now ?? Date.now;
+    this.#db = new Database(options.storage);
+    initializeSchema(this.#db, this.#now);
+    this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
+    this.#backends = options.backends.slice();
+    this.#reconnect = options.reconnect ?? { attempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
   }
 
-  private configuredMounts: Map<string, Mount> = new Map();
-
-  /** Resolve and cache the sandbox DO name (UUID when using a warm pool). */
-  private async sandboxName(): Promise<string> {
-    if (this.resolvedSandboxName !== null) return this.resolvedSandboxName;
-    const resolve = this.opts.resolveSessionId;
-    this.resolvedSandboxName = resolve
-      ? await resolve(this.opts.sessionId)
-      : this.opts.sessionId;
-    return this.resolvedSandboxName;
+  // Local store. Exposed for tests / diagnostics and for the
+  // sync helpers that take a Database directly.
+  get db(): Database {
+    return this.#db;
   }
 
-  // ---- direct VFS (no container round-trip) ----
+  // Filesystem facade — the documented Workspace.fs surface from
+  // docs/04. Available immediately; doesn't need ready() because
+  // reads and writes hit the local store, not the wire.
+  get fs(): WorkspaceFilesystem {
+    return this.#fs;
+  }
+
+  /**
+   * Underlying dofs `SQLiteWorkspaceProvider` over the local store.
+   *
+   * This is the `@platformatic/vfs`-shaped provider — a node:fs
+   * surface with full symlink support. Callers that want a
+   * `VirtualFileSystem` (e.g. to hand to isomorphic-git) wrap it
+   * themselves to keep `@platformatic/vfs` out of this package's
+   * dependency tree:
+   *
+   * ```ts
+   * import { create, VirtualProvider } from "@platformatic/vfs";
+   * import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
+   *
+   * class Glue extends VirtualProvider {
+   *   constructor(private inner: SQLiteWorkspaceProvider) { super(); }
+   *   override get readonly()         { return this.inner.readonly; }
+   *   override get supportsSymlinks() { return this.inner.supportsSymlinks; }
+   *   override get supportsWatch()    { return this.inner.supportsWatch; }
+   * }
+   * // Forward every node:fs method to `inner` via a
+   * // `for (const name of [...]) Object.defineProperty(...)` loop.
+   * const vfs = create(new Glue(workspace.provider()));
+   * ```
+   *
+   * Available immediately; doesn't need `ready()` because the
+   * provider only reads/writes the local store, not the wire.
+   */
+  provider(): SQLiteWorkspaceProvider {
+    if (!this.#provider) {
+      this.#provider = new SQLiteWorkspaceProvider(this.#db, { now: this.#now });
+    }
+    return this.#provider;
+  }
+
+  // Shell facade. Throws if called before ready() resolves.
+  // exec() brackets the spawn with push() / pull(); see shell.ts.
+  get shell(): WorkspaceShell {
+    if (!this.#shell) {
+      throw new Error("Workspace not connected — await ready() first");
+    }
+    return this.#shell;
+  }
+
+  // Walk the backends in declared order. Caches the first
+  // successful BackendHandle so subsequent .shell / .close calls
+  // reuse it. ready() is idempotent; multiple callers share
+  // the same in-flight connection attempt.
+  ready(): Promise<void> {
+    if (this.#readyPromise) return this.#readyPromise;
+    this.#readyPromise = this.#connect();
+    return this.#readyPromise;
+  }
+
+  // Wrap this workspace in a WorkspaceStub so it can be handed
+  // across the Workers-RPC boundary (e.g. returned from a DO RPC
+  // method). The stub is a lazy RpcTarget — it doesn't own any
+  // resources itself; it just delegates back to this workspace.
+  // Throws if called before ready() resolves, because the inner
+  // .shell getter does.
+  stub(): WorkspaceStub {
+    // Touch .shell so the not-connected error surfaces here
+    // rather than on the first RPC method call.
+    void this.shell;
+    return new WorkspaceStub(this);
+  }
+
+  // Sync the local store with the connected backend.
   //
-  // All read/write methods are async: they may need to index a mount
-  // (one R2 list() call) or hydrate file content (one R2 get() call) on
-  // first use. After the index is built and content is cached, subsequent
-  // calls degrade to a couple of SQL statements — cheap, but still async
-  // for API consistency.
-
-  async readFile(path: string): Promise<Uint8Array | null> {
-    return trace("workspace.readFile", { "hackspace.path": path }, async (span) => {
-      const cp = parseWorkspacePath(path);
-      await this.ensureMountsIndexed();
-      await this.ensureContentLoaded(cp);
-      const bytes = this.vfs.readFile(cp);
-      span.set("hackspace.bytes", () => bytes?.byteLength ?? 0);
-      span.set("hackspace.found", () => bytes !== null);
-      return bytes;
+  // push() ships everything the host has written since the last
+  // push to wsd; pull() applies everything wsd has produced since
+  // the last pull. Both are explicit — the package doesn't run a
+  // background loop. WorkspaceShell brackets exec() automatically;
+  // call these directly for FS-only flows that need to hand off to
+  // the container via a tool other than exec.
+  //
+  // Returns the number of entries transferred so a polling loop
+  // can decide whether to tick again.
+  push(): Promise<number> {
+    return this.#serialize(async () => {
+      await this.ready();
+      if (!this.#handle) throw new Error("Workspace not connected");
+      return pushOnce(this.#db, this.#handle.rpc.sync);
     });
   }
 
-  async writeFile(
-    path: string,
-    content: Uint8Array | string,
-    mode?: number,
-  ): Promise<void> {
-    return trace("workspace.writeFile", { "hackspace.path": path }, async (span) => {
-      const cp = parseWorkspacePath(path);
-      await this.ensureMountsIndexed();
-      const bytes =
-        typeof content === "string" ? new TextEncoder().encode(content) : content;
-      span.set("hackspace.bytes", () => bytes.byteLength);
-      return serialize(this.mutex, async () => {
-        // Preserve the existing file's mode on overwrite when the caller didn't
-        // specify one — otherwise a plain `writeFile(path, bytes)` would silently
-        // downgrade an executable script (0o100755) to a regular file (0o100644).
-        // Callers that *want* to change the mode pass it explicitly.
-        const effectiveMode = mode ?? this.vfs.stat(cp)?.mode ?? 0o100644;
-        span.set("hackspace.mode", () => effectiveMode);
-        const m = this.resolveMountForWrite(cp);
-        span.set("hackspace.mount", () => m ? m.root : "vfs");
-        if (m) {
-          // Push to the backing store first — if it fails, the VFS stays clean.
-          await m.mount.put!(m.relPath, bytes);
-          this.vfs.writeFile(cp, bytes, effectiveMode, m.root);
-        } else {
-          this.vfs.writeFile(cp, bytes, effectiveMode);
-        }
-      });
+  pull(): Promise<number> {
+    return this.#serialize(async () => {
+      await this.ready();
+      if (!this.#handle) throw new Error("Workspace not connected");
+      return pullOnce(this.#db, this.#handle.rpc.sync);
     });
   }
 
-  async readdir(
-    path: string,
-  ): Promise<Array<{ name: string; type: "file" | "dir" }>> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    return this.vfs.readdir(cp);
+  // Tail-promise FIFO. Each call chains onto the existing tail so
+  // it can't start until every queued mutation ahead of it has
+  // resolved (or rejected). Rejections are not contagious: we swallow
+  // the rejection here so a failing mutation doesn't poison the rest
+  // of the queue — the caller still sees the original rejection via
+  // the returned promise.
+  #serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#mutationTail.then(fn, fn);
+    this.#mutationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
-  async stat(path: string): Promise<FileStat | null> {
-    const cp = parseWorkspacePath(path);
-    await this.ensureMountsIndexed();
-    return this.vfs.stat(cp);
-  }
-
-  async mkdir(path: string, mode?: number): Promise<void> {
-    return trace("workspace.mkdir", { "hackspace.path": path }, async () => {
-      const cp = parseWorkspacePath(path);
-      await this.ensureMountsIndexed();
-      return serialize(this.mutex, async () => {
-        // mkdir is VFS-only even under writable mounts: R2 has no directories,
-        // and synthesizing zero-byte directory markers would surface as files.
-        const m = this.resolveMountForWrite(cp);
-        this.vfs.mkdir(cp, mode, m ? m.root : null);
-      });
-    });
-  }
-
-  async deleteFile(path: string): Promise<void> {
-    return trace("workspace.deleteFile", { "hackspace.path": path }, async (span) => {
-      const cp = parseWorkspacePath(path);
-      await this.ensureMountsIndexed();
-      return serialize(this.mutex, async () => {
-        const m = this.resolveMountForWrite(cp);
-        if (m) {
-          // Collect every file under `path` (could be a single file or a subtree)
-          // and delete each from the backing store before touching the VFS.
-          const subtree = this.vfs.listFilesUnder(cp);
-          const files = subtree.length
-            ? subtree
-            : this.vfs.stat(cp)?.type === "file"
-              ? [cp]
-              : [];
-          span.set("hackspace.files_removed", () => files.length);
-          const rels = files.map((f) => f.slice(m.root.length + 1));
-          await this.runBounded(rels, (r) => m.mount.delete!(r));
-        }
-        this.vfs.deleteFile(cp);
-      });
-    });
-  }
-
-  async listFilesUnder(prefix: string): Promise<string[]> {
-    return trace("workspace.listFilesUnder", { "hackspace.path": prefix }, async (span) => {
-      const cp = parseWorkspacePath(prefix);
-      await this.ensureMountsIndexed();
-      const out = this.vfs.listFilesUnder(cp);
-      span.set("hackspace.count", () => out.length);
-      return out;
-    });
-  }
-
-  /** Search filenames under `directory` for `pattern` (substring match). */
-  /** Search filenames under `directory` for `pattern` (substring match). */
-  async findFiles(
-    directory: string,
-    pattern?: string,
-  ): Promise<Array<{ path: string; type: "file" | "dir" }>> {
-    return trace("workspace.findFiles", {
-      "hackspace.path": directory,
-      "hackspace.pattern": pattern,
-    }, async (span) => {
-      const cp = parseWorkspacePath(directory);
-      await this.ensureMountsIndexed();
-      const out = this.vfs
-        .snapshot()
-        .entries.filter((e) => pathStartsWith(e.path, cp))
-        .filter((e) => !pattern || e.path.includes(pattern))
-        .map((e) => ({ path: e.path, type: e.type }));
-      span.set("hackspace.count", () => out.length);
-      return out;
-    });
-  }
-
-  /** Grep file contents for `pattern`. `path` may be a file or directory. */
-  async grep(
-    pattern: string,
-    path: string,
-    opts: { ignoreCase?: boolean } = {},
-  ): Promise<GrepHit[]> {
-    return trace("workspace.grep", {
-      "hackspace.path": path,
-      "hackspace.ignore_case": opts.ignoreCase ?? false,
-    }, async (span) => {
-      // `pattern` is user-supplied free text; truncate to keep span
-      // storage bounded but don't redact (no secrets-by-convention
-      // inside grep needles).
-      span.set("hackspace.pattern", () => pattern.slice(0, 128));
-      const cp = parseWorkspacePath(path);
-      await this.ensureMountsIndexed();
-      const needle = opts.ignoreCase ? pattern.toLowerCase() : pattern;
-      const { entries } = this.vfs.snapshot();
-      const files = entries.filter(
-        (e) => e.type === "file" && pathStartsWith(e.path, cp),
-      );
-      span.set("hackspace.files_scanned", () => files.length);
-      // Hydrate any mount stubs in scope, bounded-concurrent.
-      await this.hydrateMany(files.map((f) => f.path));
-      const hits: GrepHit[] = [];
-      for (const f of files) {
-        const bytes = this.vfs.readFile(f.path);
-        if (!bytes) continue;
-        const text = new TextDecoder().decode(bytes);
-        const lines = text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          const hay = opts.ignoreCase ? lines[i].toLowerCase() : lines[i];
-          if (hay.includes(needle))
-            hits.push({ path: f.path, line: i + 1, text: lines[i] });
-        }
-      }
-      span.set("hackspace.hits", () => hits.length);
-      return hits;
-    });
-  }
-
-  // ---- container exec with bidirectional sync ----
-
-  /**
-   * Run `command` inside the sandbox container after pushing any DO-side
-   * changes; pull files the command produced back into the VFS afterwards.
-   *
-   * cwd defaults to `/tmp` to avoid a FUSE getattr round-trip during spawn
-   * (spawning into the FUSE mount can deadlock when the server is under
-   * load right after an applyChanges flush). Use absolute paths in `command`.
-   */
-  async exec(command: string, cwd?: string): Promise<ExecResult> {
-    await this.ensureMountsIndexed();
-    // Span boundary spans the mutex wait + push + exec + pull — all of
-    // it is wall-clock the caller paid for and a wedge anywhere in here
-    // looks the same from the outside.
-    return trace("workspace.exec", { "hackspace.cwd": cwd ?? "/tmp" }, async (span) => {
-      span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
-      return serialize(this.mutex, async () => {
-        const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-          enableDefaultSession: false,
-        });
-        const api = await this.getConnection();
-
-        // Hydrate any mount stubs we're about to push — otherwise the container
-        // would receive empty files. We pre-fetch in bounded parallel before
-        // computing the change set so the freshly-written rows are included.
-        const stubs = this.vfs.listStubs().map((s) => s.path);
-        if (stubs.length) await this.hydrateMany(stubs);
-
-        // Push the delta since the last exec.
-        const changes = this.vfs.getChangesSince(this.pushSeq);
-        if (changes.length) {
-          await api.applyChanges(changes);
-          this.pushSeq = changes[changes.length - 1].seq;
-        }
-        span.set("hackspace.pushed", () => changes.length);
-
-        const result = await sb.exec(command, { cwd: cwd ?? "/tmp" });
-        span.set("hackspace.exit_code", () => result.exitCode);
-        span.set("hackspace.stdout_bytes", () => result.stdout?.length ?? 0);
-        span.set("hackspace.stderr_bytes", () => result.stderr?.length ?? 0);
-
-        const pulled = await this._pullDirtyAfterLocked();
-        span.set("hackspace.pulled", () => pulled);
-
-        return {
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          pushed: changes.length,
-          pulled,
-        };
-      });
-    });
-  }
-
-  /**
-   * Pre-warm the container without running a command. Idempotent.
-   * Use from `onStart()` in `ctx.waitUntil(...)` so the first exec is fast.
-   */
-  async warmup(): Promise<void> {
-    await this.ensureMountsIndexed();
-    await this.ensureContainerProcess();
-  }
-
-  /**
-   * Start a long-running process in the sandbox container, returning a
-   * `Process` handle the caller can stream logs from, await exit on, or
-   * kill. Performs the same DO→container push as `exec` so the process
-   * sees the latest VFS state.
-   *
-   * Caller is responsible for pulling DO←container deltas after the
-   * process exits via `pullDirtyAfter(...)` — we can't bake that into
-   * the returned handle because the consumer typically wants to stream
-   * logs in parallel with the wait.
-   */
-  async startProcess(
-    command: string,
-    opts: { cwd?: string } = {},
-  ): Promise<Process> {
-    await this.ensureMountsIndexed();
-    return trace("workspace.startProcess", { "hackspace.cwd": opts.cwd ?? "/tmp" }, async (span) => {
-      span.set("hackspace.command", () => redactSecrets(command).slice(0, 512));
-      return serialize(this.mutex, async () => {
-        const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-          enableDefaultSession: false,
-        });
-        const api = await this.getConnection();
-
-        // Same pre-flight as exec: hydrate stub mounts then push the delta.
-        const stubs = this.vfs.listStubs().map((s) => s.path);
-        if (stubs.length) await this.hydrateMany(stubs);
-        const changes = this.vfs.getChangesSince(this.pushSeq);
-        if (changes.length) {
-          await api.applyChanges(changes);
-          this.pushSeq = changes[changes.length - 1].seq;
-        }
-        span.set("hackspace.pushed", () => changes.length);
-
-        const proc = await sb.startProcess(command, { cwd: opts.cwd ?? "/tmp" });
-        span.set("hackspace.process_id", () => proc.id);
-        return proc;
-      });
-    });
-  }
-
-  /**
-   * Stream `LogEvent`s from a running (or recently-running) process.
-   * Decodes the sandbox SDK's SSE wire format so callers iterate
-   * structured events directly.
-   *
-   * Cancellation: pass an `AbortSignal` and we translate `abort` into a
-   * `killProcess(processId)` call worker-side. We do *not* forward the
-   * signal to `sb.streamProcessLogs` itself:
-   *   - workerd refuses to serialize an `AbortSignal` across the DO RPC
-   *     boundary ("AbortSignal serialization is not enabled").
-   *   - the sandbox SDK's HTTP transport drops the option two layers
-   *     down anyway (process-client's `streamProcessLogs` doesn't even
-   *     accept it).
-   * Killing the process stops the sandbox emitting log events; the SSE
-   * stream then closes naturally and the consuming iterator returns.
-   */
-  async streamProcessLogs(
-    processId: string,
-    options: { signal?: AbortSignal } = {},
-  ): Promise<AsyncIterable<LogEvent>> {
-    // Only the *setup* is traced here — acquiring the sandbox stub,
-    // wiring up the abort handler, and opening the SSE stream. The
-    // iterable's runtime is shaped by the consumer (the agent's exec
-    // tool) and gets its own span at that layer (Phase 3) so the
-    // bytes-streamed numbers attach to the call that actually
-    // consumed them.
-    return trace("workspace.streamProcessLogs", { "hackspace.process_id": processId }, async () => {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-        enableDefaultSession: false,
-      });
-      if (options.signal) {
-        const onAbort = () => {
-          void sb.killProcess(processId).catch(() => {});
-        };
-        if (options.signal.aborted) onAbort();
-        else options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-      const stream = await sb.streamProcessLogs(processId);
-      return parseSSEStream<LogEvent>(stream);
-    });
-  }
-
-  /**
-   * Look up a process by id. Returns null when the sandbox has lost the
-   * process. Used by the agent's `onStart` recovery sweep to decide
-   * whether to reattach or close out an in-flight exec.
-   */
-  async getProcess(processId: string): Promise<Process | null> {
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-      enableDefaultSession: false,
-    });
-    try {
-      return await sb.getProcess(processId);
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Pull file changes the container made into the VFS. Counterpart to
-   * the automatic pull `exec` performs; for `startProcess` callers must
-   * invoke this explicitly once they've decided the process is done
-   * streaming. Returns the count of applied entries.
-   */
-  async pullDirtyAfter(): Promise<number> {
-    return serialize(this.mutex, () => this._pullDirtyAfterLocked());
-  }
-
-  /**
-   * Pull body without the mutex. exec() already holds the mutex when it
-   * calls this; the public pullDirtyAfter() wraps it.
-   */
-  private async _pullDirtyAfterLocked(): Promise<number> {
-    return trace("workspace.pullDirty", {}, async (span) => {
-      const api = await this.getConnection();
-
-      // Pull files the container touched. Three cases per change, by the
-      // mount root of its path:
-      //   - outside any mount: applied to the VFS normally.
-      //   - under a read-only mount: dropped (mounts are read-only end-to-end).
-      //   - under a writable mount: applied to the VFS, then mirrored to R2.
-      const ignore = this.opts.pullIgnore ?? ["node_modules"];
-
-      // Prefer the manifest-aware pull . The container
-      // ships one record per dirty path with (hash, size)[] per file — no
-      // inline bytes. We then probe our own content-addressed store and
-      // only ask the container for the bytes we don't already have.
-      //
-      // Fallback: an older container image that predates pullDirtyV2 only
-      // exposes the legacy `pullDirty` (bytes-carrying bulk blob). capnweb
-      // surfaces the missing method as `TypeError: '...' is not a function`
-      // from inside its read loop. We catch *only* that shape so genuine
-      // pull failures still propagate.
-      let result: {
-        changes: ApplyEntry[];
-        mirrors: MirrorEntry[];
-        maxRev: number;
-      };
-      let path: "v2" | "legacy" = "v2";
+  async close(): Promise<void> {
+    if (this.#handle) {
       try {
-        result = await this._pullDirtyV2(api, ignore);
-      } catch (err) {
-        if (!isMissingRpcMethod(err, "pullDirtyV2")) throw err;
-        path = "legacy";
-        result = await this._pullDirtyLegacy(api, ignore);
+        await this.#handle.close();
+      } finally {
+        this.#handle = undefined;
+        this.#shell = undefined;
+        this.#readyPromise = undefined;
       }
-      span.set("hackspace.pull_path", () => path);
-      const { changes: applyEntries, mirrors, maxRev } = result;
-      span.set("hackspace.pulled_files", () => applyEntries.length);
-      span.set("hackspace.mirrored_files", () => mirrors.length);
-      span.set("hackspace.max_rev", () => maxRev);
-
-      if (applyEntries.length) {
-        this.opts.storage.transactionSync(() =>
-          this.vfs.applyChangesSync(applyEntries),
-        );
-      }
-      // Advance the rev watermark even on an empty pull, so a successive
-      // pull doesn't re-scan the same range. The container reports maxRev
-      // = currentRev when nothing changed, so this is safe.
-      this.pullSinceRev = maxRev;
-      // Mirror writable-mount changes to R2 using the bytes we already
-      // captured above, so we don't pay a second SQLite read per file.
-      if (mirrors.length) {
-        await this.runBounded(mirrors, async (m) => {
-          if (m.op === "delete") {
-            await m.mount.delete!(m.relPath);
-          } else if (m.type === "file") {
-            const bytes = m.bytes ?? this.vfs.readFile(m.path);
-            if (bytes) await m.mount.put!(m.relPath, bytes);
-          }
-        });
-      }
-
-      this.saveWatermarks();
-      return applyEntries.length;
-    });
-  }
-
-  /**
-   * Manifest-aware pull. Returns the apply set, mirror set, and watermark
-   * the caller should adopt. Pure data transform — no side effects on
-   * `this.vfs` / `this.pullSinceRev`; `_pullDirtyAfterLocked` is the
-   * single place that commits those.
-   */
-  private async _pullDirtyV2(
-    api: ContainerRpc,
-    ignore: string[],
-  ): Promise<{
-    changes: ApplyEntry[];
-    mirrors: MirrorEntry[];
-    maxRev: number;
-  }> {
-    const bulk = await api.pullDirtyV2(this.pullSinceRev, ignore);
-
-    // Collect the union of chunk hashes across this pull, ask our own
-    // Vfs which we lack, and fetch just those from the container.
-    const allHashes = chunkHashUnion(bulk);
-    const wantList = this.vfs.missingBlobs(allHashes);
-    const wantBytes = wantList.length ? await api.getBlobs(wantList) : [];
-    const fetched = new Map<string, Uint8Array>();
-    for (let i = 0; i < wantList.length; i++) {
-      fetched.set(hashKey(wantList[i]), wantBytes[i]);
     }
-    const lookup = (h: Uint8Array): Uint8Array | null => {
-      return fetched.get(hashKey(h)) ?? this.vfs.readBlob(h);
-    };
+  }
 
-    const applyEntries: ApplyEntry[] = [];
-    const mirrors: MirrorEntry[] = [];
-    for (const c of bulk.changes) {
-      const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type !== undefined) e.type = c.type;
-      if (c.mode !== undefined) e.mode = c.mode;
-      if (c.mtime !== undefined) e.mtime = c.mtime;
-      if (c.op === "upsert" && c.type === "file" && c.chunks) {
-        // Every byte is content-verified by construction: the lookup
-        // key IS the chunk hash.
-        e.bytes = assembleFileBytes(c.chunks, lookup);
+  async #connect(): Promise<void> {
+    const { attempts, initialDelayMs, maxDelayMs } = this.#reconnect;
+    let delay = initialDelayMs;
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await this.#connectOnce();
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt === attempts) break;
+        await sleep(delay);
+        delay = Math.min(delay * 2 || 1, maxDelayMs);
       }
-      this._routeApplyEntry(e, applyEntries, mirrors);
     }
-    return { changes: applyEntries, mirrors, maxRev: bulk.maxRev };
+    // Throwing the last attempt's error preserves the per-backend
+    // summary the pass produced — the caller still sees which
+    // backend failed and why.
+    throw lastError;
   }
 
-  /**
-   * Legacy bulk pull. Used when the container doesn't expose pullDirtyV2
-   * (older image in front of a newer DO). Bytes ride inline in a single
-   * bulk blob; no DO-side dedup. Same return shape as `_pullDirtyV2` so
-   * the caller doesn't care which branch ran.
-   */
-  private async _pullDirtyLegacy(
-    api: ContainerRpc,
-    ignore: string[],
-  ): Promise<{
-    changes: ApplyEntry[];
-    mirrors: MirrorEntry[];
-    maxRev: number;
-  }> {
-    const bulk = await api.pullDirty(this.pullSinceRev, ignore);
-    const blobBytes = await readStreamToUint8Array(bulk.blob);
-
-    const applyEntries: ApplyEntry[] = [];
-    const mirrors: MirrorEntry[] = [];
-    for (const c of bulk.changes) {
-      const e: ApplyEntry = { path: c.path, op: c.op };
-      if (c.type !== undefined) e.type = c.type;
-      if (c.mode !== undefined) e.mode = c.mode;
-      if (c.mtime !== undefined) e.mtime = c.mtime;
-      if (
-        c.op === "upsert" &&
-        c.type === "file" &&
-        c.contentSize !== undefined
-      ) {
-        const off = c.contentOffset ?? 0;
-        e.bytes = blobBytes.subarray(off, off + c.contentSize);
+  async #connectOnce(): Promise<void> {
+    const errors: Array<{ id: string; error: unknown }> = [];
+    for (const backend of this.#backends) {
+      try {
+        const handle = await backend.connect();
+        // Reconcile watermarks before publishing the handle. If the
+        // remote restarted between our pushes / fetches it has lost
+        // state we thought it had; reset the local cursors so the
+        // next tick rebaselines. Done eagerly on connect because
+        // pushOnce's localRev <= sincePush early-return otherwise
+        // hides the mismatch.
+        await reconcileWatermarks(this.#db, handle.rpc.sync);
+        this.#handle = handle;
+        // Workspace satisfies the Sync interface in shell.ts via
+        // its public push() / pull() methods.
+        this.#shell = new WorkspaceShell(handle.rpc.shell, this);
+        // Tear down our caches if the transport drops mid-session.
+        // Backends without a `closed` promise (in-process fakes) opt
+        // out by omitting it; we only react when it's wired.
+        if (handle.closed) {
+          handle.closed
+            .catch(() => {})
+            .then(() => {
+              // Only clear if this handle is still the current one.
+              // A close() that already ran will have nulled #handle,
+              // and a subsequent ready() may have installed a new one.
+              if (this.#handle === handle) {
+                this.#handle = undefined;
+                this.#shell = undefined;
+                this.#readyPromise = undefined;
+              }
+            });
+        }
+        return;
+      } catch (error) {
+        errors.push({ id: backend.id, error });
       }
-      this._routeApplyEntry(e, applyEntries, mirrors);
     }
-    return { changes: applyEntries, mirrors, maxRev: bulk.maxRev };
-  }
-
-  /**
-   * Sort one apply entry into the VFS-apply list and/or the writable-
-   * mount mirror list. Shared by the V2 and legacy pull paths.
-   *   - outside any mount: applied to the VFS normally.
-   *   - under a read-only mount: dropped (mounts are read-only end-to-end).
-   *   - under a writable mount: applied to the VFS *and* mirrored to R2.
-   */
-  private _routeApplyEntry(
-    e: ApplyEntry,
-    applyEntries: ApplyEntry[],
-    mirrors: MirrorEntry[],
-  ): void {
-    const root = this.mountRootOf(e.path);
-    if (root === null) {
-      applyEntries.push(e);
-      return;
-    }
-    const mount = this.configuredMounts.get(root)!;
-    if (!mount.writable) return;
-    applyEntries.push(e);
-    mirrors.push({ ...e, root, mount, relPath: e.path.slice(root.length + 1) });
-  }
-
-  /**
-   * Run the worker-side mark-and-sweep GC to
-   * reclaim orphan manifests and blobs left behind by overwrites and
-   * deletes. Runs under the per-workspace mutex so it can never race
-   * a writer mid-flight.
-   *
-   * Callers can pass a tighter safety window than
-   * `Vfs.GC_DEFAULT_WINDOW_MS` (5 min) for tests or aggressive reclaim.
-   */
-  async gc(
-    safetyWindowMs?: number,
-  ): Promise<{ manifestsFreed: number; blobsFreed: number }> {
-    return serialize(this.mutex, async () => this.vfs.gc(safetyWindowMs));
-  }
-
-  /**
-   * Eagerly hydrate file content under one mount root, or all mounts if
-   * omitted. Useful from `onStart()` if you want sync-ish reads immediately;
-   * otherwise content is fetched on first read.
-   */
-  async prefetch(root?: string): Promise<void> {
-    await this.ensureMountsIndexed();
-    const stubs = this.vfs
-      .listStubs()
-      .filter(
-        (s) => root === undefined || s.mountRoot === normalizeMountRoot(root),
+    const summary = errors
+      .map(
+        ({ id, error }) => `  - ${id}: ${error instanceof Error ? error.message : String(error)}`,
       )
-      .map((s) => s.path);
-    if (stubs.length) await this.hydrateMany(stubs);
-  }
-
-  // ---- mount internals ----
-
-  /** Resolve the configured mount root that owns `path`, or null. */
-  private mountRootOf(path: string): string | null {
-    for (const r of this.mountRoots) {
-      if (path === r || path.startsWith(r + "/")) return r;
-    }
-    return null;
-  }
-
-  /**
-   * Resolve `path` to its writable mount (root + mount + relPath) or null
-   * if `path` is outside any mount. Throws EROFS if `path` is under a
-   * read-only mount.
-   */
-  private resolveMountForWrite(
-    path: string,
-  ): { root: string; mount: Mount; relPath: string } | null {
-    const root = this.mountRootOf(path);
-    if (root === null) return null;
-    const mount = this.configuredMounts.get(root)!;
-    if (!mount.writable) {
-      throw new Error(`EROFS: read-only mount at ${root}: ${path}`);
-    }
-    if (!mount.put || !mount.delete) {
-      throw new Error(`mount ${root} is writable but missing put/delete`);
-    }
-    const relPath = path === root ? "" : path.slice(root.length + 1);
-    return { root, mount, relPath };
-  }
-
-  /** Run `fn` over `items` with bounded concurrency. Aggregates errors. */
-  private async runBounded<T>(
-    items: T[],
-    fn: (item: T) => Promise<void>,
-  ): Promise<void> {
-    if (items.length === 0) return;
-    const limit = Workspace.FETCH_CONCURRENCY;
-    const errors: unknown[] = [];
-    let i = 0;
-    const workers = Array.from(
-      { length: Math.min(limit, items.length) },
-      async () => {
-        while (i < items.length) {
-          const idx = i++;
-          try {
-            await fn(items[idx]);
-          } catch (e) {
-            errors.push(e);
-          }
-        }
-      },
-    );
-    await Promise.all(workers);
-    if (errors.length) {
-      const messages = errors
-        .map((e) => (e instanceof Error ? e.message : String(e)))
-        .join("; ");
-      throw new Error(`bounded operation failed: ${messages}`);
-    }
-  }
-
-  /**
-   * Build the directory index for every configured mount that hasn't been
-   * indexed yet. Concurrent callers share one promise; once resolved, the
-   * `indexed` flag is persisted in `_workspace_mounts` so DO reloads skip
-   * the re-list (stubs are already in `vfs_nodes`).
-   */
-  private ensureMountsIndexed(): Promise<void> {
-    if (this.indexingPromise) return this.indexingPromise;
-    const pending = this.mountRoots.filter((r) => !this.mountIndexed.get(r));
-    if (pending.length === 0) return Promise.resolve();
-
-    this.indexingPromise = (async () => {
-      for (const root of pending) {
-        const mount = this.configuredMounts.get(root)!;
-        const dirMode = mount.writable ? 0o40755 : 0o40555;
-        const fileMode = mount.writable ? 0o100644 : 0o100444;
-        // Ensure the root itself exists as a directory before any work begins.
-        this.vfs.mkdir(root, dirMode, root);
-
-        if (mount.strategy === "eager") {
-          // Eager mount: hand the mount a write API and let it materialize the
-          // whole tree itself. The VFS holds real content (no stubs) when done.
-          const api: MountWriteApi = {
-            writeFile: (abs, bytes, mode) => {
-              this.vfs.writeFile(abs, bytes, mode ?? fileMode, root);
-            },
-            mkdir: (abs, mode) => {
-              this.vfs.mkdir(abs, mode ?? dirMode, root);
-            },
-          };
-          await mount.materialize(api);
-        } else {
-          // Lazy mount: list + write stubs. Content fetched per-file on read.
-          const entries = await mount.list();
-          for (const entry of entries) {
-            const abs = root + "/" + entry.relPath;
-            if (entry.type === "dir") {
-              this.vfs.mkdir(abs, dirMode, root);
-            } else {
-              this.vfs.writeStub(
-                abs,
-                fileMode,
-                entry.mtime ?? Date.now(),
-                root,
-                entry.size ?? null,
-              );
-            }
-          }
-        }
-
-        this.mountIndexed.set(root, true);
-        this.sql.exec(
-          `UPDATE _workspace_mounts SET indexed = 1 WHERE root = ?`,
-          root,
-        );
-      }
-    })().finally(() => {
-      this.indexingPromise = null;
-    });
-    return this.indexingPromise;
-  }
-
-  /**
-   * Ensure a single stub's content is loaded into the VFS. No-op for
-   * non-stub paths. Dedupes concurrent calls for the same path.
-   */
-  private ensureContentLoaded(path: string): Promise<void> {
-    if (!this.vfs.isStub(path)) return Promise.resolve();
-    const existing = this.contentFetches.get(path);
-    if (existing) return existing;
-    const root = this.vfs.getMountRoot(path);
-    if (!root) return Promise.resolve();
-    const mount = this.configuredMounts.get(root);
-    if (!mount) throw new Error(`mount not configured for root: ${root}`);
-    // Eager mounts materialize everything during indexing — a remaining stub
-    // here means the file was deleted from the backing store between indexing
-    // and this read, or the eager materialize() returned without writing it.
-    // Either way there's nothing left to fetch.
-    if (mount.strategy === "eager") return Promise.resolve();
-    const relPath = path.slice(root.length + 1);
-    const p = (async () => {
-      const bytes = await mount.fetch(relPath);
-      const mode = mount.writable ? 0o100644 : 0o100444;
-      this.vfs.writeFile(path, bytes, mode, root);
-    })().finally(() => {
-      this.contentFetches.delete(path);
-    });
-    this.contentFetches.set(path, p);
-    return p;
-  }
-
-  /** Hydrate multiple paths with bounded concurrency. Skips non-stubs. */
-  private async hydrateMany(paths: string[]): Promise<void> {
-    const stubs = paths.filter((p) => this.vfs.isStub(p));
-    if (stubs.length === 0) return;
-    const limit = Workspace.FETCH_CONCURRENCY;
-    let i = 0;
-    const workers = Array.from(
-      { length: Math.min(limit, stubs.length) },
-      async () => {
-        while (i < stubs.length) {
-          const idx = i++;
-          await this.ensureContentLoaded(stubs[idx]);
-        }
-      },
-    );
-    await Promise.all(workers);
-  }
-
-  // ---- internal: container process + capnweb session ----
-
-  /**
-   * Make sure `workspace-server` is running. Safe to call concurrently —
-   * the in-flight promise is shared, and clears on rejection so callers can
-   * retry. The orchestration logic lives in `container-startup.ts`; see the
-   * doc comment on `ensureWorkspaceServer` for the failure modes it defends
-   * against.
-   */
-  private async ensureContainerProcess(): Promise<void> {
-    if (this.ensurePromise) return this.ensurePromise;
-    const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-      enableDefaultSession: false,
-    });
-    this.ensurePromise = ensureWorkspaceServer(sb, this.opts.port).catch(
-      (err) => {
-        this.ensurePromise = null; // allow retry on next call
-        throw err;
-      },
-    );
-    return this.ensurePromise;
-  }
-
-  /**
-   * Get the active capnweb session, building a fresh one when the previous
-   * connection has been torn down (or never existed). Survives DO restarts
-   * because the container holds workspace-server across the gap; survives
-   * mid-life WS drops because `ContainerConnection.onClose` nulls `this.conn`
-   * synchronously and the next call rebuilds.
-   */
-  private async getConnection(): Promise<ContainerRpc> {
-    await this.ensureContainerProcess();
-    if (!this.conn) {
-      const sb = getSandbox(this.opts.sandbox, await this.sandboxName(), {
-        enableDefaultSession: false,
-      });
-      this.conn = new ContainerConnection({
-        // `containerFetch` is the documented path for HTTP, but WebSocket upgrades
-        // require `switchPort + fetch` (per @cloudflare/containers docs — see workerd #2319).
-        stub: { fetch: (req: Request) => sb.fetch(req) },
-        port: this.opts.port,
-        onClose: () => {
-          this.conn = null;
-        },
-      });
-    }
-    return this.conn.rpc() as unknown as ContainerRpc; // capnweb RpcStub<T> is structurally T at the call site
-  }
-
-  private saveWatermarks(): void {
-    // : persist the monotonic-revision watermark. The legacy
-    // `pullSinceMs` row is intentionally left in place if present — it
-    // does no harm (we don't read it) and DELETE-on-write would add a
-    // round-trip on every exec for a one-time migration.
-    this.sql.exec(
-      `INSERT OR REPLACE INTO _workspace_watermark(k, v) VALUES ('pushSeq', ?), ('pullSinceRev', ?)`,
-      this.pushSeq,
-      this.pullSinceRev,
-    );
+      .join("\n");
+    throw new Error(`Workspace: no backend reachable\n${summary}`);
   }
 }
 
-/**
- * Normalize a mount root: leading slash required, no trailing slash,
- * collapse duplicate slashes. Rejects relative paths and the bare root "/".
- */
-function normalizeMountRoot(p: string): string {
-  if (!p.startsWith("/")) throw new Error(`mount root must be absolute: ${p}`);
-  let out = p.replace(/\/+/g, "/");
-  if (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
-  if (out === "/") throw new Error(`mount root cannot be "/"`);
-  return out;
-}
-
-/**
- * Drain a workerd ReadableStream<Uint8Array> into a single Uint8Array.
- * Used to materialize the bulk-pull blob before slicing per-file views.
- */
-async function readStreamToUint8Array(
-  stream: ReadableStream<Uint8Array>,
-): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.length;
-    }
-  }
-  if (chunks.length === 1) return chunks[0];
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

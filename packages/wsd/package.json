@@ -1,0 +1,34 @@
+{
+  "name": "@cloudflare/workspace-wsd",
+  "version": "0.1.1",
+  "description": "Workspace daemon CLI and FUSE mount. Source-only; the distributable lives at @cloudflare/workspace-wsd-linux-x64.",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "wsd": "./dist/cli/wsd.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "build:bin": "node ./scripts/build-bin.mjs",
+    "build:docker": "node ./scripts/build-docker.mjs",
+    "test": "npm run build && npx -y node@22 --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "publish:linux-x64": "node ./scripts/publish-linux-x64.mjs",
+    "publish:docker": "node ./scripts/build-docker.mjs --push"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@platformatic/vfs": "^0.4.0",
+    "@cloudflare/dofs": "*",
+    "@cloudflare/workspace-rpc": "*"
+  },
+  "optionalDependencies": {
+    "fuse-native": "^2.2.6"
+  }
+}

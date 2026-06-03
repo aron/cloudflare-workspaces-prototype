@@ -1,37 +1,35 @@
-/**
- * @cloudflare/workspace
- *
- * Worker-side facade: a SQLite-backed VFS plus a `@cloudflare/sandbox`
- * container with bidirectional incremental sync.
- *
- * Companion entrypoints:
- *   `@cloudflare/workspace/worker-sandbox`    — run agent-compiled WASM in a
- *                                                Dynamic Worker isolate
- *   `@cloudflare/workspace/container-sandbox` — the container-side server
- *                                                (FUSE + capnweb)
- *   `@cloudflare/workspace/shared`            — wire types & RPC interface
- */
+// Public surface of @cloudflare/workspace.
+//
+// The package runs inside a Cloudflare Worker / Durable
+// Object. It picks a backend, holds a SyncRPC connection to
+// wsd, and exposes a file-shaped facade. Backends are
+// pluggable; today TestBackend (point at a URL) and
+// CloudflareContainerBackend (Container DO binding) ship.
 
-export { Workspace } from "./workspace.js";
-export { Vfs } from "./vfs.js";
-export type { WorkspaceOptions } from "./workspace.js";
-export { R2Bucket, GitHubRepo } from "./mounts/index.js";
+export type { DurableObjectStorageLike } from "@cloudflare/dofs";
+export type { BackendHandle, WorkspaceBackend } from "./backend.js";
+export {
+  CloudflareContainerBackend,
+  type CloudflareContainerBackendOptions,
+} from "./backends/cloudflare-container.js";
+export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";
 export type {
-  Mount, MountInput, MountFactory, MountContext, MountWriteApi, MountEntry,
-  LazyMount, EagerMount,
-  R2MountOptions,
-  GitHubRepoOptions,
-} from "./mounts/index.js";
-
-// Re-export the shared types so consumers don't need a second import path
-// for simple cases. Use `@cloudflare/workspace/shared` directly when both
-// sides of the wire need them.
-export type {
-  VfsEntry,
-  VfsChange,
-  FileStat,
-  GrepHit,
-  ExecResult,
+  ExecEncoding,
+  ExecHandle,
   ExecOptions,
-  ContainerRpc,
-} from "./shared/index.js";
+  ExecResult,
+  GetExecOptions,
+  KillSignal,
+  WorkspaceExecEvent,
+} from "./shell.js";
+export { WorkspaceShell } from "./shell.js";
+export {
+  WorkspaceExecHandleStub,
+  type WorkspaceExecOptions,
+  type WorkspaceExecResult,
+  WorkspaceFilesystemStub,
+  WorkspaceShellStub,
+  WorkspaceStub,
+} from "./stub.js";
+export { Workspace, type WorkspaceOptions } from "./workspace.js";

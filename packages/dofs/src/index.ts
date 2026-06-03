@@ -1,0 +1,46 @@
+export type { WorkspaceErrorCode, WorkspaceFsError } from "./errors.js";
+export { createWorkspaceError } from "./errors.js";
+export {
+  WorkspaceFilesystem,
+  type WorkspaceFilesystemOptions,
+} from "./fs/filesystem.js";
+export type { WorkspaceFoundEntry } from "./fs/find.js";
+export type { GrepOptions, WorkspaceGrepMatch } from "./fs/grep.js";
+export type { MkdirOptions } from "./fs/mkdir.js";
+export type { WorkspaceDirentResult } from "./fs/readdir.js";
+export type { ReadFileOptions } from "./fs/readFile.js";
+export type { RmOptions } from "./fs/rm.js";
+export type { WorkspaceStatResult } from "./fs/stat.js";
+export type { WriteFileContent, WriteFileOptions } from "./fs/writeFile.js";
+export type { SQLiteWorkspaceProviderOptions } from "./provider.js";
+export { SQLiteWorkspaceProvider } from "./provider.js";
+export { initializeSchema, ROOT_INODE, SCHEMA_VERSION } from "./schema/index.js";
+export { Database } from "./storage.js";
+export type { ApplyOptions } from "./sync/apply.js";
+// Sync protocol building blocks. The wire wiring lives in
+// @cloudflare/workspace-rpc; these are the helpers that wiring binds
+// to a Database.
+export { applyChanges, applyChangesSync } from "./sync/apply.js";
+export { stageBlob } from "./sync/blobs.js";
+export type { ChangeEntry } from "./sync/changes.js";
+export { materialiseChange } from "./sync/changes.js";
+export type { CoalesceOptions } from "./sync/coalesce.js";
+export { coalesceChanges } from "./sync/coalesce.js";
+export { fetchChanges, fetchObjects, hasObjects } from "./sync/fetch.js";
+export { DEFAULT_IGNORE, isIgnored } from "./sync/ignore.js";
+export { assertAppliedPushRev } from "./sync/invariant.js";
+export type { ManifestChunk } from "./sync/manifests.js";
+export { buildManifest, MANIFEST_VERSION } from "./sync/manifests.js";
+export { pushObjects } from "./sync/push.js";
+export type { WatermarkKey } from "./sync/watermarks.js";
+export { currentRev, readWatermark, writeWatermark } from "./sync/watermarks.js";
+export type { ExecutedStatement } from "./testing-recording.js";
+// RecordingStorage is workerd-safe (pure JS). SQLiteTestStorage
+// wraps node:sqlite and must be imported from
+// '@cloudflare/dofs/testing' under node-only call sites.
+export { RecordingStorage } from "./testing-recording.js";
+export type {
+  DurableObjectStorageLike,
+  SQLCursorLike,
+  SQLStorageLike,
+} from "./types.js";
