@@ -19,7 +19,7 @@
  *   Same trade-off the hackspace `@cloudflare/git-tools` documents.
  */
 
-import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
+import type { SQLiteWorkspaceProvider } from "@cloudflare/workspace";
 import { tool } from "ai";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";

@@ -1,0 +1,126 @@
+# Per-package + per-example check matrix. One job per workspace so a
+# regression in (say) wsd's tests doesn't hide a typecheck failure in
+# workspace. Each job is self-contained: install at the repo root,
+# build siblings whose dist/ this package's typecheck depends on,
+# then run biome + typecheck + tests scoped to that package.
+#
+# Path filter skips pure documentation changes — they have no
+# influence on any package's lint, typecheck, or test surface.
+
+name: Pull Request
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/**/*.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dofs
+            workspace: "@cloudflare/dofs"
+            path: packages/dofs
+            needs-siblings: false
+          - name: rpc
+            workspace: "@cloudflare/workspace-rpc"
+            path: packages/rpc
+            needs-siblings: true
+          - name: workspace
+            workspace: "@cloudflare/workspace"
+            path: packages/workspace
+            needs-siblings: true
+          - name: wsd
+            workspace: "@cloudflare/workspace-wsd"
+            path: packages/wsd
+            needs-siblings: true
+            # libfuse2 (libfuse.so.2) is what fuse-native binds to at
+            # runtime; fuse3 ships /dev/fuse helpers and the FUSE_SHIM
+            # tests need it for the userspace mount path.
+            system-deps: "libfuse2t64 fuse3"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - name: Install system dependencies
+        if: matrix.system-deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.system-deps }}
+
+      # Build every workspace's dist/ unconditionally for now. The
+      # workspace + wsd jobs need dofs + rpc dist, the rpc job needs
+      # dofs dist, and the cost of an extra `tsc` pass is small
+      # compared to the test runtime. Revisit per-package once
+      # @cloudflare/workspace bundles dofs + rpc internally.
+      - name: Build all workspaces
+        if: matrix.needs-siblings
+        run: npm run build --workspaces --if-present
+
+      - name: Build this package
+        if: matrix.needs-siblings == false
+        run: npm run build --workspace ${{ matrix.workspace }} --if-present
+
+      - name: Lint + format check
+        run: npx biome check ${{ matrix.path }}
+
+      - name: Typecheck
+        run: npm run typecheck --workspace ${{ matrix.workspace }} --if-present
+
+      - name: Test
+        run: npm test --workspace ${{ matrix.workspace }} --if-present
+
+  example:
+    name: example/${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: think
+            workspace: "@cloudflare/example-think"
+            path: examples/think
+          - name: wsd-container
+            workspace: "@cloudflare/example-wsd-container"
+            path: examples/wsd-container
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      # Examples consume the workspace packages via the
+      # local symlink, so the workspace's dist/ has to exist before
+      # the example's typecheck resolves its imports.
+      - run: npm run build --workspaces --if-present
+
+      - name: Generate worker types
+        run: npx wrangler types
+        working-directory: ${{ matrix.path }}
+
+      - name: Lint + format check
+        run: npx biome check ${{ matrix.path }}
+
+      - name: Typecheck
+        run: npm run typecheck --workspace ${{ matrix.workspace }} --if-present
+
+      # Examples don't ship tests today; --if-present makes this a
+      # no-op until they do.
+      - name: Test
+        run: npm test --workspace ${{ matrix.workspace }} --if-present

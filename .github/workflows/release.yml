@@ -1,0 +1,135 @@
+# Tag-triggered release. Push a `v0.1.0-alpha.N` tag and CI:
+#
+#   1. Builds every workspace.
+#   2. Runs all package tests.
+#   3. Builds the wsd linux-x64 SEA binary.
+#   4. Stamps the tag's version into the two publishable packages.
+#   5. Publishes @cloudflare/workspace with --tag alpha (so plain
+#      `npm i @cloudflare/workspace` doesn't pick up alphas).
+#   6. Publishes @cloudflare/workspace-wsd-linux-x64 with no tag
+#      (binary, gets `latest`).
+#   7. Builds + pushes the Docker image to
+#      docker.io/cloudflare/workspace-wsd-linux-x64 with the version
+#      tag and `latest` — only when the DOCKER_HUB_ACCESS_TOKEN
+#      secret is set; otherwise the step is skipped and the npm
+#      publishes above still succeed.
+#
+# npm packages use trusted publishing (OIDC); no NPM_TOKEN is
+# needed, only the workflow's `id-token: write` permission plus a
+# trusted publisher config on the @cloudflare scope that names
+# this repo + this workflow file.
+#
+# Docker Hub doesn't have an OIDC equivalent. The push uses a PAT
+# via two repo-level entries — matching the convention used by
+# cloudflare/sandbox-sdk:
+#
+#   vars.DOCKER_HUB_USERNAME       — repo variable (not secret)
+#   secrets.DOCKER_HUB_ACCESS_TOKEN — Read+Write PAT for
+#                                     docker.io/cloudflare/*
+#
+# Triggers:
+#   - push: tags ['v*']  — the normal release path
+#   - workflow_dispatch  — manual re-run for a tag that already
+#                          exists, useful when the first run
+#                          failed after a partial publish.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist, e.g. v0.1.0-alpha.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # Trusted publishing on npm requires the OIDC id-token.
+      id-token: write
+      contents: read
+    if: ${{ github.repository_owner == 'cloudflare' }}
+    env:
+      # Used everywhere a version string is needed below. The push
+      # path takes it from the tag; the manual path takes it from
+      # the dispatch input.
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # On workflow_dispatch we need to check out the named tag
+          # explicitly; the workflow itself runs from the default
+          # branch otherwise.
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+        with:
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build all workspaces
+        run: npm run build --workspaces --if-present
+
+      - name: Test
+        run: npm test --workspaces --if-present
+
+      - name: Build wsd binary
+        run: npm run build:bin --workspace @cloudflare/workspace-wsd
+
+      - name: Stage binary into wsd-linux-x64 package
+        run: |
+          mkdir -p packages/wsd-linux-x64/bin
+          cp artifacts/wsd/wsd-linux-x64 packages/wsd-linux-x64/bin/wsd
+          chmod +x packages/wsd-linux-x64/bin/wsd
+
+      - name: Sync versions
+        run: node scripts/set-versions.mjs "${RELEASE_TAG}"
+
+      # npm publishes go first so that a Docker push failure later
+      # in the workflow doesn't block the npm release. If npm
+      # itself fails the whole release backs out and the operator
+      # picks a new alpha number; if Docker fails we can re-run
+      # this workflow on the same tag (workflow_dispatch above)
+      # and `npm publish` will idempotently no-op because the
+      # version is already on the registry.
+
+      - name: Publish @cloudflare/workspace
+        run: npm publish --workspace @cloudflare/workspace --tag alpha --provenance --access public
+
+      - name: Publish @cloudflare/workspace-wsd-linux-x64
+        run: npm publish --workspace @cloudflare/workspace-wsd-linux-x64 --provenance --access public
+
+      # Docker push is gated on the PAT being configured. The first
+      # few releases may run without it (npm-only); the secret can
+      # be added later and a workflow_dispatch re-run will then
+      # cover the Docker side without re-tagging.
+      - name: Set up Docker Buildx
+        if: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Build and push wsd Docker image
+        if: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        run: npm run publish:docker --workspace @cloudflare/workspace-wsd
+
+      - name: Note skipped Docker publish
+        if: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN == '' }}
+        run: |
+          echo "::warning::DOCKER_HUB_ACCESS_TOKEN secret is not set; Docker image push was skipped." >> $GITHUB_STEP_SUMMARY
+          echo "npm publishes for ${RELEASE_TAG} completed normally." >> $GITHUB_STEP_SUMMARY

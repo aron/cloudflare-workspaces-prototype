@@ -7,7 +7,7 @@
 # (git, npm, vitest, …) see the same files the Workspace RPC
 # surface reads and writes.
 
-FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.1 AS wsd
+FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 
