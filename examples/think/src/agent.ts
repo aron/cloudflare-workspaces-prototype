@@ -489,7 +489,7 @@ export class TriageAgent extends Think<Env> {
     error?: unknown;
   }): Promise<void> {
     if (!this.#context?.debug) return;
-    await this.#postDebug({
+    this.#postDebug({
       kind: "tool-call",
       tool: ctx.toolName,
       toolCallId: ctx.toolCallId,
@@ -509,7 +509,7 @@ export class TriageAgent extends Think<Env> {
     // Skip empty steps — pure-control steps with no text, no
     // reasoning, and no tool calls don't help the watcher.
     if (text.length === 0 && reasoning.length === 0 && toolCalls.length === 0) return;
-    await this.#postDebug({
+    this.#postDebug({
       kind: "step",
       text,
       reasoning,
@@ -523,21 +523,38 @@ export class TriageAgent extends Think<Env> {
     // Submission boundary marker. Per-step content is emitted by
     // onStepFinish above; this just lets the CLI know the agent's
     // current submission has reached a terminal state.
-    await this.#postDebug({ kind: "submission-complete" });
+    this.#postDebug({ kind: "submission-complete" });
   }
 
-  async #postDebug(payload: Record<string, unknown>): Promise<void> {
+  #postDebug(payload: Record<string, unknown>): void {
     const ctx = this.#context;
     if (!ctx) return;
-    try {
-      await fetch(ctx.webhookUrl, {
+    // Fire-and-forget through waitUntil so a slow or unreachable
+    // webhook doesn't stall the agent loop. afterToolCall and
+    // onStepFinish are both awaited by Think before the next step
+    // runs; inlining the POST would pin every step on the webhook's
+    // RTT. The trade is no backpressure — fine for a debug stream,
+    // not fine for the terminal notify-done payload (which still
+    // awaits via postWebhook above).
+    const body = JSON.stringify({ type: "debug", phase: this.#phase ?? "", ...payload });
+    this.ctx.waitUntil(
+      fetch(ctx.webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "debug", phase: this.#phase ?? "", ...payload }),
-      });
-    } catch {
-      // Debug delivery is best-effort — don't crash a turn over it.
-    }
+        body,
+      })
+        .then((res) => {
+          // Drain the body so the connection can be reused; the
+          // CLI returns 204 with no payload, but other receivers
+          // might.
+          void res.body?.cancel();
+        })
+        .catch(() => {
+          // Debug delivery is best-effort — don't crash a turn
+          // over it. The error already happened off the critical
+          // path; nothing useful to log inside the DO.
+        }),
+    );
   }
 }
 
