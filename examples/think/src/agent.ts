@@ -107,8 +107,20 @@ const REPO_ROOT = "/workspace/repo";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.6";
 
 export class TriageAgent extends Think<Env> {
-  /** Wrap each turn in a durable fiber so it survives DO eviction. */
-  override chatRecovery = true;
+  /**
+   * Off. The workflow is the durable layer here — `step.do` and
+   * `step.prompt` replay deterministically through any DO eviction,
+   * and `submitMessages` is keyed by an idempotent submissionId so a
+   * replayed `runAgentTurn` reuses the prior turn's row rather than
+   * starting over. Leaving Think's per-turn chat recovery on top of
+   * that just spams `_chatRecoveryContinue timed out waiting for
+   * stable state` when an upstream call (a Workers AI 502, a Kimi
+   * context overflow) wedges a turn in a non-terminal state — the
+   * recovery loop has nothing useful to do, there is no human
+   * watching transient chat state, and the workflow's own retry is
+   * the right replay boundary for this design.
+   */
+  override chatRecovery = false;
 
   /** Plenty of budget for a triage + fix + verify loop. */
   override maxSteps = 40;
@@ -377,11 +389,21 @@ export class TriageAgent extends Think<Env> {
       "",
       `Repository will be cloned into ${REPO_ROOT}.`,
       "",
-      "Tools available:",
+      "Tools available, in preference order. Reach for `exec` last —",
+      "the dedicated tools are faster, give structured output, and",
+      "don't depend on which binaries happen to live in the",
+      "container:",
       "  - git_clone:     shallow-clone the repository.",
-      "  - read, ls:      explore the working tree.",
-      "  - write, edit:   modify files.",
-      "  - exec:          run shell commands (tests, typecheck, git).",
+      "  - read, ls:      explore the working tree. Prefer these over",
+      "                   `exec cat` / `exec ls`.",
+      "  - write, edit:   modify files. Prefer these over `exec sed`",
+      "                   / `exec tee` / shell heredocs.",
+      "  - exec:          run shell commands. Reserve this for things",
+      "                   the other tools can't do — typically the",
+      "                   project's own tests / typecheck / build",
+      "                   commands (npm test, vitest run, cargo test,",
+      "                   go test, etc.). Do NOT use it for file I/O",
+      "                   that `read` / `ls` / `write` / `edit` cover.",
       "  - report_update: progress updates back to the user.",
       "",
       "Workflow:",
