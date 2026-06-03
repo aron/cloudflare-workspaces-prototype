@@ -203,6 +203,86 @@ This is why the sync protocol survives transport failures: every
 operation has a persistent cursor, and every receiver is idempotent.
 capnweb itself is fragile, but the protocol layered on top isn't.
 
+### Stub disposal contract
+
+capnweb does not garbage-collect remote stubs. A stub kept alive on
+one side pins resources on the other side until the session ends or
+the owning side explicitly disposes it. The protocol gives every
+stub (and every result envelope returned from a method call) a
+`Symbol.dispose` method; on a long-lived WebSocket session, leaks
+accumulate until someone calls it.
+
+There are two boundaries where stubs cross in this codebase, and
+they have slightly different rules.
+
+**Boundary 1: Worker / DO ↔ wsd (capnweb over WebSocket).**
+This is the long-lived session described above. The driver code
+(`packages/rpc/src/sync-driver.ts`, `packages/workspace/src/shell.ts`)
+holds the only client-side references to result envelopes. When a
+call returns `{ stream, ... }` or `{ events, ... }`, the driver
+binds the envelope to a `using` variable so it disposes at the end
+of the scope. Drivers also drain the inner stream before disposal
+so the server side sees clean shutdown, not a cancelled stream.
+
+For callers who use the driver helpers (`pullOnce`, `pushOnce`,
+`WorkspaceShell.exec`), disposal is internal — nothing to do.
+Callers who reach into `client.sync` / `client.shell` directly to
+invoke streaming methods inherit the disposal contract: bind the
+result to `using`, or call `result[Symbol.dispose]()` after
+draining.
+
+**Boundary 2: Worker ↔ DO (Workers RPC).** This is the boundary
+`env.WSD.get(id).getWorkspace()` crosses. Returns are
+`RpcTarget`-derived stubs, not plain objects. Three live across
+the boundary:
+
+- `WorkspaceStub`, returned from `getWorkspace()`.
+- `WorkspaceExecHandleStub`, returned from `ws.shell.exec(...)`.
+- `WorkspaceFilesystemStub` and `WorkspaceShellStub`, reached as
+  properties of `WorkspaceStub` (`ws.fs`, `ws.shell`).
+
+Worker-side callers dispose the two stubs they receive by direct
+return (the first two above). The sub-stubs reached as properties
+are not independently disposable in the Workers-RPC contract —
+their lifetime is bounded by the parent stub. Disposing
+`WorkspaceStub` cascades to its `#fs` / `#shell` children on the
+DO side.
+
+The minimal correct pattern from a Worker is:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const id = env.WSD.idFromName("user-123");
+    using ws = await env.WSD.get(id).getWorkspace();
+
+    using handle = await ws.shell.exec("npm test");
+    const result = await handle.result();
+
+    return Response.json({ exitCode: result.exitCode });
+    // both `using` bindings dispose here
+  },
+} satisfies ExportedHandler<Env>;
+```
+
+Value-typed returns (`readFile` as a string, `stat`, `readdir`,
+etc.) carry no stubs; nothing to dispose. The only things that
+require `using` are values the caller stores across awaits.
+
+For short-lived Worker requests the leak per request is bounded
+and the whole session tears down with the request, so missing
+`using` is observable but not fatal. The cost shows up on
+long-lived isolates that keep grabbing fresh `WorkspaceStub`s
+(agent loops, long-running fetch handlers) and on busy exec
+workloads inside a single request.
+
+Leak discovery is instrumented via `CAPNWEB_TRACK_STUBS=1` and
+`stubSnapshot()` from `@cloudflare/workspace-rpc/debug`. wsd
+exposes the snapshot at `GET /__wsd/stubs` when the flag is set;
+the soak script at `script/wsd-stub-soak.mjs` and the workerd
+soak at `packages/workspace/tests/stub-soak.test.ts` use it to
+prove no unbounded growth under sustained workloads.
+
 ## Hibernation
 
 > [!NOTE]
