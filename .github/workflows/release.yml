@@ -1,0 +1,80 @@
+# Tag-triggered release. Push a `v0.1.0-alpha.N` tag and CI:
+#
+#   1. Builds every workspace.
+#   2. Runs all package tests.
+#   3. Builds the wsd linux-x64 SEA binary + Docker image.
+#   4. Stamps the tag's version into the two publishable packages.
+#   5. Publishes @cloudflare/workspace with --tag alpha (so plain
+#      `npm i @cloudflare/workspace` doesn't pick up alphas).
+#   6. Publishes @cloudflare/workspace-wsd-linux-x64 with no tag
+#      (binary, gets `latest`).
+#   7. Pushes the Docker image to docker.io/cloudflare/workspace-
+#      wsd-linux-x64 with the version tag and `latest`.
+#
+# npm packages use trusted publishing (OIDC); no NPM_TOKEN secret
+# is needed. The Docker push uses a DOCKER_HUB_TOKEN repo secret.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # Trusted publishing on npm requires the OIDC id-token.
+      id-token: write
+      contents: read
+    if: ${{ github.repository_owner == 'cloudflare' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+        with:
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build all workspaces
+        run: npm run build --workspaces --if-present
+
+      - name: Test
+        run: npm test --workspaces --if-present
+
+      - name: Build wsd binary
+        run: npm run build:bin --workspace @cloudflare/workspace-wsd
+
+      - name: Stage binary into wsd-linux-x64 package
+        run: |
+          mkdir -p packages/wsd-linux-x64/bin
+          cp artifacts/wsd/wsd-linux-x64 packages/wsd-linux-x64/bin/wsd
+          chmod +x packages/wsd-linux-x64/bin/wsd
+
+      - name: Sync versions
+        run: node scripts/set-versions.mjs "${GITHUB_REF_NAME}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: cloudflare
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push wsd Docker image
+        run: npm run publish:docker --workspace @cloudflare/workspace-wsd
+
+      - name: Publish @cloudflare/workspace
+        run: npm publish --workspace @cloudflare/workspace --tag alpha --provenance --access public
+
+      - name: Publish @cloudflare/workspace-wsd-linux-x64
+        run: npm publish --workspace @cloudflare/workspace-wsd-linux-x64 --provenance --access public

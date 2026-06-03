@@ -11,7 +11,15 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { argv } from "node:process";
 
-const PACKAGES = ["packages/workspace/package.json", "packages/wsd-linux-x64/package.json"];
+const PACKAGES = [
+  "packages/workspace/package.json",
+  "packages/wsd-linux-x64/package.json",
+  // wsd itself stays private, but its package.json version is what
+  // the build-docker.mjs script reads to tag the published image.
+  // Keeping it in lockstep means the docker tag matches the npm
+  // tag.
+  "packages/wsd/package.json",
+];
 
 const raw = argv[2];
 if (raw === undefined) {
