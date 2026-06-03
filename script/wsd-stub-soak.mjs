@@ -1,27 +1,25 @@
 #!/usr/bin/env node
 
 // wsd-stub-soak.mjs — soak the long-lived WebSocket session against a
-// running wsd and sample the per-class live-stub counters exposed at
-// GET /__wsd/stubs.
+// running wsd and watch two signals:
 //
-// The goal is leak discovery, not load testing: at a quiet point
-// after the workload finishes, every counter that isn't a root
-// session target should be zero. Anything non-zero is a leak we
-// need to plug before shipping long-lived sessions to production.
+//   1. capnweb session stats. We construct the client-side RpcSession
+//      ourselves (using the same WebSocketTransport shape capnweb's
+//      newWebSocketRpcSession uses) so we can call session.getStats()
+//      between phases. Stats are { imports, exports } — entries in the
+//      session's stub tables. Unbounded growth there is the leak.
+//
+//   2. Our per-class RpcTarget counter (GET /__wsd/stubs). Less precise
+//      but catches leaks in our own code rather than capnweb's tables.
 //
 // Workload (defaults — override via env):
 //
-//   SOAK_SYNC_TICKS    number of pullOnce calls    (default 50)
-//   SOAK_EXEC_CALLS    number of shell.exec calls  (default 100)
-//   SOAK_FETCH_CALLS   number of fetchChanges-only calls (default 50)
-//   SOAK_QUIET_MS      idle window before final sample    (default 500)
+//   SOAK_SYNC_TICKS    hasObjects calls            (default 50)
+//   SOAK_FETCH_CALLS   fetchChanges calls          (default 50)
+//   SOAK_EXEC_CALLS    shell.exec calls            (default 100)
+//   SOAK_QUIET_MS      idle window before final sample (default 500)
 //
-// Knobs you usually leave alone:
-//
-//   WSD_BINARY         path to the wsd CLI (default: package dist)
-//
-// Output is human-readable on stderr (progress + final table) and a
-// JSON summary on stdout, suitable for piping into jq.
+// Output: human progress on stderr, JSON summary on stdout.
 
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -29,11 +27,11 @@ import { request } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
-import { createWorkspaceClient } from "@cloudflare/workspace-rpc/client";
-import { pullOnce } from "@cloudflare/workspace-rpc/driver";
+import { RpcSession } from "capnweb";
+import WebSocket from "ws";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -47,32 +45,118 @@ const FETCH_CALLS = Number(process.env.SOAK_FETCH_CALLS ?? "50");
 const QUIET_MS = Number(process.env.SOAK_QUIET_MS ?? "500");
 
 // ───────────────────────────────────────────────────────────────────
-// Helpers
+// WebSocketTransport, ported from capnweb/src/websocket.ts. We need
+// to instantiate RpcSession ourselves so we can read getStats(); the
+// public newWebSocketRpcSession() helper discards the session object.
+
+class WebSocketTransport {
+  constructor(webSocket) {
+    this._ws = webSocket;
+    this._sendQueue = [];
+    this._receiveQueue = [];
+    this._receiveResolver = undefined;
+    this._receiveRejecter = undefined;
+    this._error = undefined;
+    this._opened = webSocket.readyState === WebSocket.OPEN;
+
+    if (!this._opened) {
+      webSocket.addEventListener("open", () => {
+        try {
+          for (const m of this._sendQueue) webSocket.send(m);
+        } catch (err) {
+          this._receivedError(err);
+        }
+        this._sendQueue = undefined;
+        this._opened = true;
+      });
+    } else {
+      this._sendQueue = undefined;
+    }
+
+    webSocket.addEventListener("message", (event) => {
+      if (this._error) return;
+      const data = typeof event.data === "string" ? event.data : event.data?.toString("utf8");
+      if (typeof data !== "string") {
+        this._receivedError(new TypeError("non-string ws message"));
+        return;
+      }
+      if (this._receiveResolver) {
+        const r = this._receiveResolver;
+        this._receiveResolver = undefined;
+        this._receiveRejecter = undefined;
+        r(data);
+      } else {
+        this._receiveQueue.push(data);
+      }
+    });
+
+    webSocket.addEventListener("close", (event) => {
+      this._receivedError(new Error(`Peer closed WebSocket: ${event.code} ${event.reason}`));
+    });
+    webSocket.addEventListener("error", () => {
+      this._receivedError(new Error("WebSocket connection failed."));
+    });
+  }
+
+  async send(message) {
+    if (this._sendQueue !== undefined) this._sendQueue.push(message);
+    else this._ws.send(message);
+  }
+
+  async receive() {
+    if (this._receiveQueue.length > 0) return this._receiveQueue.shift();
+    if (this._error) throw this._error;
+    return new Promise((res, rej) => {
+      this._receiveResolver = res;
+      this._receiveRejecter = rej;
+    });
+  }
+
+  abort(reason) {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    try {
+      this._ws.close(3000, message);
+    } catch {}
+    if (!this._error) this._error = reason;
+  }
+
+  _receivedError(reason) {
+    if (this._error) return;
+    this._error = reason;
+    if (this._receiveRejecter) {
+      const r = this._receiveRejecter;
+      this._receiveResolver = undefined;
+      this._receiveRejecter = undefined;
+      r(reason);
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// HTTP helpers
 
 function getAvailablePort() {
-  return new Promise((resolveP, rejectP) => {
+  return new Promise((res, rej) => {
     const s = createServer();
-    s.once("error", rejectP);
+    s.once("error", rej);
     s.listen(0, "127.0.0.1", () => {
       const port = s.address().port;
-      s.close((err) => (err ? rejectP(err) : resolveP(port)));
+      s.close((err) => (err ? rej(err) : res(port)));
     });
   });
 }
 
 function httpGet(url) {
-  return new Promise((resolveP, rejectP) => {
-    const req = request(url, (res) => {
+  return new Promise((res, rej) => {
+    const req = request(url, (r) => {
       let body = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => {
+      r.setEncoding("utf8");
+      r.on("data", (c) => {
         body += c;
       });
-      res.on("end", () =>
-        resolveP({ statusCode: res.statusCode ?? 0, body }),
-      );
+      r.on("end", () => res({ statusCode: r.statusCode ?? 0, body }));
     });
-    req.once("error", rejectP);
+    req.once("error", rej);
     req.end();
   });
 }
@@ -86,29 +170,18 @@ async function waitForHealth(port, child, deadlineMs = 5000) {
     try {
       const r = await httpGet(`http://127.0.0.1:${port}/health`);
       if (r.statusCode === 200) return;
-    } catch {
-      // not up yet
-    }
+    } catch {}
     await sleep(50);
   }
   throw new Error("wsd never reported healthy");
 }
 
-async function snapshot(port) {
+async function targetSnapshot(port) {
   const r = await httpGet(`http://127.0.0.1:${port}/__wsd/stubs`);
   if (r.statusCode !== 200) {
-    throw new Error(
-      `/__wsd/stubs returned ${r.statusCode}: ${r.body.slice(0, 200)}`,
-    );
+    throw new Error(`/__wsd/stubs returned ${r.statusCode}: ${r.body.slice(0, 200)}`);
   }
   return JSON.parse(r.body);
-}
-
-function diff(a, b) {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  const out = {};
-  for (const k of keys) out[k] = (b[k] ?? 0) - (a[k] ?? 0);
-  return out;
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -149,48 +222,52 @@ async function main() {
     await rm(mountPoint, { recursive: true, force: true });
   };
 
+  const phases = []; // { label, sessionStats, targets }
+  async function sample(session, label) {
+    const sessionStats = session.getStats();
+    const targets = await targetSnapshot(port);
+    phases.push({ label, sessionStats, targets });
+    console.error(
+      `[soak] ${label.padEnd(22)} imports=${sessionStats.imports} exports=${sessionStats.exports}  targets=${JSON.stringify(targets)}`,
+    );
+  }
+
   try {
     await waitForHealth(port, child);
     console.error("[soak] wsd healthy");
 
-    // Baseline before any client work. The server-side composite +
-    // sync + shell RpcTargets are created on first ws session, so
-    // this should be empty.
-    const baseline = await snapshot(port);
-    console.error("[soak] baseline:", JSON.stringify(baseline));
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    await new Promise((res, rej) => {
+      ws.once("open", res);
+      ws.once("error", rej);
+    });
+    const transport = new WebSocketTransport(ws);
+    const session = new RpcSession(transport);
+    const stub = session.getRemoteMain();
 
-    const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
+    await sample(session, "afterConnect");
 
-    // After the WS handshake settles, the server should have a
-    // SyncRPCServer + ShellRPCServer + WorkspaceRPCServer alive
-    // (the root targets capnweb holds for the session).
-    await client.sync.watermarks();
-    await sleep(50);
-    const afterConnect = await snapshot(port);
-    console.error("[soak] after-connect:", JSON.stringify(afterConnect));
+    // Warm a watermarks call so any first-touch lazy-init lands before
+    // we start sampling deltas.
+    await stub.sync.watermarks();
+    await sample(session, "afterFirstCall");
 
-    // Sync ticks. pullOnce calls fetchChanges + fetchObjects each
-    // tick. The result envelopes are exactly what we suspect leak.
-    console.error(`[soak] ${SYNC_TICKS} sync ticks…`);
-    // pullOnce wants a Database; we can't easily get one without
-    // wiring dofs in. Instead drive fetchChanges directly — same
-    // call sites, no DB required, and the leak (if any) shows up
-    // here regardless.
-    void pullOnce; // referenced for the comment above; unused below
+    // Phase 1: pure-value calls. No stub envelopes in the response, so
+    // exports/imports shouldn't move.
+    console.error(`[soak] ${SYNC_TICKS} hasObjects calls…`);
     for (let i = 0; i < SYNC_TICKS; i++) {
-      // hasObjects is a pure RPC method that returns a value (no
-      // stub envelope). Use it to interleave traffic.
-      await client.sync.hasObjects([]);
+      await stub.sync.hasObjects([]);
     }
+    await sample(session, "afterHasObjects");
 
-    // fetchChanges calls — these return stream envelopes.
-    console.error(`[soak] ${FETCH_CALLS} fetchChanges calls…`);
+    // Phase 2: fetchChanges. Returns { currentRev, appliedPushRev, stream }.
+    // The stream is an RpcStream-ish object — capnweb tracks it in the
+    // exports table. We drain it but DO NOT dispose the envelope.
+    console.error(`[soak] ${FETCH_CALLS} fetchChanges calls (no disposal)…`);
     for (let i = 0; i < FETCH_CALLS; i++) {
-      const result = await client.sync.fetchChanges({ sinceRev: 0, ignore: [] });
-      // Drain the stream so it closes cleanly server-side.
+      const result = await stub.sync.fetchChanges({ sinceRev: 0, ignore: [] });
       const reader = result.stream.getReader();
       try {
-        // biome-ignore lint/correctness/noConstantCondition: drain loop
         while (true) {
           const { done } = await reader.read();
           if (done) break;
@@ -198,21 +275,17 @@ async function main() {
       } finally {
         reader.releaseLock();
       }
-      // Intentionally NOT disposing `result` — this is the call
-      // site we want to observe.
+      // intentionally NOT disposing result
     }
+    await sample(session, "afterFetchChanges");
 
-    // exec calls — each returns { id, events: ReadableStream }, the
-    // stream half is where Workers RPC handle stubs would normally
-    // accumulate.
-    console.error(`[soak] ${EXEC_CALLS} exec calls…`);
+    // Phase 3: exec. Returns { id, events }. Same drain-but-don't-dispose
+    // pattern as fetchChanges.
+    console.error(`[soak] ${EXEC_CALLS} exec calls (no disposal)…`);
     for (let i = 0; i < EXEC_CALLS; i++) {
-      const { events } = await client.shell.exec({
-        command: "true",
-      });
-      const reader = events.getReader();
+      const result = await stub.shell.exec({ command: "true" });
+      const reader = result.events.getReader();
       try {
-        // biome-ignore lint/correctness/noConstantCondition: drain loop
         while (true) {
           const { done } = await reader.read();
           if (done) break;
@@ -221,61 +294,83 @@ async function main() {
         reader.releaseLock();
       }
     }
+    await sample(session, "afterExec");
 
-    const afterWorkload = await snapshot(port);
-    console.error("[soak] after-workload:", JSON.stringify(afterWorkload));
-
-    // Quiet window: let any deferred dispose ticks land.
+    // Phase 4: idle quiet window. Anything deferred (post-call dispose
+    // ticks) should fire here.
     await sleep(QUIET_MS);
-    const afterQuiet = await snapshot(port);
-    console.error("[soak] after-quiet:", JSON.stringify(afterQuiet));
+    await sample(session, "afterQuiet");
 
-    // Close the session — disposing the root stub should fire
-    // dispose on the three root targets too.
-    await client.close();
+    // Phase 5: now DO dispose the envelopes — repeat fetchChanges with
+    // [Symbol.dispose]() at the end. If exports stays flat across both
+    // phases, capnweb is auto-disposing; if it only stays flat here,
+    // we know the call sites need explicit disposal.
+    console.error(`[soak] ${FETCH_CALLS} fetchChanges calls (with disposal)…`);
+    for (let i = 0; i < FETCH_CALLS; i++) {
+      const result = await stub.sync.fetchChanges({ sinceRev: 0, ignore: [] });
+      const reader = result.stream.getReader();
+      try {
+        while (true) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      result[Symbol.dispose]?.();
+    }
     await sleep(QUIET_MS);
-    const afterClose = await snapshot(port);
-    console.error("[soak] after-close:", JSON.stringify(afterClose));
+    await sample(session, "afterFetchDisposed");
 
-    // ─── Verdict ────────────────────────────────────────────────
-    const growth = diff(afterConnect, afterQuiet);
-    const leakedAfterClose = afterClose;
+    console.error(`[soak] ${EXEC_CALLS} exec calls (with disposal)…`);
+    for (let i = 0; i < EXEC_CALLS; i++) {
+      const result = await stub.shell.exec({ command: "true" });
+      const reader = result.events.getReader();
+      try {
+        while (true) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      result[Symbol.dispose]?.();
+    }
+    await sleep(QUIET_MS);
+    await sample(session, "afterExecDisposed");
+
+    // Close root stub + socket.
+    stub[Symbol.dispose]?.();
+    ws.close();
+    await sleep(QUIET_MS);
+
+    // ─── Summary ────────────────────────────────────────────────
+    const baselineExports = phases[1].sessionStats.exports; // afterFirstCall
+    const baselineImports = phases[1].sessionStats.imports;
 
     const summary = {
       config: { SYNC_TICKS, EXEC_CALLS, FETCH_CALLS, QUIET_MS },
-      baseline,
-      afterConnect,
-      afterWorkload,
-      afterQuiet,
-      afterClose,
-      growthDuringWorkload: growth,
-      liveAfterClose: leakedAfterClose,
+      phases,
+      growth: phases.map((p) => ({
+        label: p.label,
+        imports: p.sessionStats.imports - baselineImports,
+        exports: p.sessionStats.exports - baselineExports,
+      })),
     };
 
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 
-    // Human-readable verdict.
-    const leaks = Object.entries(growth).filter(([, v]) => v !== 0);
-    const stillLiveAfterClose = Object.entries(leakedAfterClose).filter(
-      ([, v]) => v !== 0,
-    );
-
-    console.error("\n[soak] verdict:");
-    if (leaks.length === 0) {
-      console.error("  ✓ no growth during workload");
-    } else {
-      console.error("  ✗ growth during workload:");
-      for (const [k, v] of leaks) {
-        console.error(`      ${k}: +${v}`);
-      }
-    }
-    if (stillLiveAfterClose.length === 0) {
-      console.error("  ✓ all stubs disposed after client.close()");
-    } else {
-      console.error("  ✗ live stubs after client.close():");
-      for (const [k, v] of stillLiveAfterClose) {
-        console.error(`      ${k}: ${v}`);
-      }
+    console.error("\n[soak] growth vs afterFirstCall:");
+    for (const g of summary.growth) {
+      const tag =
+        g.imports === 0 && g.exports === 0
+          ? "  "
+          : g.imports > 0 || g.exports > 0
+            ? "↑ "
+            : "↓ ";
+      console.error(
+        `  ${tag}${g.label.padEnd(22)} Δimports=${String(g.imports).padStart(4)}  Δexports=${String(g.exports).padStart(4)}`,
+      );
     }
   } finally {
     await cleanup();
