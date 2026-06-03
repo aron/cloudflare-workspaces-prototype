@@ -3,12 +3,10 @@ declare namespace Cloudflare {
     Agent:          DurableObjectNamespace<import("./src/agent").Agent>;
     App:          DurableObjectNamespace<import("./src/app").App>;
     Room:         DurableObjectNamespace<import("./src/room").Room>;
-    Sandbox:        DurableObjectNamespace<import("@cloudflare/sandbox").Sandbox>;
+    Sandbox:        DurableObjectNamespace<import("./src/sandbox").Sandbox>;
     WarmPool:       DurableObjectNamespace<import("./src/warm-pool").WarmPool>;
     AI:             Ai;
-    LOADER:         WorkerLoader;
     SKILLS:         R2Bucket;
-    Artifacts:      import("@cloudflare/workspace/git").ArtifactsBinding;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
     BRAVE_API_KEY?:  string;

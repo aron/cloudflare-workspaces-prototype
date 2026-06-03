@@ -133,6 +133,12 @@ export function isAssignmentStateUsable(status: string): boolean {
  * configurable via the bridge, but defaults to "Sandbox".
  */
 interface WarmPoolEnv {
+  // The Sandbox DO is defined in apps/agent/src/sandbox.ts and
+  // implements `startAndWaitForPorts`, `stop`, `getState`, and
+  // `renewActivityTimeout` as RPC methods — the same surface the
+  // old `@cloudflare/sandbox` SDK exposed via its Container base
+  // class. Typed loosely here because the pool only depends on
+  // those four methods.
   Sandbox: DurableObjectNamespace;
   [key: string]: unknown;
 }

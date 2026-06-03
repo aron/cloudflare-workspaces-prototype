@@ -1,17 +1,24 @@
 /**
  * Tiny client helper for talking to the WarmPool Durable Object.
  *
- * Mirrors the bridge's pool resolution pattern: every request configures
- * the pool with current vars (idempotent) and asks it to resolve the
- * caller's sandbox id into a container UUID. The UUID is what we then
- * pass to `getSandbox(env.Sandbox, ...)` — that way the pool's pre-
- * started container is the one we end up using.
+ * Every request reconfigures the pool from current env vars
+ * (idempotent) and asks it to resolve the caller's session id into
+ * a Sandbox DO name. The name then drives
+ * `env.Sandbox.idFromName(...)` to fetch the actual DO stub.
+ *
+ * The pool was originally written against the `@cloudflare/sandbox`
+ * SDK and called these IDs "container UUIDs". Same concept, same
+ * representation — we just feed them into the new Sandbox DO instead
+ * of the old SDK's `getSandbox()`.
  */
 
 import type { WarmPool, WarmPoolConfig } from "./warm-pool.js";
+import type { Sandbox } from "./sandbox.js";
+import type { WorkspaceStub } from "@cloudflare/workspace";
 
 interface PoolEnv {
   WarmPool: DurableObjectNamespace<WarmPool>;
+  Sandbox:  DurableObjectNamespace<Sandbox>;
   WARM_POOL_TARGET?:                string;
   WARM_POOL_REFRESH_INTERVAL?:      string;
   WARM_POOL_ASSIGNMENT_IDLE_TTL_MS?: string;
@@ -65,4 +72,18 @@ export async function primePool(env: PoolEnv): Promise<void> {
 /** Pool stats, for debug endpoints. */
 export async function poolStats(env: PoolEnv) {
   return poolStub(env).getStats();
+}
+
+/**
+ * Resolve a session id all the way through to a connected
+ * WorkspaceStub. Convenience helper for the debug routes and any
+ * other caller that doesn't need the underlying Sandbox stub.
+ */
+export async function sandboxForSession(
+  env: PoolEnv,
+  sessionId: string,
+): Promise<WorkspaceStub> {
+  const name = await resolveContainerId(env, sessionId);
+  const stub = env.Sandbox.get(env.Sandbox.idFromName(name));
+  return stub.getWorkspace();
 }

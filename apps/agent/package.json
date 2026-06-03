@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --ip 0.0.0.0",
-    "predeploy": "bash sandbox/sync-host-ca.sh && npm run build --workspace=@cloudflare/workspace && npm run build --workspace=@app/frontend",
+    "predeploy": "npm run build --workspace=@cloudflare/workspace-wsd && npm run build --workspace=@cloudflare/workspace && npm run build --workspace=@app/frontend",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tests/agent-suite/tsconfig.json",
     "test": "vitest run && vitest run --config tests/agent-suite/vitest.config.ts",
@@ -20,7 +20,6 @@
     "@cloudflare/containers": "^0.3.4",
     "@cloudflare/fs-tools": "*",
     "@cloudflare/git-tools": "*",
-    "@cloudflare/sandbox": "^0.10.3",
     "@cloudflare/shell": "^0.3.8",
     "@cloudflare/think": "^0.7.2",
     "@cloudflare/web-tools": "*",

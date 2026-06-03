@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { routeAgentRequest } from "agents";
 import { Agent, SubAgent } from "./agent.js";
-import { Sandbox, getSandbox } from "@cloudflare/sandbox";
+import { Sandbox, WorkspaceProxy } from "./sandbox.js";
 import { WarmPool } from "./warm-pool.js";
-import { resolveContainerId, poolStats, primePool } from "./pool.js";
+import { resolveContainerId, poolStats, primePool, sandboxForSession } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
 import { Room } from "./room.js";
 import {
@@ -13,7 +13,7 @@ import {
 } from "./identity.js";
 import { resolveBaseUrl, withBaseUrl } from "./base-url.js";
 
-export { Agent, SubAgent, App, Room, Sandbox, WarmPool };
+export { Agent, SubAgent, App, Room, Sandbox, WarmPool, WorkspaceProxy };
 
 type Variables = { identity: AccessIdentity; baseUrl: string };
 
@@ -207,56 +207,59 @@ app.all("/api/threads/:id", (c) => {
 //
 // Debug routes hit the same warm-pool container the agent uses, plus a
 // passthrough to the Agent DO for messages/vfs/reset.
+// Debug routes drive the same Sandbox DO the agent uses, but pull
+// the workspace stub directly rather than reaching through the
+// agent's chat layer. Replaces the old `@cloudflare/sandbox` SDK
+// route helpers (`getSandbox(...).exec / .readFile`) with the new
+// `WorkspaceStub.shell.exec` / `fs.readFile` surface.
 app.post("/debug/:sessionId/exec", async (c) => {
-  const sb = getSandbox(
-    c.env.Sandbox,
-    await resolveContainerId(c.env, c.req.param("sessionId")),
-    { enableDefaultSession: false },
-  );
+  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
   const { command, cwd } = (await c.req.json()) as {
     command: string;
     cwd?: string;
   };
-  return Response.json(await sb.exec(command, { cwd }));
+  const handle = await ws.shell.exec(command, { cwd, encoding: "utf8" });
+  const result = await handle.result();
+  return Response.json(result);
 });
 
 app.get("/debug/:sessionId/env", async (c) => {
-  const sb = getSandbox(
-    c.env.Sandbox,
-    await resolveContainerId(c.env, c.req.param("sessionId")),
-    { enableDefaultSession: false },
-  );
+  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
+  const probe = async (command: string) => {
+    try {
+      const handle = await ws.shell.exec(command, { encoding: "utf8" });
+      return await handle.result();
+    } catch (err) {
+      return { exitCode: -1, stdout: "", stderr: String(err) };
+    }
+  };
   const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] =
     await Promise.all([
-      sb.exec("zig version"),
-      sb.exec("go version"),
-      sb.exec("node --version"),
-      sb.exec("esbuild --version"),
-      sb.exec("wrangler --version"),
-      sb.exec("uname -a"),
-      sb.exec("cat /proc/mounts | grep fuse || echo no-fuse"),
-      sb.exec("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
+      probe("zig version"),
+      probe("go version"),
+      probe("node --version"),
+      probe("esbuild --version"),
+      probe("wrangler --version"),
+      probe("uname -a"),
+      probe("cat /proc/mounts | grep fuse || echo no-fuse"),
+      probe("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
     ]);
   return Response.json({
-    zig,
-    go,
-    node,
-    esbuild,
-    wrangler,
-    uname,
-    mounts,
-    fuse,
+    zig, go, node, esbuild, wrangler, uname, mounts, fuse,
   });
 });
 
 app.get("/debug/:sessionId/logs", async (c) => {
-  const sb = getSandbox(
-    c.env.Sandbox,
-    await resolveContainerId(c.env, c.req.param("sessionId")),
-    { enableDefaultSession: false },
-  );
-  const file = await sb.readFile("/tmp/server.log");
-  return new Response(file?.content ?? "(no log file yet)", {
+  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
+  // wsd's stdio log lives under /tmp inside the container. The
+  // workspace shell can `cat` it back for us; the old SDK had a
+  // dedicated readFile RPC, but the container's /tmp isn't part of
+  // the synced workspace tree so a shell read is the right path.
+  const handle = await ws.shell.exec("cat /tmp/server.log || true", {
+    encoding: "utf8",
+  });
+  const result = await handle.result();
+  return new Response(result.stdout || "(no log file yet)", {
     headers: { "content-type": "text/plain" },
   });
 });
