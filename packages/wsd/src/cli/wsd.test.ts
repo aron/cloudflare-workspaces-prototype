@@ -1,14 +1,17 @@
-const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
-const fs = require("node:fs/promises");
-const http = require("node:http");
-const net = require("node:net");
-const os = require("node:os");
-const path = require("node:path");
-const { test } = require("node:test");
-const { detectFUSEBackend } = require("../../dist/fuse/index.js");
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import http from "node:http";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const packageRoot = path.resolve(__dirname, "../..");
+import { expect, onTestFinished, test } from "vitest";
+
+import { detectFUSEBackend } from "../fuse/index.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const packageRoot = path.resolve(here, "../..");
 const cliPath = path.join(packageRoot, "dist", "cli", "wsd.cjs");
 
 test("wsd rejects relative MOUNT_POINT values", async () => {
@@ -20,8 +23,8 @@ test("wsd rejects relative MOUNT_POINT values", async () => {
   });
 
   const { code, stderr } = await waitForExit(child);
-  assert.equal(code, 1);
-  assert.match(stderr, /MOUNT_POINT must be an absolute path/);
+  expect(code).toBe(1);
+  expect(stderr).toMatch(/MOUNT_POINT must be an absolute path/);
 });
 
 test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
@@ -42,8 +45,8 @@ test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
   });
 
   const { code, stderr } = await waitForExit(child);
-  assert.equal(code, 1);
-  assert.match(stderr, /EXEC_LOG_MAX_BYTES must be a positive integer/);
+  expect(code).toBe(1);
+  expect(stderr).toMatch(/EXEC_LOG_MAX_BYTES must be a positive integer/);
 });
 
 test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (t) => {
@@ -55,39 +58,39 @@ test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (t)
   const logFile = path.join(dir, "wsd.log");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, {
+  await startWsd({
     port,
     mountPoint,
     env: { DISABLE_FUSE: "1", LOG_FILE: logFile },
   });
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  onTestFinished(() => fs.rm(dir, { recursive: true, force: true }));
 
   const contents = await fs.readFile(logFile, "utf8");
-  assert.match(contents, /\[info\] wsd listening on/);
+  expect(contents).toMatch(/\[info\] wsd listening on/);
 });
 
-test("wsd exposes file IO through the mounted filesystem", async (t) => {
+test("wsd exposes file IO through the mounted filesystem", async (ctx) => {
   const backend = await detectFUSEBackend();
   if (backend.kind === "none") {
-    t.skip(backend.reason);
+    ctx.skip(backend.reason);
     return;
   }
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint });
+  await startWsd({ port, mountPoint });
 
   const health = await request(`http://127.0.0.1:${port}/health`);
-  assert.equal(health.statusCode, 200);
-  assert.equal(health.body, "ok\n");
+  expect(health.statusCode).toBe(200);
+  expect(health.body).toBe("ok\n");
 
   const root = await request(`http://127.0.0.1:${port}/`);
-  assert.equal(root.statusCode, 200);
-  assert.deepEqual(JSON.parse(root.body), {});
+  expect(root.statusCode).toBe(200);
+  expect(JSON.parse(root.body)).toEqual({});
 
   const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
-  assert.equal(info.statusCode, 200);
-  assert.deepEqual(JSON.parse(info.body), {
+  expect(info.statusCode).toBe(200);
+  expect(JSON.parse(info.body)).toEqual({
     backend,
     mountPoint,
     port,
@@ -95,19 +98,19 @@ test("wsd exposes file IO through the mounted filesystem", async (t) => {
 
   await fs.mkdir(path.join(mountPoint, "dir"));
   await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello fuse");
-  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello fuse");
+  expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello fuse");
 });
 
-test("/ws serves a capnweb WorkspaceRPC session", async (t) => {
+test("/ws serves a capnweb WorkspaceRPC session", async (ctx) => {
   const { createWorkspaceClient } = await import("@cloudflare/workspace-rpc/client");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
 
   const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
   try {
     // hasObjects against a fresh DB returns the empty subset.
-    assert.deepEqual(await client.sync.hasObjects([]), []);
+    expect(await client.sync.hasObjects([])).toEqual([]);
     // fetchChanges streams zero entries against a fresh DB.
     const { stream } = await client.sync.fetchChanges({ sinceRev: 0, ignore: [] });
     const reader = stream.getReader();
@@ -117,42 +120,42 @@ test("/ws serves a capnweb WorkspaceRPC session", async (t) => {
       if (done) break;
       entries.push(value);
     }
-    assert.deepEqual(entries, []);
+    expect(entries).toEqual([]);
   } finally {
     await client.close();
   }
 });
 
-test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (t) => {
+test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (ctx) => {
   const { newHttpBatchRpcSession } = await import("capnweb");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
 
   // HTTP batch flushes on first await; each call is a fresh session.
   const stub = newHttpBatchRpcSession(`http://127.0.0.1:${port}/api`);
-  assert.deepEqual(await stub.sync.hasObjects([]), []);
+  expect(await stub.sync.hasObjects([])).toEqual([]);
 });
 
-test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (t) => {
+test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (ctx) => {
   // No FUSE backend required — the shim runs in user space and is
   // explicitly opt-in via FUSE_SHIM=1. Mirrors the real-FUSE test
   // above but for the dev fallback path.
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-"));
-  await startWsd(t, { port, mountPoint, env: { FUSE_SHIM: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_SHIM: "1" } });
 
   const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
-  assert.equal(info.statusCode, 200);
+  expect(info.statusCode).toBe(200);
   const parsed = JSON.parse(info.body);
-  assert.equal(parsed.backend.kind, "shim");
-  assert.equal(parsed.mountPoint, mountPoint);
+  expect(parsed.backend.kind).toBe("shim");
+  expect(parsed.mountPoint).toBe(mountPoint);
 
   // Disk → VFS: writing into the mount point should land in the VFS
   // and round-trip back through the shim onto disk.
   await fs.mkdir(path.join(mountPoint, "dir"));
   await fs.writeFile(path.join(mountPoint, "dir", "hello.txt"), "hello shim");
-  assert.equal(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8"), "hello shim");
+  expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello shim");
 });
 
 test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
@@ -170,18 +173,18 @@ test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
   });
 
   const { code, stderr } = await waitForExit(child);
-  assert.equal(code, 1);
-  assert.match(stderr, /mutually exclusive/);
+  expect(code).toBe(1);
+  expect(stderr).toMatch(/mutually exclusive/);
 });
 
-test("/connect re-dial tears down the prior WebSocket session", async (t) => {
+test("/connect re-dial tears down the prior WebSocket session", async (ctx) => {
   // After a DO hibernate, the new incarnation calls POST /connect
   // again to bootstrap a fresh capnweb session against the still-
   // running wsd. wsd must close the previous outbound socket before
   // opening the new one — otherwise the old session leaks for the
   // life of the container and the DO ends up with two halves of two
   // sessions tangled together.
-  const { WebSocketServer } = require("ws");
+  const { WebSocketServer } = await import("ws");
   const peerPort = await getAvailablePort();
   const opened = [];
   const peerSockets = new Set();
@@ -213,7 +216,7 @@ test("/connect re-dial tears down the prior WebSocket session", async (t) => {
     });
   });
   await new Promise((resolve) => peerServer.listen(peerPort, "127.0.0.1", resolve));
-  t.after(
+  onTestFinished(
     () =>
       new Promise((resolve) => {
         // Force-destroy any lingering TCP sockets so peerServer.close()
@@ -227,12 +230,12 @@ test("/connect re-dial tears down the prior WebSocket session", async (t) => {
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd(t, { port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
 
   const peerUrl = `http://127.0.0.1:${peerPort}`;
   const connect = async () => {
     const res = await postJson(`http://127.0.0.1:${port}/connect`, { url: peerUrl });
-    assert.equal(res.statusCode, 200);
+    expect(res.statusCode).toBe(200);
   };
 
   await connect();
@@ -244,18 +247,19 @@ test("/connect re-dial tears down the prior WebSocket session", async (t) => {
   await waitFor(() => opened.length === 2);
   // The prior socket must be closed by the time the new one lands.
   await waitFor(() => opened[0].closed);
-  assert.equal(opened[0].closed, true, "first peer WS should be closed after re-POST /connect");
-  assert.equal(opened[1].closed, false, "second peer WS should still be open");
+  expect(opened[0].closed).toBe(true, "first peer WS should be closed after re-POST /connect");
+  expect(opened[1].closed).toBe(false, "second peer WS should still be open");
 });
 
-async function startWsd(
-  t,
-  {
-    port,
-    mountPoint,
-    env = {},
-  }: { port: number; mountPoint: string; env?: Record<string, string> },
-) {
+async function startWsd({
+  port,
+  mountPoint,
+  env = {},
+}: {
+  port: number;
+  mountPoint: string;
+  env?: Record<string, string>;
+}) {
   const child = spawn(cliPath, {
     cwd: packageRoot,
     env: { ...process.env, MOUNT_POINT: mountPoint, PORT: String(port), ...env },
@@ -273,7 +277,7 @@ async function startWsd(
     stderr += chunk;
   });
 
-  t.after(async () => {
+  onTestFinished(async () => {
     await stopProcess(child);
     await fs.rm(mountPoint, { recursive: true, force: true });
   });
@@ -288,8 +292,8 @@ function getAvailablePort() {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      assert.equal(typeof address, "object");
-      assert.notEqual(address, null);
+      expect(typeof address).toBe("object");
+      expect(address).not.toBe(null);
       const port = address.port;
       server.close((error) => {
         if (error) reject(error);
