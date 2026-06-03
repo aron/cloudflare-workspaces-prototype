@@ -54,6 +54,7 @@ import type {
   WriteFileContent,
   WriteFileOptions,
 } from "@cloudflare/dofs";
+import { trackStub, untrackStub } from "@cloudflare/workspace-rpc/debug";
 import { RpcTarget } from "capnweb";
 
 import type { ExecResult } from "./shell.js";
@@ -88,6 +89,11 @@ export class WorkspaceFilesystemStub extends RpcTarget {
   constructor(ws: Workspace) {
     super();
     this.#ws = ws;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   // --- Reads -------------------------------------------------------
@@ -157,6 +163,11 @@ export class WorkspaceExecHandleStub<E extends "utf8" | undefined = undefined> e
   constructor(pending: Promise<ExecResult<E>>) {
     super();
     this.#pending = pending;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   async result(): Promise<WorkspaceExecResult<E>> {
@@ -182,6 +193,11 @@ export class WorkspaceShellStub extends RpcTarget {
   constructor(ws: Workspace) {
     super();
     this.#ws = ws;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   exec(command: string): Promise<WorkspaceExecHandleStub<undefined>>;
@@ -231,6 +247,11 @@ export class WorkspaceStub extends RpcTarget {
     super();
     this.#fs = new WorkspaceFilesystemStub(ws);
     this.#shell = new WorkspaceShellStub(ws);
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   get fs(): WorkspaceFilesystemStub {

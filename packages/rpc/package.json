@@ -19,6 +19,10 @@
     "./driver": {
       "types": "./dist/sync-driver.d.ts",
       "default": "./dist/sync-driver.js"
+    },
+    "./debug": {
+      "types": "./dist/debug.d.ts",
+      "default": "./dist/debug.js"
     }
   },
   "types": "./dist/index.d.ts",

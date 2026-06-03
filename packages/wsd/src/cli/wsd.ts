@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { createWorkspaceClient, type WorkspaceClient } from "@cloudflare/workspace-rpc/client";
+import { isStubTrackingEnabled, stubSnapshot } from "@cloudflare/workspace-rpc/debug";
 import {
   acceptWebSocketSession,
   createWorkspaceServer,
@@ -149,6 +150,20 @@ function createHTTPServer(
       const body = request.method === "HEAD" ? "" : "ok\n";
       send(response, 200, body, {
         "content-type": "text/plain; charset=utf-8",
+      });
+      return;
+    }
+
+    if (path === "/__wsd/stubs") {
+      if (!isStubTrackingEnabled()) {
+        send(response, 404, "stub tracking disabled (set CAPNWEB_TRACK_STUBS=1)\n", {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        return;
+      }
+      const body = request.method === "HEAD" ? "" : JSON.stringify(stubSnapshot());
+      send(response, 200, body, {
+        "content-type": "application/json; charset=utf-8",
       });
       return;
     }

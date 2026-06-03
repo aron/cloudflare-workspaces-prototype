@@ -19,6 +19,7 @@ import {
 } from "@cloudflare/dofs";
 import { newWebSocketRpcSession, nodeHttpBatchRpcResponse, RpcTarget } from "capnweb";
 
+import { trackStub, untrackStub } from "./debug.js";
 import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js";
 
 // Subset of wsd's Runner that the shell server needs. Defining
@@ -67,6 +68,11 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
       Pick<ServerOptions, "afterApply">,
   ) {
     super();
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   async push(input: {
@@ -179,6 +185,11 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
 class ShellRPCServer extends RpcTarget implements ShellRPC {
   constructor(private readonly runner: RunnerLike) {
     super();
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
 
   async exec(input: { command: string; cwd?: string; id?: string; timeoutMs?: number }): Promise<{
@@ -225,6 +236,11 @@ class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
     super();
     this.#sync = sync;
     this.#shell = shell;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
   }
   get sync(): SyncRPC {
     return this.#sync;
