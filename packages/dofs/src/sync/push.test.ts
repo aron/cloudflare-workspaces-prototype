@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import { mkdir } from "../fs/mkdir.js";
 import { readFile } from "../fs/readFile.js";
 import { resolveInode } from "../fs/resolve.js";
@@ -7,6 +6,7 @@ import { rm } from "../fs/rm.js";
 import { symlink } from "../fs/symlink.js";
 import { withDB, withTwoDBs } from "../fs/with-db.js";
 import { writeFile } from "../fs/writeFile.js";
+import type { Database } from "../storage.js";
 import type { ChangeEntry } from "./changes.js";
 import { coalesceChanges } from "./coalesce.js";
 import { pushObjects } from "./push.js";
