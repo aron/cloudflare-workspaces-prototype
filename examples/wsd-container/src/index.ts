@@ -22,6 +22,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
+  localContainerHost,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
@@ -44,13 +45,9 @@ export class ContainerExample extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    const container = ctx.container;
-    if (!container) {
-      throw new Error("DO is not container-enabled (check wrangler.jsonc)");
-    }
     this.#backend = new CloudflareContainerBackend({
-      container: () => container,
-      egress: ctx.exports.WorkspaceProxy({
+      container: () => localContainerHost(ctx),
+      workspace: ctx.exports.WorkspaceProxy({
         props: { binding: "ContainerExample", id: ctx.id.toString() },
       }),
     });
