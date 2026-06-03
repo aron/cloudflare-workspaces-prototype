@@ -16,11 +16,9 @@
   "durable_objects": {
     "bindings": [
       { "class_name": "Agent",      "name": "Agent" },
-      { "class_name": "SubAgent",   "name": "SubAgent" },
-      { "class_name": "MountHost",  "name": "MountHost" }
+      { "class_name": "SubAgent",   "name": "SubAgent" }
     ]
   },
-  "worker_loaders": [{ "binding": "LOADER" }],
   "r2_buckets": [
     { "binding": "SKILLS", "bucket_name": "hackspace-skills-test" }
   ],
@@ -28,7 +26,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Agent", "SubAgent", "MountHost"]
+      "new_sqlite_classes": ["Agent", "SubAgent"]
     }
   ],
   // Pin vars so dev secrets in .dev.vars can't leak into tests — vitest-pool-workers

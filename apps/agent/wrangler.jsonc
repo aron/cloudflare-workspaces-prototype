@@ -6,10 +6,13 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "ai": { "binding": "AI", "remote": true },
-  "worker_loaders": [{ "binding": "LOADER" }],
   "r2_buckets": [{ "binding": "SKILLS", "bucket_name": "hackspace-skills" }],
 
-  "artifacts": [{ "binding": "Artifacts", "namespace": "hackspace-prototype" }],
+  // Dropped during the workspace `next` port:
+  //   worker_loaders / LOADER  — fed @cloudflare/workspace/worker-sandbox
+  //   artifacts / Artifacts    — fed @cloudflare/workspace/git
+  // Both subpaths are gone from the next-branch workspace; neither
+  // the agent nor git-tools references them any more.
 
   "assets": {
     "directory": "../frontend/dist",

@@ -1,34 +1,43 @@
-FROM cloudflare/sandbox:0.9.3
+# Sandbox container image for the agent.
+#
+# Replaces the prior `cloudflare/sandbox`-based image with the
+# next-branch wsd daemon. The image bundles:
+#
+#   1. The prebuilt wsd SEA binary, pulled in from the
+#      cloudflare/workspace-wsd-linux-x64 image (built locally by the
+#      predeploy hook). wsd runs as PID 1 and serves the workspace
+#      RPC + FUSE mount.
+#   2. Project-specific build tools (zig, go, esbuild, wrangler)
+#      under the FUSE-mounted /workspace, so `exec` calls from the
+#      agent see them on PATH.
+#
+# Build context is the repo root (see wrangler.jsonc
+# `image_build_context: "../.."`) so the COPY paths resolve against
+# apps/agent/... — same as the old setup.
 
-# Install any user-supplied root CAs (sandbox/*.crt). Optional — see
-# sandbox/README.md. The directory always exists (the README sits there),
-# so this COPY never fails on a fresh checkout.
-RUN apt-get update && apt-get install -y ca-certificates
-COPY apps/agent/sandbox/ /tmp/sandbox-ctx/
-RUN find /tmp/sandbox-ctx -maxdepth 1 -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; && \
-    update-ca-certificates && \
-    rm -rf /tmp/sandbox-ctx
+FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.1 AS wsd
 
-# Workspace container-sandbox prerequisites: FUSE.
-RUN apt-get install -y --no-install-recommends \
-      fuse3 libfuse2 \
-      build-essential xz-utils curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM --platform=linux/amd64 debian:stable-slim
 
-# Workspace container-sandbox: copy the pre-built server + its runtime deps.
-WORKDIR /app
-COPY node_modules/@cloudflare/workspace/dist/ /app/workspace-dist/
-RUN cp /app/workspace-dist/container-sandbox.cjs            /app/server.cjs && \
-    cp /app/workspace-dist/container-sandbox.package.json   /app/package.json && \
-    rm -rf /app/workspace-dist
-RUN npm install --omit=dev
+# Base toolchain + FUSE runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils git \
+      fuse3 libfuse2t64 \
+      build-essential \
+      nodejs npm \
+ && rm -rf /var/lib/apt/lists/*
 
-# ---- Project-specific toolchain ---------------------------------------------
+# wsd binary. Statically linked SEA, no external deps needed.
+COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
+# Project-specific toolchain. Mirrors the old sandbox image so the
+# agent's `exec` tool finds the same compilers and CLIs on PATH.
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 ENV ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache
 ENV ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
 
+# Zig.
 RUN ZIG_VERSION=0.13.0 && \
     curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
       https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz \
@@ -38,7 +47,7 @@ RUN ZIG_VERSION=0.13.0 && \
 # TypeScript / Cloudflare Worker toolchain.
 RUN npm install -g esbuild@0.25.0 wrangler@4
 
-# Go toolchain.
+# Go.
 ENV GOTOOLCHAIN=local
 ENV GOPATH=/root/go
 ENV PATH=$PATH:/usr/local/go/bin:/root/go/bin
@@ -48,7 +57,14 @@ RUN GO_VERSION=1.23.4 && \
       | tar -xz -C /usr/local && \
     /usr/local/go/bin/go version
 
-# Do NOT override the entrypoint — cloudflare/sandbox:0.9.2 runs
-# /container-server/sandbox which starts the control plane on port 3000.
-# The workspace server is started via startProcess() from Workspace.warmup().
-EXPOSE 4567
+# wsd configuration. PORT and MOUNT_POINT are the defaults the
+# CloudflareContainerBackend expects. FUSE_SHIM=1 lets wsd run when
+# /dev/fuse isn't passed through (wrangler dev on macOS, CI without
+# CAP_SYS_ADMIN). Production Cloudflare Containers expose real FUSE
+# and ignore the flag.
+ENV PORT=8080
+ENV MOUNT_POINT=/workspace
+ENV FUSE_SHIM=1
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/wsd"]
