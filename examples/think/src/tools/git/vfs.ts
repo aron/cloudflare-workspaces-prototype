@@ -20,7 +20,7 @@
  * outside the example don't have to repeat the forwarding list.
  */
 
-import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
+import type { SQLiteWorkspaceProvider } from "@cloudflare/workspace";
 import { create, type VirtualFileSystem, VirtualProvider } from "@platformatic/vfs";
 
 /**
