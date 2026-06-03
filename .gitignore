@@ -3,7 +3,9 @@ dist/
 PLAN.md
 artifacts/
 
-# Platform packages: the SEA binary lands here at publish time via
-# packages/wsd/scripts/publish-*.mjs; the source of truth is
-# artifacts/wsd/ from the build-bin step.
+# SEA binary destinations populated at publish time from
+# artifacts/wsd/ via the build-bin step. The @cloudflare/workspace
+# copy lives under dist/bin/, which is already covered by the
+# blanket dist/ rule above; listed here for discoverability.
 packages/wsd-*/bin/wsd
+packages/workspace/dist/bin/wsd-*

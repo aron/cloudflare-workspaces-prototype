@@ -4,10 +4,14 @@
 # build siblings whose dist/ this package's typecheck depends on,
 # then run biome + typecheck + tests scoped to that package.
 #
+# Runs on every PR and on every push to main, so a merge that
+# slipped through (admin override, branch protection off, etc.)
+# still gets the same lint/build/typecheck/test signal.
+#
 # Path filter skips pure documentation changes — they have no
 # influence on any package's lint, typecheck, or test surface.
 
-name: Pull Request
+name: CI
 
 on:
   pull_request:
@@ -15,10 +19,19 @@ on:
       - "**/*.md"
       - "docs/**"
       - ".github/**/*.md"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/**/*.md"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # PRs key on the PR number so successive pushes cancel the prior
+  # run; pushes to main key on the ref so we never cancel a main
+  # build (those are the historical signal).
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   package:
