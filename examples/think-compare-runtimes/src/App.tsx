@@ -1,3 +1,6 @@
+import { Badge } from "@cloudflare/kumo/components/badge";
+import { Button } from "@cloudflare/kumo/components/button";
+import { Surface } from "@cloudflare/kumo/components/surface";
 import { usePartySocket } from "partysocket/react";
 import { useMemo, useState } from "react";
 import type { RunEvent, RuntimeId } from "../shared/events";
@@ -12,15 +15,37 @@ interface RunSessionResponse {
 
 type StartState = "idle" | "starting" | "running" | "failed";
 
-const runtimeCopy: Record<RuntimeId, { label: string; eyebrow: string }> = {
+const runtimeCopy: Record<
+  RuntimeId,
+  {
+    label: string;
+    eyebrow: string;
+    accent: string;
+    badgeVariant: "teal" | "purple";
+    border: string;
+  }
+> = {
   workspace: {
     label: "Workspace",
     eyebrow: "DOFS-first runtime",
+    accent: "text-kumo-badge-teal-subtle",
+    badgeVariant: "teal",
+    border: "before:bg-kumo-badge-teal",
   },
   sandbox: {
     label: "Sandbox",
     eyebrow: "Container-first runtime",
+    accent: "text-kumo-badge-purple",
+    badgeVariant: "purple",
+    border: "before:bg-kumo-badge-purple",
   },
+};
+
+const startStateVariant: Record<StartState, "neutral" | "warning" | "success" | "error"> = {
+  idle: "neutral",
+  starting: "warning",
+  running: "success",
+  failed: "error",
 };
 
 export function App() {
@@ -71,37 +96,64 @@ export function App() {
   }
 
   return (
-    <main className="shell">
-      <section className="hero" aria-labelledby="page-title">
+    <main className="mx-auto min-h-screen w-full max-w-[1440px] px-6 py-8 text-kumo-default sm:px-10 lg:px-18 lg:py-16">
+      <section
+        className="grid items-end gap-8 pb-10 lg:grid-cols-[minmax(0,1fr)_minmax(280px,380px)] lg:gap-14 lg:pb-18"
+        aria-labelledby="page-title"
+      >
         <div>
-          <p className="kicker">Think × runtime comparison</p>
-          <h1 id="page-title">Same agent. Same task. Different substrate.</h1>
-          <p className="lede">
+          <Badge variant="beta" className="mb-5">
+            Think × runtime comparison
+          </Badge>
+          <h1
+            id="page-title"
+            className="max-w-5xl text-[clamp(4rem,11vw,10.5rem)] leading-[0.78] font-semibold tracking-[-0.08em] text-balance text-kumo-default"
+          >
+            Same agent. Same task. Different substrate.
+          </h1>
+          <p className="mt-8 max-w-3xl text-lg leading-8 text-kumo-subtle">
             A strict Think-vs-Think harness that makes transcript, tool, and runtime behavior
             visible while the Workspace and Sandbox agents run side by side.
           </p>
-          <p className="task-card">
-            <span>Fixture task</span>
-            {comparisonFixture.task}
-          </p>
+          <Surface className="mt-6 max-w-3xl rounded-2xl border border-kumo-hairline bg-kumo-base/70 p-4 shadow-sm backdrop-blur">
+            <span className="font-mono text-xs tracking-[0.18em] text-kumo-subtle uppercase">
+              Fixture task
+            </span>
+            <p className="mt-2 leading-6 text-kumo-default">{comparisonFixture.task}</p>
+          </Surface>
         </div>
-        <div className="control-card">
-          <span className="control-label">Run state</span>
-          <strong>{startState}</strong>
-          <button
-            className="start-button"
+
+        <Surface className="grid gap-4 rounded-2xl border border-kumo-hairline bg-kumo-base p-5 shadow-2xl shadow-black/25 lg:-rotate-1">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs tracking-[0.18em] text-kumo-subtle uppercase">
+              Run state
+            </span>
+            <Badge variant={startStateVariant[startState]} appearance="dot">
+              {startState}
+            </Badge>
+          </div>
+          <strong className="text-3xl font-semibold capitalize text-kumo-default">
+            {startState}
+          </strong>
+          <Button
+            className="w-full justify-center"
             disabled={startState === "starting"}
             onClick={startRun}
             type="button"
+            variant="primary"
           >
             {runId ? "Restart comparison" : "Start comparison"}
-          </button>
-          {runId ? <code>{runId}</code> : null}
-          {error ? <p className="error">{error}</p> : null}
-        </div>
+          </Button>
+          {runId ? (
+            <code className="truncate border-t border-kumo-hairline pt-3 font-mono text-xs text-kumo-subtle">
+              {runId}
+            </code>
+          ) : null}
+          {error ? <p className="text-sm text-kumo-danger">{error}</p> : null}
+        </Surface>
       </section>
 
-      <section className="panels" aria-label="Runtime timelines">
+      <section className="grid gap-6 lg:grid-cols-2" aria-label="Runtime timelines">
         <RuntimePanel runtime="workspace" events={eventsByRuntime.workspace} />
         <RuntimePanel runtime="sandbox" events={eventsByRuntime.sandbox} />
       </section>
@@ -113,24 +165,40 @@ function RuntimePanel({ runtime, events }: { runtime: RuntimeId; events: RunEven
   const copy = runtimeCopy[runtime];
 
   return (
-    <article className={`panel panel-${runtime}`}>
-      <header>
-        <p>{copy.eyebrow}</p>
-        <h2>{copy.label}</h2>
+    <Surface className="min-h-[560px] rounded-3xl border border-kumo-hairline bg-kumo-base/65 p-5 shadow-xl shadow-black/15 backdrop-blur md:p-7">
+      <header className="flex items-end justify-between gap-4 border-b border-kumo-hairline pb-5">
+        <h2 className="text-3xl font-semibold tracking-[-0.06em] text-kumo-default">
+          {copy.label}
+        </h2>
+        <Badge variant={copy.badgeVariant} className="shrink-0">
+          {copy.eyebrow}
+        </Badge>
       </header>
-      <ol className="timeline">
+      <ol className="grid gap-4 pt-6">
         {events.length === 0 ? (
-          <li className="empty">Start a run to stream runtime events.</li>
+          <li className="rounded-2xl border border-dashed border-kumo-hairline bg-kumo-fill/30 p-5">
+            <p className="text-kumo-subtle">Start a run to stream runtime events.</p>
+          </li>
         ) : (
           events.map((event) => (
-            <li className={`event event-${event.kind}`} key={event.id}>
-              <span>{event.kind.replaceAll("_", " ")}</span>
-              <strong>{event.title}</strong>
-              <p>{event.detail}</p>
+            <li
+              className={`relative overflow-hidden rounded-2xl border border-kumo-hairline bg-kumo-canvas/70 p-5 pl-7 before:absolute before:inset-y-0 before:left-0 before:w-1.5 ${copy.border}`}
+              key={event.id}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={event.runtime === "both" ? "neutral" : copy.badgeVariant}>
+                  {event.runtime}
+                </Badge>
+                <span className="font-mono text-xs tracking-[0.18em] text-kumo-subtle uppercase">
+                  {event.kind.replaceAll("_", " ")}
+                </span>
+              </div>
+              <strong className={`mt-3 block font-semibold ${copy.accent}`}>{event.title}</strong>
+              <p className="mt-2 leading-6 text-kumo-subtle">{event.detail}</p>
             </li>
           ))
         )}
       </ol>
-    </article>
+    </Surface>
   );
 }
