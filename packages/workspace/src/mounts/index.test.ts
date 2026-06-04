@@ -53,12 +53,13 @@ function fakeMount(opts: {
   files: FakeFile[];
   dirs?: Array<{ path: string; mode?: number }>;
   kind?: string;
+  mode?: "read-only" | "read-write";
   onMaterialize?: () => void;
   throwAfter?: number; // throw after writing N files
 }): EagerMount & { calls: number } {
   return {
     kind: opts.kind ?? "fake",
-    mode: "read-only",
+    mode: opts.mode ?? "read-only",
     strategy: "eager",
     calls: 0,
     async materialize(api: MountWriteAPI) {
@@ -126,13 +127,14 @@ describe("mount indexer", () => {
     expect(mount.calls).toBe(1);
   });
 
-  it("records one row per mount in _vfs_mounts with indexed=1", async () => {
+  it("records one row per mount in _vfs_mounts with kind, mode, and indexed=1", async () => {
     const m1 = fakeMount({
       kind: "kind-1",
       files: [{ path: "/workspace/a/f.txt", bytes: utf8("x") }],
     });
     const m2 = fakeMount({
       kind: "kind-2",
+      mode: "read-write",
       files: [{ path: "/workspace/b/g.txt", bytes: utf8("y") }],
     });
     const ws = new Workspace({
@@ -142,14 +144,81 @@ describe("mount indexer", () => {
     });
     await ws.ensureMountsIndexed();
     const rows = ws.db
-      .all<{ root: string; kind: string; indexed: number }>(
-        "SELECT root, kind, indexed FROM _vfs_mounts ORDER BY root",
+      .all<{ root: string; kind: string; mode: string; indexed: number }>(
+        "SELECT root, kind, mode, indexed FROM _vfs_mounts ORDER BY root",
       )
       .map((r) => ({ ...r }));
     expect(rows).toEqual([
-      { root: "/workspace/a", kind: "kind-1", indexed: 1 },
-      { root: "/workspace/b", kind: "kind-2", indexed: 1 },
+      { root: "/workspace/a", kind: "kind-1", mode: "read-only", indexed: 1 },
+      { root: "/workspace/b", kind: "kind-2", mode: "read-write", indexed: 1 },
     ]);
+  });
+
+  it("stamps vfs_nodes.mount_root on every materialised node, root included", async () => {
+    const mount = fakeMount({
+      kind: "stamp",
+      files: [
+        { path: "/workspace/m/a.txt", bytes: utf8("alpha") },
+        { path: "/workspace/m/sub/b.txt", bytes: utf8("beta") },
+      ],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/m": mount },
+    });
+    await ws.ensureMountsIndexed();
+    // Every node visible under /workspace/m (the dir itself plus
+    // every descendant the fake mount wrote) carries the mount
+    // provenance.
+    const stamped = ws.db.all<{ mount_root: string | null }>(
+      "SELECT mount_root FROM vfs_nodes WHERE mount_root IS NOT NULL",
+    );
+    // Mount root inode + 'sub' dir + 2 files = 4 stamped rows.
+    expect(stamped.length).toBe(4);
+    expect(stamped.every((r) => r.mount_root === "/workspace/m")).toBe(true);
+    // Nodes outside the mount (the workspace root, for instance)
+    // are not stamped.
+    const unstamped = ws.db.all<{ inode: number }>(
+      "SELECT inode FROM vfs_nodes WHERE mount_root IS NULL",
+    );
+    expect(unstamped.length).toBeGreaterThan(0);
+  });
+
+  it("a read-only mount rejects ws.fs.writeFile under the root with EROFS", async () => {
+    // The EROFS now comes from dofs's data-layer guard, not from
+    // a workspace-side wrapper. The check is run before the write
+    // touches the DB.
+    const mount = fakeMount({
+      kind: "ro",
+      mode: "read-only",
+      files: [{ path: "/workspace/ro/seed.txt", bytes: utf8("seed") }],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/ro": mount },
+    });
+    await ws.ensureMountsIndexed();
+    await expect(ws.fs.writeFile("/workspace/ro/new.txt", utf8("blocked"))).rejects.toMatchObject({
+      code: "EROFS",
+    });
+  });
+
+  it("a read-write mount accepts ws.fs.writeFile under the root", async () => {
+    const mount = fakeMount({
+      kind: "rw",
+      mode: "read-write",
+      files: [{ path: "/workspace/rw/seed.txt", bytes: utf8("seed") }],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/rw": mount },
+    });
+    await ws.ensureMountsIndexed();
+    await ws.fs.writeFile("/workspace/rw/new.txt", utf8("ok"));
+    expect(await ws.fs.readFile("/workspace/rw/new.txt", "utf8")).toBe("ok");
   });
 
   it("does not re-materialize on a second workspace over the same store", async () => {

@@ -5,8 +5,17 @@
 // Workspace over the same store does not re-run. Failures roll back
 // the subtree under the mount root and leave _vfs_mounts.indexed = 0
 // so the next pass retries from scratch.
+//
+// dofs's read-only mount guard reads _vfs_mounts.mode to reject
+// writes under registered read-only roots. The indexer must therefore
+// keep the row in 'read-write' while it materialises (otherwise its
+// own mkdir / writeFile calls hit the guard) and flip to the
+// registered mode only after materialize() succeeds. The cache in
+// @cloudflare/dofs is invalidated after every transition so the next
+// check picks up the new mode.
 
 import type { Database, WorkspaceFilesystem } from "@cloudflare/dofs";
+import { invalidateReadOnlyMountCache, ROOT_INODE } from "@cloudflare/dofs";
 
 import type { Mount, MountWriteAPI } from "./types.js";
 
@@ -40,14 +49,19 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
   const results = await Promise.allSettled(
     pending.map(async ([root, mount]) => {
       // Record the mount as registered-but-not-indexed before we
-      // start writing into the subtree. If materialize() crashes
-      // the row stays with indexed=0 and a later pass retries.
+      // start writing into the subtree. mode='read-write' for the
+      // duration of materialize() so the indexer's own mkdir /
+      // writeFile calls bypass the dofs read-only guard; we flip
+      // to mount.mode at the end. If materialize() crashes the row
+      // stays with indexed=0 and the next pass retries from
+      // scratch.
       db.run(
-        "INSERT INTO _vfs_mounts (root, kind, indexed) VALUES (?, ?, 0)\n" +
-          "  ON CONFLICT(root) DO UPDATE SET kind = excluded.kind, indexed = 0",
+        "INSERT INTO _vfs_mounts (root, kind, mode, indexed) VALUES (?, ?, 'read-write', 0)\n" +
+          "  ON CONFLICT(root) DO UPDATE SET kind = excluded.kind, mode = 'read-write', indexed = 0",
         root,
         mount.kind,
       );
+      invalidateReadOnlyMountCache(db);
 
       const api = createWriteAPI({ fs, root, mount });
       try {
@@ -61,10 +75,21 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
         // below.
         await fs.mkdir(root, { recursive: true });
         await mount.materialize(api);
+        // Stamp every node reachable from the mount root with
+        // mount_root = <root>. The dofs guard reads the path → root
+        // mapping from _vfs_mounts, but the provenance column also
+        // exists on vfs_nodes so downstream tools (sync drop
+        // reasoning, future write-back, GC of mount subtrees) can
+        // tell which mount owns which inode without re-resolving
+        // the path. Stamped inside the try block so the rollback
+        // path wipes the stamps along with the rows.
+        stampMountProvenance(db, root);
       } catch (error) {
         // Roll back anything the partial materialize landed under
         // this mount's root. We use fs.rm with recursive+force so a
-        // half-created subtree leaves no orphan rows behind.
+        // half-created subtree leaves no orphan rows behind. The
+        // row is still mode='read-write' at this point, so the rm
+        // is not blocked by its own guard.
         try {
           await fs.rm(root, { recursive: true, force: true });
         } catch {
@@ -73,7 +98,12 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
         }
         throw error;
       }
-      db.run("UPDATE _vfs_mounts SET indexed = 1 WHERE root = ?", root);
+      // Flip to the registered mode and mark indexed in a single
+      // UPDATE, then invalidate the guard cache so subsequent
+      // writes through Workspace.fs (and any pull) see the final
+      // mode.
+      db.run("UPDATE _vfs_mounts SET mode = ?, indexed = 1 WHERE root = ?", mount.mode, root);
+      invalidateReadOnlyMountCache(db);
     }),
   );
 
@@ -82,6 +112,65 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
     // Surface the first failure; preserve the original error so
     // tests / callers see the underlying message.
     throw failures[0].reason;
+  }
+}
+
+// Walk vfs_dirents from ROOT_INODE down to the mount root's inode.
+// Returns undefined when any segment is missing or hits a non-dir.
+// Used by the indexer to find the root inode to stamp; we don't
+// reuse resolveInode because it isn't exported from @cloudflare/dofs
+// and we don't want to take a dep on its internal symlink-following
+// behaviour for an indexer-only walk.
+function findInodeAt(db: Database, absPath: string): number | undefined {
+  if (absPath === "/") return ROOT_INODE;
+  const parts = absPath.split("/").filter((p) => p.length > 0);
+  let current = ROOT_INODE;
+  for (const name of parts) {
+    const row = db.one<{ child_inode: number; type: "file" | "dir" | "symlink" }>(
+      "SELECT d.child_inode AS child_inode, n.type AS type\n" +
+        "  FROM vfs_dirents d JOIN vfs_nodes n ON n.inode = d.child_inode\n" +
+        " WHERE d.parent_inode = ? AND d.name = ?",
+      current,
+      name,
+    );
+    if (row === undefined) return undefined;
+    current = row.child_inode;
+  }
+  return current;
+}
+
+// Stamp vfs_nodes.mount_root = <root> on every inode reachable from
+// the mount root's inode (the root itself included). The walk is
+// iterative BFS over vfs_dirents so it doesn't blow the stack on
+// deep trees.
+function stampMountProvenance(db: Database, root: string): void {
+  const rootInode = findInodeAt(db, root);
+  if (rootInode === undefined) {
+    // The indexer always mkdir's the root before calling this, so
+    // a missing inode here means materialize() somehow tore it
+    // down. Skip silently — the caller's rollback path will
+    // handle the cleanup if the index pass throws.
+    return;
+  }
+  const inodes: number[] = [rootInode];
+  const queue: number[] = [rootInode];
+  while (queue.length > 0) {
+    const parent = queue.shift() as number;
+    const children = db.all<{ child_inode: number }>(
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ?",
+      parent,
+    );
+    for (const c of children) {
+      inodes.push(c.child_inode);
+      queue.push(c.child_inode);
+    }
+  }
+  // One UPDATE per inode keeps the SQL simple and avoids building a
+  // large IN-list parameter. The subtree size is bounded by the
+  // materialised mount and we're inside the indexer's serialized
+  // run, so this is fine for the scales we care about.
+  for (const inode of inodes) {
+    db.run("UPDATE vfs_nodes SET mount_root = ? WHERE inode = ?", root, inode);
   }
 }
 
