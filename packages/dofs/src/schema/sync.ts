@@ -27,9 +27,15 @@ export const SYNC_STATEMENTS = [
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL
   )`,
+  // The `mode` column was added at schema v2; `schema/migrations.ts`
+  // owns the ALTER for existing databases. Keep the CHECK
+  // constraint here aligned with the migration's CHECK so fresh
+  // installs and upgrades enforce the same allowed set.
   `CREATE TABLE IF NOT EXISTS _vfs_mounts (
     root    TEXT PRIMARY KEY,
     kind    TEXT NOT NULL,
-    indexed INTEGER NOT NULL DEFAULT 0
+    indexed INTEGER NOT NULL DEFAULT 0,
+    mode    TEXT NOT NULL DEFAULT 'read-only'
+            CHECK(mode IN ('read-only', 'read-write'))
   )`,
 ] as const;

@@ -1,7 +1,10 @@
 // Filesystem-side tables. These hold the inode graph and the
 // content-addressed blob store. See docs/03_filesystem_schema.md.
 
-export const SCHEMA_VERSION = 1;
+// Bumped to 2 when `_vfs_mounts.mode` landed (read-only mount
+// enforcement at the data layer). See `schema/migrations.ts` for the
+// migration list; `sync.ts` carries the fresh-install DDL.
+export const SCHEMA_VERSION = 2;
 export const ROOT_INODE = 1;
 
 export const CORE_STATEMENTS = [
