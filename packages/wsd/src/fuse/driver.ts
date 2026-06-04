@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import type { FUSEBackend } from "./backend.js";
 import type { NodeVirtualFileSystem } from "./vfs.js";
 
@@ -96,7 +97,27 @@ export interface FuseMount {
   unmount(): Promise<void>;
 }
 
-export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
+interface FuseNativeInstance {
+  mount(cb: (error: Error | null) => void): void;
+  unmount(cb: (error: Error | null) => void): void;
+  _fuseOptions(): string;
+}
+
+export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseOps {
+  // The kernel hands us paths relative to the mount root ("/",
+  // "/repo/a.txt"). The backing VFS stores them under `mountPoint`
+  // (e.g. "/workspace", "/workspace/repo/a.txt") so reads through
+  // the VFS surface and reads through a shell `cd /workspace`
+  // agree on absolute paths. Translate each path argument at the
+  // op boundary; everything below this function works in the VFS
+  // namespace.
+  const root = normaliseMountPoint(mountPoint);
+  const toVfs = (path: string): string => {
+    if (root === "/") return path;
+    if (path === "/" || path === "") return root;
+    return path.startsWith("/") ? `${root}${path}` : `${root}/${path}`;
+  };
+
   const handles = new Map<number, string>();
   let nextHandle = 1;
 
@@ -161,7 +182,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     const entry = files.get(path);
     if (entry === undefined) return 0;
     try {
-      vfs.writeFileSync(path, entry.buf.subarray(0, entry.size));
+      vfs.writeFileSync(toVfs(path), entry.buf.subarray(0, entry.size));
       return 0;
     } catch (error) {
       return toErrno(error);
@@ -191,7 +212,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     readdir(path, cb) {
       try {
-        cb(0, vfs.readdirSync(path));
+        cb(0, vfs.readdirSync(toVfs(path)));
       } catch (error) {
         cb(toErrno(error), []);
       }
@@ -199,7 +220,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     getattr(path, cb) {
       try {
-        const stat = statNode(vfs.lstatSync(path));
+        const stat = statNode(vfs.lstatSync(toVfs(path)));
         // File content lives outside the VFS, so prefer our size.
         const entry = files.get(path);
         if (entry !== undefined) stat.size = entry.size;
@@ -225,7 +246,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     open(path, _flags, cb) {
       try {
-        const stat = vfs.statSync(path);
+        const stat = vfs.statSync(toVfs(path));
         if (stat.isDirectory()) {
           cb(ERRNO.EISDIR, 0);
           return;
@@ -239,7 +260,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     opendir(path, _flags, cb) {
       try {
-        const stat = vfs.statSync(path);
+        const stat = vfs.statSync(toVfs(path));
         if (!stat.isDirectory()) {
           cb(ERRNO.ENOTDIR, 0);
           return;
@@ -253,13 +274,14 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     create(path, mode, cb) {
       try {
-        if (vfs.existsSync(path)) {
+        const vfsPath = toVfs(path);
+        if (vfs.existsSync(vfsPath)) {
           cb(ERRNO.EEXIST, 0);
           return;
         }
         // Register the inode in the VFS so dir listings / stat see it,
         // but keep actual content in our buffer store.
-        vfs.writeFileSync(path, Buffer.alloc(0), { mode });
+        vfs.writeFileSync(vfsPath, Buffer.alloc(0), { mode });
         files.set(path, { buf: Buffer.alloc(0), size: 0 });
         cb(0, openHandle(path));
       } catch (error) {
@@ -273,7 +295,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
         // File was created out-of-band (e.g. before this driver started
         // tracking it). Lazy-hydrate from the VFS.
         try {
-          const data = vfs.readFileSync(path);
+          const data = vfs.readFileSync(toVfs(path));
           entry = { buf: data, size: data.length };
           files.set(path, entry);
         } catch (error) {
@@ -293,7 +315,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     write(path, _fh, buffer, length, position, cb) {
       let entry = files.get(path);
       if (entry === undefined) {
-        if (!vfs.existsSync(path)) {
+        if (!vfs.existsSync(toVfs(path))) {
           cb(ERRNO.ENOENT);
           return;
         }
@@ -334,7 +356,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     truncate(path, size, cb) {
-      if (!vfs.existsSync(path)) {
+      if (!vfs.existsSync(toVfs(path))) {
         cb(ERRNO.ENOENT);
         return;
       }
@@ -360,7 +382,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     unlink(path, cb) {
       try {
-        vfs.unlinkSync(path);
+        vfs.unlinkSync(toVfs(path));
         meta.delete(path);
         files.delete(path);
         cb(0);
@@ -371,7 +393,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     mkdir(path, mode, cb) {
       try {
-        vfs.mkdirSync(path, { mode });
+        vfs.mkdirSync(toVfs(path), { mode });
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -380,7 +402,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     rmdir(path, cb) {
       try {
-        vfs.rmdirSync(path);
+        vfs.rmdirSync(toVfs(path));
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -389,7 +411,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     rename(source, destination, cb) {
       try {
-        vfs.renameSync(source, destination);
+        vfs.renameSync(toVfs(source), toVfs(destination));
         const m = meta.get(source);
         if (m !== undefined) {
           meta.delete(source);
@@ -408,7 +430,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
 
     access(path, mode, cb) {
       try {
-        vfs.accessSync(path, mode);
+        vfs.accessSync(toVfs(path), mode);
         cb(0);
       } catch (error) {
         cb(toErrno(error));
@@ -432,7 +454,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     chmod(path, mode, cb) {
-      if (!vfs.existsSync(path)) {
+      if (!vfs.existsSync(toVfs(path))) {
         cb(ERRNO.ENOENT);
         return;
       }
@@ -441,7 +463,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     chown(path, uid, gid, cb) {
-      if (!vfs.existsSync(path)) {
+      if (!vfs.existsSync(toVfs(path))) {
         cb(ERRNO.ENOENT);
         return;
       }
@@ -460,7 +482,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
 
     utimens(path, atime, mtime, cb) {
-      if (!vfs.existsSync(path)) {
+      if (!vfs.existsSync(toVfs(path))) {
         cb(ERRNO.ENOENT);
         return;
       }
@@ -472,7 +494,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     },
     readlink(path, cb) {
       try {
-        cb(0, vfs.readlinkSync(path));
+        cb(0, vfs.readlinkSync(toVfs(path)));
       } catch (error) {
         cb(toErrno(error), "");
       }
@@ -480,31 +502,43 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem): FuseOps {
     mknod: notImplemented("mknod"),
 
     setxattr(path, _name, _value, _position, _flags, cb) {
-      cb(vfs.existsSync(path) ? 0 : ERRNO.ENOENT);
+      cb(vfs.existsSync(toVfs(path)) ? 0 : ERRNO.ENOENT);
     },
 
     getxattr(path, _name, _position, cb) {
-      cb(vfs.existsSync(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(vfs.existsSync(toVfs(path)) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
 
     listxattr(path, cb) {
-      cb(vfs.existsSync(path) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
+      cb(vfs.existsSync(toVfs(path)) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
     },
 
     removexattr(path, _name, cb) {
-      cb(vfs.existsSync(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(vfs.existsSync(toVfs(path)) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
 
     link: notImplemented("link"),
     symlink(target, path, cb) {
       try {
-        vfs.symlinkSync(target, path);
+        // Symlink target text is stored verbatim — applications
+        // resolve it against the link's directory, and a link
+        // created via FUSE already names paths in the mount
+        // namespace.
+        vfs.symlinkSync(target, toVfs(path));
         cb(0);
       } catch (error) {
         cb(toErrno(error));
       }
     },
   };
+}
+
+function normaliseMountPoint(mountPoint: string): string {
+  if (!posix.isAbsolute(mountPoint)) {
+    throw new Error(`mountPoint must be an absolute path, got ${JSON.stringify(mountPoint)}`);
+  }
+  const normalised = posix.normalize(mountPoint).replace(/\/+$/, "");
+  return normalised === "" ? "/" : normalised;
 }
 
 export async function mountFuse(options: {
@@ -515,11 +549,10 @@ export async function mountFuse(options: {
   // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
   const fuseModule: any = await import("fuse-native");
   const Fuse = fuseModule.default ?? fuseModule;
-  const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs), {
+  const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs, options.mountPoint), {
     autoUnmount: true,
     debug: false,
-    // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
-  }) as any;
+  }) as FuseNativeInstance;
 
   // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read
   // through opts, so monkey-patch _fuseOptions() to append them. big_writes

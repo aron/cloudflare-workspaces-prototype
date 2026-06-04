@@ -6,7 +6,7 @@ Workspace daemon CLI and FUSE mount package.
 
 `wsd` starts a FUSE-backed virtual filesystem and an HTTP server. The filesystem is backed by `@platformatic/vfs`, while the FUSE mount is provided by `fuse-native`.
 
-The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `45678`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`.
+The HTTP server listens on the port provided by the `PORT` environment variable, defaulting to `45678`. The FUSE mount point is provided by `MOUNT_POINT`, defaulting to `/workspace`. The backing VFS stores files under the same absolute prefix: VFS `/workspace/repo/a.txt` is visible to container processes as `/workspace/repo/a.txt`, so capnweb reads, shim materialisation, and shell `exec` agree on absolute paths.
 
 ```sh
 PORT=45678 MOUNT_POINT=/tmp/workspace npx -p @cloudflare/workspace-wsd wsd
@@ -91,12 +91,12 @@ If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain
 
 ## `FUSE_SHIM=1` — userspace dev shim
 
-When `FUSE_SHIM=1` is set, `wsd` materialises the VFS at `MOUNT_POINT` on the host filesystem and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
+When `FUSE_SHIM=1` is set, `wsd` materialises the VFS subtree rooted at `MOUNT_POINT` onto the host filesystem at the same path and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
 
 How it works:
 
-- On boot, `wsd` walks the VFS and writes every file out to `MOUNT_POINT`.
-- `vfs.watchAsync("/", { recursive: true })` drives VFS → disk: each VFS revision turns into a host-fs `writeFile`/`mkdir`/`rm`.
+- On boot, `wsd` walks the VFS subtree under `MOUNT_POINT` and writes every file out to the host at the same path.
+- `vfs.watchAsync(MOUNT_POINT, { recursive: true })` drives VFS → disk: each VFS revision turns into a host-fs `writeFile`/`mkdir`/`rm`.
 - A periodic poll (~250 ms) walks `MOUNT_POINT`, diffs it against a content-hash shadow, and pushes any new or changed entries into the VFS.
 - The shadow doubles as a loop suppressor: after a write in either direction the shadow matches both sides, so the next tick on the opposite side sees no diff.
 

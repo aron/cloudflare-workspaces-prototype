@@ -158,6 +158,38 @@ test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (ctx) => 
   expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello shim");
 });
 
+test("FUSE_SHIM materialises an RPC push under the mount point", async (ctx) => {
+  // End-to-end version of the cross-namespace fix: a peer pushes a
+  // file at `${MOUNT_POINT}/repo/a.txt` into wsd's VFS over
+  // capnweb, and the shim drops it on disk at the same absolute
+  // path. The on-disk read is what proves the mountPoint plumbing
+  // works — a regression would surface here as ENOENT.
+  const { Database, initializeSchema, WorkspaceFilesystem } = await import("@cloudflare/dofs");
+  const { SQLiteTestStorage } = await import("@cloudflare/dofs/testing");
+  const { createWorkspaceClient } = await import("@cloudflare/workspace-rpc/client");
+  const { pushOnce } = await import("@cloudflare/workspace-rpc/driver");
+
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-push-"));
+  await startWsd({ port, mountPoint, env: { FUSE_SHIM: "1" } });
+
+  const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
+  onTestFinished(() => client.close());
+
+  const db = new Database(new SQLiteTestStorage());
+  initializeSchema(db, Date.now);
+  const fsFacade = new WorkspaceFilesystem(db);
+  await fsFacade.mkdir(`${mountPoint}/repo`, { recursive: true });
+  await fsFacade.writeFile(`${mountPoint}/repo/a.txt`, "alpha");
+
+  // The exact rev count depends on how many ancestor directories
+  // mkdir(recursive) had to materialise under the tmpdir mount
+  // point. The on-disk assertion below is the real contract.
+  expect(await pushOnce(db, client.sync)).toBeGreaterThan(0);
+
+  expect(await fs.readFile(path.join(mountPoint, "repo", "a.txt"), "utf8")).toBe("alpha");
+});
+
 test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
   const port = await getAvailablePort();
   const child = spawn(cliPath, {

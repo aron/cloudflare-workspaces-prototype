@@ -350,3 +350,46 @@ test("FUSE getattr size matches what readFileSync would return", async () => {
   expect((afterFlush.result as { size: number }).size).toBe(12);
   expect(vfs.statSync("/g.txt").size).toBe(12);
 });
+
+test("FUSE ops translate kernel-relative paths onto the configured mount point", async () => {
+  // The kernel hands the driver paths relative to the mount root
+  // (e.g. "/repo/a.txt"). With mountPoint="/workspace" each path
+  // resolves under /workspace/... in the backing VFS, so capnweb
+  // pulls and shell `exec` consumers see the same absolute path.
+  const { vfs } = await createNodeVirtualFileSystem();
+  vfs.mkdirSync("/workspace/repo", { recursive: true });
+  vfs.writeFileSync("/workspace/repo/a.txt", Buffer.from("alpha"));
+  const ops = makeFUSEOps(vfs, "/workspace");
+
+  const dir = await callback((cb) => ops.readdir("/repo", cb));
+  expect(dir.errno).toBe(0);
+  expect(dir.result).toEqual(["a.txt"]);
+
+  const open = await callback((cb) => ops.open("/repo/a.txt", 0, cb));
+  expect(open.errno).toBe(0);
+  const readBuffer = Buffer.alloc(5);
+  expect(
+    await status((cb) => ops.read("/repo/a.txt", open.result as number, readBuffer, 5, 0, cb)),
+  ).toBe(5);
+  expect(readBuffer.toString()).toBe("alpha");
+
+  const create = await callback((cb) => ops.create("/repo/b.txt", 0o644, cb));
+  expect(create.errno).toBe(0);
+  const payload = Buffer.from("bravo");
+  expect(
+    await status((cb) =>
+      ops.write("/repo/b.txt", create.result as number, payload, payload.length, 0, cb),
+    ),
+  ).toBe(payload.length);
+  expect(await status((cb) => ops.release("/repo/b.txt", create.result as number, cb))).toBe(0);
+
+  expect(vfs.readFileSync("/workspace/repo/b.txt").toString()).toBe("bravo");
+  // The unprefixed path doesn't exist in the VFS — it would only
+  // exist if the driver had skipped the mountPoint translation.
+  expect(vfs.existsSync("/repo/b.txt")).toBe(false);
+});
+
+test("FUSE ops reject a relative mountPoint", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  expect(() => makeFUSEOps(vfs, "workspace")).toThrow(/absolute/);
+});

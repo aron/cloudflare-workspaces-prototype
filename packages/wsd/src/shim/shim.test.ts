@@ -42,8 +42,10 @@ async function setup() {
 
 test("shim mirrors VFS writes onto disk", async (ctx) => {
   const { vfs, mountPoint } = await setup();
-  vfs.mkdirSync("/proj", { recursive: true });
-  vfs.writeFileSync("/proj/hello.txt", Buffer.from("hello"));
+  // VFS and host namespaces share the same absolute prefix:
+  // `${mountPoint}/proj/hello.txt` is the same path in both.
+  vfs.mkdirSync(`${mountPoint}/proj`, { recursive: true });
+  vfs.writeFileSync(`${mountPoint}/proj/hello.txt`, Buffer.from("hello"));
 
   await eventually(async () => {
     const buf = await fs.readFile(path.join(mountPoint, "proj", "hello.txt"), "utf8");
@@ -58,7 +60,7 @@ test("shim mirrors disk writes back into the VFS", async (ctx) => {
   await fs.writeFile(path.join(mountPoint, "sub", "note.md"), "from host");
 
   await eventually(() => {
-    const text = vfs.readFileSync("/sub/note.md").toString();
+    const text = vfs.readFileSync(`${mountPoint}/sub/note.md`).toString();
     expect(text).toBe("from host");
     return true;
   });
@@ -68,12 +70,12 @@ test("shim mirrors deletions in both directions", async (ctx) => {
   const { vfs, mountPoint } = await setup();
 
   // VFS -> disk delete.
-  vfs.writeFileSync("/a.txt", Buffer.from("a"));
+  vfs.writeFileSync(`${mountPoint}/a.txt`, Buffer.from("a"));
   await eventually(async () => {
     await fs.access(path.join(mountPoint, "a.txt"));
     return true;
   });
-  vfs.unlinkSync("/a.txt");
+  vfs.unlinkSync(`${mountPoint}/a.txt`);
   await eventually(async () => {
     try {
       await fs.access(path.join(mountPoint, "a.txt"));
@@ -85,14 +87,15 @@ test("shim mirrors deletions in both directions", async (ctx) => {
 
   // Disk -> VFS delete.
   await fs.writeFile(path.join(mountPoint, "b.txt"), "b");
-  await eventually(() => vfs.existsSync("/b.txt"));
+  await eventually(() => vfs.existsSync(`${mountPoint}/b.txt`));
   await fs.rm(path.join(mountPoint, "b.txt"));
-  await eventually(() => !vfs.existsSync("/b.txt"));
+  await eventually(() => !vfs.existsSync(`${mountPoint}/b.txt`));
 });
 
 test("shim does not echo identical writes back and forth", async (ctx) => {
   const { vfs, mountPoint } = await setup();
-  vfs.writeFileSync("/stable.txt", Buffer.from("same"));
+  const vfsPath = `${mountPoint}/stable.txt`;
+  vfs.writeFileSync(vfsPath, Buffer.from("same"));
 
   await eventually(async () => {
     const buf = await fs.readFile(path.join(mountPoint, "stable.txt"), "utf8");
@@ -101,13 +104,13 @@ test("shim does not echo identical writes back and forth", async (ctx) => {
 
   // Touch the file on disk with identical content; the shim's
   // content-equal short-circuit should keep VFS mtime stable.
-  const before = vfs.statSync("/stable.txt").mtime.getTime();
+  const before = vfs.statSync(vfsPath).mtime.getTime();
   // Wait a beat so any spurious bump from an mtime-only change shows
   // up as a different value.
   await new Promise((resolve) => setTimeout(resolve, TICK_MS * 4));
   await fs.writeFile(path.join(mountPoint, "stable.txt"), "same");
   await new Promise((resolve) => setTimeout(resolve, TICK_MS * 6));
-  const after = vfs.statSync("/stable.txt").mtime.getTime();
+  const after = vfs.statSync(vfsPath).mtime.getTime();
   expect(after).toBe(before, "identical disk write should not bump VFS mtime");
 });
 
@@ -117,7 +120,7 @@ test("shim picks up nested directory creates on disk", async (ctx) => {
   await fs.writeFile(path.join(mountPoint, "a", "b", "c", "leaf.txt"), "leaf");
 
   await eventually(() => {
-    const text = vfs.readFileSync("/a/b/c/leaf.txt").toString();
+    const text = vfs.readFileSync(`${mountPoint}/a/b/c/leaf.txt`).toString();
     expect(text).toBe("leaf");
     return true;
   });
@@ -136,9 +139,9 @@ test("shim.flush() settles VFS writes onto disk before resolving", async (ctx) =
     await fs.rm(mountPoint, { recursive: true, force: true });
   });
 
-  vfs.mkdirSync("/proj", { recursive: true });
-  vfs.writeFileSync("/proj/a.txt", Buffer.from("alpha"));
-  vfs.writeFileSync("/proj/b.txt", Buffer.from("beta"));
+  vfs.mkdirSync(`${mountPoint}/proj`, { recursive: true });
+  vfs.writeFileSync(`${mountPoint}/proj/a.txt`, Buffer.from("alpha"));
+  vfs.writeFileSync(`${mountPoint}/proj/b.txt`, Buffer.from("beta"));
 
   await shim.flush();
 
@@ -150,7 +153,7 @@ test("shim.flush() is idempotent and cheap on a clean tree", async (ctx) => {
   // Second flush should be a no-op (shadow short-circuits every
   // syncVfsPathToDisk call) and complete promptly.
   const { vfs, mountPoint, shim } = await setup();
-  vfs.writeFileSync("/hello.txt", Buffer.from("world"));
+  vfs.writeFileSync(`${mountPoint}/hello.txt`, Buffer.from("world"));
   await shim.flush();
   const mtime1 = (await fs.stat(path.join(mountPoint, "hello.txt"))).mtimeMs;
   await shim.flush();
@@ -167,4 +170,24 @@ test("shim.flush() resolves on an unmounted shim without throwing", async (ctx) 
   });
   await shim.unmount();
   await shim.flush();
+});
+
+test("shim drops VFS writes outside the mount point", async (ctx) => {
+  // Pin the cross-namespace contract that backed the original bug:
+  // a write into the VFS at `${mountPoint}/foo` lands on disk at
+  // the same absolute path, and a write at bare "/foo" (outside
+  // the mount point) is ignored. Without this guarantee, a process
+  // that `cd ${mountPoint}` sees a different file tree from the
+  // RPC surface.
+  const { vfs, mountPoint, shim } = await setup();
+  vfs.mkdirSync(`${mountPoint}/repo`, { recursive: true });
+  vfs.writeFileSync(`${mountPoint}/repo/a.txt`, Buffer.from("alpha"));
+  // Sibling write outside the mount point — the shim should never
+  // see this and disk should never get a stray "/repo" directory.
+  vfs.writeFileSync("/outside.txt", Buffer.from("nope"));
+
+  await shim.flush();
+
+  expect(await fs.readFile(path.join(mountPoint, "repo", "a.txt"), "utf8")).toBe("alpha");
+  await expect(fs.access(path.join(mountPoint, "outside.txt"))).rejects.toThrow(/ENOENT/);
 });

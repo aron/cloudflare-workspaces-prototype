@@ -414,17 +414,24 @@ async function main(): Promise<void> {
   // hook below. A real FUSE mount serves reads straight from the
   // VFS, so it doesn't need an explicit settle.
   let shim: ShimMount | undefined;
-  if (backend.kind === "shim") {
+  if (backend.kind !== "none") {
+    // The VFS stores everything under `mountPoint` so capnweb pulls,
+    // shim materialisation, and shell `exec` agree on absolute
+    // paths. Pre-create the mount directory in the VFS so FUSE's
+    // first getattr on "/" can stat the mount root.
+    vfs.mkdirSync(mountPoint, { recursive: true });
     await mkdir(mountPoint, { recursive: true });
-    shim = await mountShim({ vfs, mountPoint });
-    fuse = shim;
-  } else if (!fuseDisabled && backend.kind !== "none") {
-    await mkdir(mountPoint, { recursive: true });
-    fuse = await mountFuse({
-      backend: backend as Exclude<FUSEBackend, { kind: "none" } | { kind: "shim" }>,
-      mountPoint,
-      vfs,
-    });
+
+    if (backend.kind === "shim") {
+      shim = await mountShim({ vfs, mountPoint });
+      fuse = shim;
+    } else {
+      fuse = await mountFuse({
+        backend,
+        mountPoint,
+        vfs,
+      });
+    }
   }
   // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
   // without rebuilding the binary. Default lives in the Runner.
@@ -451,7 +458,7 @@ async function main(): Promise<void> {
     // exec()/read against the host fs after a push sees the new
     // files. Real FUSE doesn't need this — the kernel-FUSE driver
     // serves reads from the VFS directly.
-    ...(shim ? { afterApply: () => shim!.flush() } : {}),
+    ...(shim ? { afterApply: () => shim.flush() } : {}),
   });
   const http = createHTTPServer(info, rpc);
 
