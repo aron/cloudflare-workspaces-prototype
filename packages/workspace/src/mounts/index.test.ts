@@ -221,6 +221,70 @@ describe("mount indexer", () => {
     expect(await ws.fs.readFile("/workspace/rw/new.txt", "utf8")).toBe("ok");
   });
 
+  it("a read-only mount rejects ws.fs.rm and ws.fs.mkdir with EROFS", async () => {
+    const mount = fakeMount({
+      kind: "ro",
+      mode: "read-only",
+      files: [{ path: "/workspace/ro/seed.txt", bytes: utf8("seed") }],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/ro": mount },
+    });
+    await ws.ensureMountsIndexed();
+    await expect(ws.fs.rm("/workspace/ro/seed.txt", { force: true })).rejects.toMatchObject({
+      code: "EROFS",
+    });
+    await expect(ws.fs.mkdir("/workspace/ro/sub", { recursive: true })).rejects.toMatchObject({
+      code: "EROFS",
+    });
+  });
+
+  it("ws.fs.rm of an ancestor of a read-only mount root is rejected", async () => {
+    // Ancestor-rm is the destructive shape we have to keep covered
+    // end-to-end: rm('/workspace', { recursive, force }) would
+    // recurse through /workspace/ro and silently wipe the mount.
+    // The dofs guard's overlapsRoot is symmetric so the check
+    // catches both descendant and ancestor paths.
+    const mount = fakeMount({
+      kind: "ro",
+      mode: "read-only",
+      files: [{ path: "/workspace/ro/seed.txt", bytes: utf8("seed") }],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/ro": mount },
+    });
+    await ws.ensureMountsIndexed();
+    await expect(ws.fs.rm("/workspace", { recursive: true, force: true })).rejects.toMatchObject({
+      code: "EROFS",
+    });
+  });
+
+  it("writes outside any mount root pass through unchanged", async () => {
+    const mount = fakeMount({
+      kind: "ro",
+      mode: "read-only",
+      files: [{ path: "/workspace/ro/seed.txt", bytes: utf8("seed") }],
+    });
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/ro": mount },
+    });
+    await ws.ensureMountsIndexed();
+    // A sibling directory accepts the usual mkdir / write / rm.
+    await ws.fs.mkdir("/workspace/free", { recursive: true });
+    await ws.fs.writeFile("/workspace/free/a.txt", utf8("ok"));
+    expect(await ws.fs.readFile("/workspace/free/a.txt", "utf8")).toBe("ok");
+    await ws.fs.rm("/workspace/free/a.txt");
+    await expect(ws.fs.readFile("/workspace/free/a.txt", "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("does not re-materialize on a second workspace over the same store", async () => {
     const storage = makeStorage();
     const mount1 = fakeMount({ files: [{ path: "/workspace/m/x.txt", bytes: utf8("hi") }] });
