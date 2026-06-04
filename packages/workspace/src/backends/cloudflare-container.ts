@@ -1,16 +1,16 @@
 // CloudflareContainerBackend — backs Workspace with a wsd instance
 // running inside a Cloudflare Container.
 //
-// The backend drives container lifecycle through a ContainerHost
+// The backend drives container lifecycle through an IWorkspaceContainerAPI
 // abstraction. Same-DO and cross-DO callers look identical from
 // here; whether ctx.container is reached directly or through an
-// RPC stub is a concern of the ContainerHost implementation.
+// RPC stub is a concern of the IWorkspaceContainerAPI implementation.
 //
 // Same-DO shape (one DO owns both the container and the Workspace):
 //
 //   class WsdContainer extends DurableObject<Env> {
 //     #backend = new CloudflareContainerBackend({
-//       container: () => localContainerHost(this.ctx),
+//       container: () => this.ws,
 //       workspace: { binding: "WsdContainer", id: this.ctx.id.toString() },
 //     });
 //     #workspace = new Workspace({ backends: [this.#backend] });
@@ -49,27 +49,20 @@ import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 
 import type { BackendHandle, WorkspaceBackend } from "../backend.js";
 import { startHeartbeat } from "../heartbeat.js";
-import type { ContainerHost, WorkspaceRef } from "./container-host.js";
+import type { IWorkspaceContainerAPI, WorkspaceRef } from "./container-host.js";
 
 export interface CloudflareContainerBackendOptions {
   // Resolves the container host to drive on each connect(). Called
   // anew per dial so a pool-backed factory can re-pick. Returning
   // a Promise is supported for pickers that consult external state
   // (KV, a coordinator DO, etc.).
-  container: () => ContainerHost | Promise<ContainerHost>;
+  container: () => IWorkspaceContainerAPI | Promise<IWorkspaceContainerAPI>;
 
   // Identifies the Workspace-owning DO. Fixed for the lifetime of
   // the backend: the backend lives inside this DO and the /ws
-  // upgrade always lands here.
-  //
-  // Two shapes:
-  //   - Fetcher  — same-DO callers pass ctx.exports.WorkspaceProxy(...)
-  //     directly, since the loopback fetcher must be built in the
-  //     isolate that calls interceptOutboundHttp.
-  //   - WorkspaceRef — cross-DO callers pass plain {binding, id}
-  //     data; the host-side DO constructs the WorkspaceProxy from
-  //     it (Fetchers can't survive a Workers RPC hop).
-  workspace: Fetcher | WorkspaceRef;
+  // upgrade always lands here. Plain {binding, id} data so it
+  // survives the Workers RPC hop to a cross-DO container host.
+  workspace: WorkspaceRef;
 
   // Hostname wsd will dial back. Defaults to "workspace.internal".
   // Override for tests or to avoid collisions with other backends
@@ -251,14 +244,13 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     this.#rejectUpgrade = undefined;
   }
 
-  async #waitForPort(host: ContainerHost, deadline: number): Promise<void> {
+  async #waitForPort(host: IWorkspaceContainerAPI, deadline: number): Promise<void> {
     let lastError: unknown;
     while (Date.now() < deadline) {
       try {
-        const res = await host.fetchPort(
-          this.#options.containerPort,
-          new Request("http://container/health", { method: "HEAD" }),
-        );
+        const res = await host
+          .port(this.#options.containerPort)
+          .fetch("http://container/health", { method: "HEAD" });
         void res.body?.cancel();
         return;
       } catch (error) {
@@ -273,21 +265,18 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     );
   }
 
-  async #postConnect(host: ContainerHost, deadline: number): Promise<void> {
+  async #postConnect(host: IWorkspaceContainerAPI, deadline: number): Promise<void> {
     const remaining = Math.max(0, deadline - Date.now());
     let res: Response;
     try {
-      res = await host.fetchPort(
-        this.#options.containerPort,
-        new Request("http://container/connect", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            url: `http://${this.#options.egressHost}`,
-            healthTimeoutMs: remaining,
-          }),
+      res = await host.port(this.#options.containerPort).fetch("http://container/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: `http://${this.#options.egressHost}`,
+          healthTimeoutMs: remaining,
         }),
-      );
+      });
     } catch (error) {
       this.#rejectUpgrade?.(error);
       this.#clearUpgrade();
