@@ -34,7 +34,7 @@ import {
   type WorkspaceStub,
   withWorkspaceContainer,
 } from "@cloudflare/workspace";
-import { diff as gitDiff } from "@cloudflare/workspace/git";
+import { createGitClient } from "@cloudflare/workspace/git";
 import { type ToolSet, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -253,7 +253,8 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    */
   async gitDiff(): Promise<string> {
     await this.#containerWs.ready();
-    return gitDiff({ workspace: this.#containerWs, dir: REPO_ROOT });
+    const git = createGitClient({ ws: this.#containerWs });
+    return git.diff({ dir: REPO_ROOT });
   }
 
   /**
@@ -435,10 +436,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#containerWs));
     const containerWs = this.#containerWs;
     return {
-      git_clone: createGitCloneTool({
-        provider: containerWs.provider(),
-        cache: this.#gitCache,
-      }),
+      git_clone: createGitCloneTool({ ws: containerWs }),
       // Per-tool caps. Kimi K2.6 has a 262k context window so we
       // don't need to be paranoid; the caps are mostly so a
       // pathological tool call (giant lockfile, multi-MB log) doesn't

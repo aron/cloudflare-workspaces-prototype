@@ -1,7 +1,6 @@
 /**
  * `git_clone` — shallow-clone a public GitHub repository into the
- * agent's workspace via `@cloudflare/workspace/git`, which wraps
- * isomorphic-git over a Workspace-backed `node:fs`-shaped FsClient.
+ * agent's workspace via `@cloudflare/workspace/git`.
  *
  * Limits:
  *   The clone runs entirely inside the Worker isolate; the packfile
@@ -9,16 +8,16 @@
  *   repos at `depth: 1` (the default) but not for huge monorepos.
  */
 
-import type { SQLiteWorkspaceProvider } from "@cloudflare/workspace";
-import { clone, workspaceIsomorphicGitClient } from "@cloudflare/workspace/git";
+import type { Workspace } from "@cloudflare/workspace";
+import { createGitClient } from "@cloudflare/workspace/git";
 import { tool } from "ai";
 import { z } from "zod";
 
 const DEFAULT_DEPTH = 1;
 
 export interface GitCloneToolOptions {
-  /** dofs provider over the workspace's local store. */
-  provider: SQLiteWorkspaceProvider;
+  /** Workspace whose store the clone is written into. */
+  ws: Workspace;
   /** Default clone depth. Default 1 (shallow). */
   defaultDepth?: number;
   /**
@@ -44,11 +43,7 @@ const inputSchema = z.object({
 
 export function createGitCloneTool(opts: GitCloneToolOptions) {
   const depthDefault = opts.defaultDepth ?? DEFAULT_DEPTH;
-  // Build the FsClient once per tool instance and reuse it across
-  // clone calls — the provider is stable, and the adapter's
-  // `@platformatic/vfs.create` step is cheap but not free (it
-  // registers handlers on construction).
-  const fsPromise = workspaceIsomorphicGitClient(opts.provider);
+  const git = createGitClient({ ws: opts.ws });
   return tool({
     description:
       "Shallow-clone a public GitHub repository into the workspace " +
@@ -57,20 +52,13 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
     inputSchema,
     execute: async ({ repo, dest, ref, depth }) => {
       const url = `https://github.com/${repo}`;
-      const fs = await fsPromise;
       // Wipe any prior clone at the target. Stale `.git` directories
       // from a previous failed call cause isomorphic-git to error
       // out with "commit ... not available locally" — the second
       // clone refuses to overwrite the orphaned refs.
-      try {
-        await fs.promises.rmdir(dest);
-      } catch {
-        // Best-effort. The dir may not exist yet, or `rmdir` may
-        // ENOTEMPTY — both are fine for the next mkdir.
-      }
-      await fs.promises.mkdir(dest, { recursive: true });
-      await clone({
-        fs,
+      await opts.ws.fs.rm(dest, { recursive: true, force: true });
+      await opts.ws.fs.mkdir(dest, { recursive: true });
+      await git.clone({
         url,
         dir: dest,
         ref,

@@ -27,21 +27,17 @@ import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 /**
  * The shape isomorphic-git wants as its `fs` argument: an object
  * whose `.promises` is an own, enumerable property and implements
- * the subset of `node:fs/promises` listed in `PromiseFsClient`.
+ * the `node:fs/promises` subset listed in `PromiseFsClient`.
  *
- * Typed structurally to avoid leaking `@platformatic/vfs`'s `.d.ts`
- * into this package's public types. Only the methods this package
- * touches directly are declared; isomorphic-git pokes at many more,
- * but they are not part of our contract.
+ * `promises` is typed as `object` rather than enumerating every
+ * method @platformatic/vfs forwards. The full surface is wider
+ * than this package consumes and pinning it here would either
+ * leak @platformatic/vfs into our public types or force tedious
+ * structural shadowing. Callers that want a typed file API can
+ * cast `client.promises` to `import('@platformatic/vfs').VirtualFileSystem['promises']`.
  */
 export interface IsomorphicGitFSClient {
-  promises: IsomorphicGitFSPromises;
-}
-
-export interface IsomorphicGitFSPromises {
-  readFile(path: string): Promise<Uint8Array | string>;
-  mkdir(path: string, opts?: { recursive?: boolean }): Promise<void>;
-  rmdir(path: string): Promise<void>;
+  promises: object;
 }
 
 /**
@@ -169,7 +165,5 @@ export async function workspaceIsomorphicGitClient(
   const vfs = create(new SQLiteVirtualProvider(provider), { moduleHooks: false });
   // Re-expose `.promises` as an enumerable own property so
   // isomorphic-git's FileSystem detection picks the promise branch.
-  // `vfs.promises` carries the full @platformatic/vfs surface;
-  // narrow it here to the contract this package documents.
-  return { promises: vfs.promises as unknown as IsomorphicGitFSPromises };
+  return { promises: vfs.promises };
 }

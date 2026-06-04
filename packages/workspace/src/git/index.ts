@@ -1,32 +1,23 @@
 // Public surface of @cloudflare/workspace/git.
 //
-// `clone()` shallow-clones a remote into a Workspace-backed VFS.
-// `diff()` produces a unified diff between a ref (default HEAD)
-// and the working tree.
+// `createGitClient({ ws })` is the one entry point. It binds a
+// workspace handle once and returns `{ clone, diff }` methods that
+// don't repeat the workspace argument. Internally each method
+// lazy-loads its optional peer deps (`isomorphic-git`, the http
+// transport, and for `diff` the `diff` package) and delegates to
+// `cloneWith` / `diffWith`.
 //
-// Both accept one of:
-//   - `workspace`: `.provider()` is called and an FsClient is
-//     built via @platformatic/vfs (loaded lazily).
-//   - `fs`: a pre-built FsClient, used verbatim. Useful for
-//     tests, custom adapters, or running against node:fs directly.
-//
-// External libraries (`isomorphic-git`, `isomorphic-git/http/web`,
-// and `diff`) normally resolve from optional peer deps, but every
-// dependency is injectable so tests and vendored forks don't have
-// to monkey-patch the module graph.
+// `cloneWith` and `diffWith` are still exported for callers that
+// bring their own FsClient — tests, custom adapters, running
+// against node:fs directly — but the workspace-bound path is the
+// only one most consumers need.
 
 import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 
 import { type IsomorphicGitFSClient, workspaceIsomorphicGitClient } from "./adapter.js";
-import {
-  type CloneWithDeps,
-  cloneWith,
-  type GitCloneOptions,
-  type IsomorphicGitClient,
-} from "./clone.js";
+import { cloneWith, type GitCloneOptions, type IsomorphicGitClient } from "./clone.js";
 import {
   type CreatePatchFn,
-  type DiffWithDeps,
   diffWith,
   type GitDiffOptions,
   type IsomorphicGitDiffClient,
@@ -36,109 +27,84 @@ import {
 export type { IsomorphicGitFSClient } from "./adapter.js";
 export { workspaceIsomorphicGitClient } from "./adapter.js";
 export type {
+  CloneWithDeps,
   GitCloneOptions,
   IsomorphicGitClient,
   MessageCallback,
   ProgressCallback,
 } from "./clone.js";
+export { cloneWith } from "./clone.js";
 export type {
   CreatePatchFn,
+  DiffWithDeps,
   GitDiffOptions,
   IsomorphicGitDiffClient,
   ReadFileFn,
   StatusRow,
 } from "./diff.js";
+export { diffWith } from "./diff.js";
 
 /** Duck-typed workspace handle. Only `.provider()` is required. */
 export interface WorkspaceLike {
   provider(): SQLiteWorkspaceProvider;
 }
 
-type AdapterFn = (provider: SQLiteWorkspaceProvider) => Promise<IsomorphicGitFSClient>;
+/** Methods returned by `createGitClient`. */
+export interface GitClient {
+  /** Shallow-clone a remote into the bound workspace. */
+  clone(options: GitCloneOptions): Promise<void>;
+  /** Unified diff between a ref (default HEAD) and the working tree. */
+  diff(options?: GitDiffOptions): Promise<string>;
+}
 
-type FsSource = {
-  /** Pre-built FsClient. Mutually exclusive with `workspace`. */
-  fs?: IsomorphicGitFSClient;
-  /** Workspace handle. The adapter derives an FsClient from it. */
-  workspace?: WorkspaceLike;
+export interface CreateGitClientOptions {
+  /** Workspace whose provider backs the git operations. */
+  ws: WorkspaceLike;
   /**
    * Test seam for substituting the @platformatic/vfs adapter.
    * Production callers do not pass this.
    */
-  adapter?: AdapterFn;
-};
-
-export type CloneInput = GitCloneOptions &
-  FsSource & {
-    /** Override the isomorphic-git module (tests, vendored forks). */
-    git?: IsomorphicGitClient;
-    /** Override the HTTP transport. Defaults to isomorphic-git/http/web. */
-    http?: object;
-  };
-
-export async function clone(input: CloneInput): Promise<void> {
-  const fs = await resolveFs(input);
-  const git = input.git ?? (await loadIsomorphicGit<IsomorphicGitClient>());
-  const http = input.http ?? (await loadDefaultHttp());
-
-  const {
-    fs: _fs,
-    workspace: _workspace,
-    adapter: _adapter,
-    git: _git,
-    http: _http,
-    ...rest
-  } = input;
-  void _fs;
-  void _workspace;
-  void _adapter;
-  void _git;
-  void _http;
-
-  const deps: CloneWithDeps = { ...rest, fs, http, git };
-  await cloneWith(deps);
+  adapter?: (provider: SQLiteWorkspaceProvider) => Promise<IsomorphicGitFSClient>;
 }
 
-export type DiffInput = GitDiffOptions &
-  FsSource & {
-    /** Override the isomorphic-git module. */
-    git?: IsomorphicGitDiffClient;
-    /** Override `createPatch`. Defaults to the `diff` package's export. */
-    createPatch?: CreatePatchFn;
-    /**
-     * Override the function used to read working-tree files. Defaults
-     * to `fs.promises.readFile`.
-     */
-    readFile?: ReadFileFn;
+/**
+ * Build a git client bound to a workspace.
+ *
+ * The FsClient is constructed lazily on first use and reused
+ * across subsequent calls — `@platformatic/vfs.create()` is cheap
+ * but not free, and the workspace provider is stable for the
+ * lifetime of the client.
+ */
+export function createGitClient({
+  ws,
+  adapter = workspaceIsomorphicGitClient,
+}: CreateGitClientOptions): GitClient {
+  let fsPromise: Promise<IsomorphicGitFSClient> | undefined;
+  const fs = () => {
+    if (!fsPromise) fsPromise = adapter(ws.provider());
+    return fsPromise;
   };
 
-export async function diff(input: DiffInput): Promise<string> {
-  const fs = await resolveFs(input);
-  const git = input.git ?? (await loadIsomorphicGit<IsomorphicGitDiffClient>());
-  const createPatch = input.createPatch ?? (await loadCreatePatch());
-  const readFile = input.readFile ?? defaultReadFile(fs);
-
-  const deps: DiffWithDeps = {
-    git,
-    fs,
-    createPatch,
-    readFile,
-    dir: input.dir,
-    ref: input.ref,
+  return {
+    async clone(options) {
+      await cloneWith({
+        ...options,
+        fs: await fs(),
+        git: await loadIsomorphicGit<IsomorphicGitClient>(),
+        http: await loadDefaultHTTP(),
+      });
+    },
+    async diff(options = {}) {
+      const f = await fs();
+      return diffWith({
+        ...options,
+        fs: f,
+        git: await loadIsomorphicGit<IsomorphicGitDiffClient>(),
+        createPatch: await loadCreatePatch(),
+        readFile: readFileFrom(f),
+      });
+    },
   };
-  return diffWith(deps);
-}
-
-async function resolveFs(input: FsSource): Promise<IsomorphicGitFSClient> {
-  if (input.fs) return input.fs;
-  if (input.workspace) {
-    const provider = input.workspace.provider();
-    const adapter = input.adapter ?? workspaceIsomorphicGitClient;
-    return await adapter(provider);
-  }
-  throw new Error(
-    "Requires either `fs` (a pre-built FsClient) or `workspace` (a handle with .provider()).",
-  );
 }
 
 // isomorphic-git ships both named exports and a default export
@@ -150,22 +116,18 @@ async function loadIsomorphicGit<T>(): Promise<T> {
   } catch (cause) {
     throw new Error(
       "@cloudflare/workspace/git requires isomorphic-git as an optional peer dependency. " +
-        "Install isomorphic-git, or pass `git` explicitly.",
+        "Install isomorphic-git.",
       { cause },
     );
   }
 }
 
-async function loadDefaultHttp(): Promise<object> {
+async function loadDefaultHTTP(): Promise<object> {
   try {
     const mod = await import("isomorphic-git/http/web");
     return mod.default;
   } catch (cause) {
-    throw new Error(
-      "Failed to load isomorphic-git/http/web. Install isomorphic-git, " +
-        "or pass `http` to clone() explicitly.",
-      { cause },
-    );
+    throw new Error("Failed to load isomorphic-git/http/web. Install isomorphic-git.", { cause });
   }
 }
 
@@ -175,13 +137,17 @@ async function loadCreatePatch(): Promise<CreatePatchFn> {
     return mod.createPatch;
   } catch (cause) {
     throw new Error(
-      "@cloudflare/workspace/git requires `diff` as an optional peer dependency to compute " +
-        "patches. Install `diff`, or pass `createPatch` to diff() explicitly.",
+      "@cloudflare/workspace/git requires `diff` as an optional peer dependency. " +
+        "Install `diff`.",
       { cause },
     );
   }
 }
 
-function defaultReadFile(fs: IsomorphicGitFSClient): ReadFileFn {
-  return (path) => fs.promises.readFile(path);
+function readFileFrom(fs: IsomorphicGitFSClient): ReadFileFn {
+  // `fs.promises` is typed as `object` on the public surface; the
+  // underlying @platformatic/vfs handle exposes `readFile`. Narrow
+  // locally rather than widening the exported type.
+  const promises = fs.promises as { readFile: ReadFileFn };
+  return (path) => promises.readFile(path);
 }
