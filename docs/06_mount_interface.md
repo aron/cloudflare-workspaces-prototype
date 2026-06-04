@@ -244,6 +244,57 @@ Conflicts on read-only mounts are reported but never mirrored; the
 container-side bytes still win inside the VFS, and the read-only
 mount stays untouched.
 
+## Limits of laziness
+
+Laziness is **DO-side only**. A lazy mount's `list()` inserts stub
+rows into `vfs_nodes` with `manifest_hash NULL`; `fetch(relPath)` is
+called on the first DO-side read of that stub, which streams bytes
+through the blob / chunk path and promotes the stub to a regular file
+row.
+
+The sync protocol ships blobs by hash. A stub row has no blob to
+ship, so `pushOnce` cannot deliver a stub to the container. Concretely:
+
+- A container-side read (FUSE) of a path that exists only as a stub
+  on the DO sees `ENOENT`. The stub has not been resolved, so there
+  is nothing to push.
+- `workspace.prefetch(root?)` exists for callers that need a subtree
+  fully resolved before handing it to the container. Run it from
+  `onStart` / `waitUntil` to avoid a first-`exec` surprise.
+- Once a stub is resolved DO-side (by `readFile`, `prefetch`, or any
+  other byte-reading path), it ships through sync like any other
+  file.
+
+Eager mounts don't have this asymmetry — they materialize at index
+time and are visible to the container after the first push.
+
+Demand-pull from the container (FUSE miss → DO fetches the stub →
+pushes) and materialize-on-push (resolve stubs while walking the push
+queue) are both plausible extensions, but they require new wire
+shapes and aren't in scope.
+
+## Mounts are not sync peers
+
+**Non-goal.** Mounts are content sources with an optional
+`refresh()` hook, not a third participant in the sync protocol. The
+protocol stays a two-peer thing between the DO and the container.
+
+This is deliberate, not an oversight:
+
+- R2 and GitHub have no monotonic rev clock. Treating them as peers
+  would force per-tick polling and a diff against a remembered
+  snapshot.
+- The protocol's invariants — `appliedPushRev`, watermark
+  reconciliation, tombstones — assume one peer. They don't generalize
+  to N peers without a real CRDT / LWW story.
+- The "container always wins" conflict policy is a deliberate
+  hierarchy. Flattening it to treat a mount as a third equal peer
+  contradicts the hierarchy.
+
+When a mount needs to pick up upstream changes, call
+`workspace.refreshMount(root)`. That's the seam — not a new sync
+leg.
+
 ## Open questions
 These behaviours aren't fully specified yet. File an issue if your use
 case depends on a particular resolution.
@@ -258,9 +309,8 @@ case depends on a particular resolution.
   config.json that another mount also wants to own) needs a defined
   resolution. Likely answer: the mount whose root is the longest
   prefix of the path wins, but the contract hasn't been written.
-- **Mount lifecycle.** Mounts have `materialize` or `list`/`fetch` but
-  no “tear-down” or “refresh” hook. A `GitHubRepo` mount that wants to
-  pull `main` periodically has no place to run `git fetch`. Likely
-  shape: optional `refresh()` on the mount plus a
-  `workspace.refreshMount(root)` entry point; default is a no-op so
-  existing mounts keep working. Tracked for a future iteration.
+- **Tear-down hook.** Mounts have `materialize` or `list`/`fetch`
+  but no "tear-down" hook. Refresh is covered (see "Mounts are not
+  sync peers" above and `workspace.refreshMount`), but a provider
+  that grows a background task has no place to clean up. No caller
+  needs this today; revisit when one does.
