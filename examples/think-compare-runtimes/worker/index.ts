@@ -10,8 +10,8 @@ import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { handleApiRequest } from "./http";
 import { runFixtureComparison } from "./runtime/comparison-run";
-import { createSandboxFixtureRuntime } from "./runtime/sandbox";
-import { createWorkspaceFixtureRuntime } from "./runtime/workspace";
+import { createSandboxFileStore, createSandboxFixtureRuntime } from "./runtime/sandbox";
+import { createWorkspaceFileStore, createWorkspaceFixtureRuntime } from "./runtime/workspace";
 import { startComparisonRun } from "./start-run";
 
 export { Sandbox } from "@cloudflare/sandbox";
@@ -90,6 +90,8 @@ export class CompareRun extends Server<Env> {
       fixture: comparisonFixture,
       workspaceRuntime: createWorkspaceFixtureRuntime(this.#workspace),
       sandboxRuntime: createSandboxFixtureRuntime(sandbox),
+      workspaceAdapterStore: createWorkspaceFileStore(this.#workspace),
+      sandboxAdapterStore: createSandboxFileStore(sandbox),
     });
     await this.ctx.storage.put(EVENTS_KEY, this.#events);
     this.broadcast(JSON.stringify({ type: "history", events: this.#events }));
