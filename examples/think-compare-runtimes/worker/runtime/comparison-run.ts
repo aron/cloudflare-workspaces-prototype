@@ -2,6 +2,7 @@ import type { RunEvent } from "../../shared/events";
 import type { ComparisonFixture } from "../../shared/fixture";
 import { RunEventRecorder } from "../run-events";
 import { createSandboxRuntimeAdapter, createWorkspaceRuntimeAdapter } from "./adapter";
+import type { RuntimeCommandRunner } from "./exec-tools";
 import type { RuntimeFileStore } from "./file-tools";
 import { runSandboxFixtureSetup } from "./sandbox-run";
 import type { FixtureRuntime } from "./seed";
@@ -14,6 +15,8 @@ export interface FixtureComparisonOptions {
   sandboxRuntime: FixtureRuntime;
   workspaceAdapterStore?: RuntimeFileStore;
   sandboxAdapterStore?: RuntimeFileStore;
+  workspaceCommandRunner?: RuntimeCommandRunner;
+  sandboxCommandRunner?: RuntimeCommandRunner;
   now?: () => string;
 }
 
@@ -24,6 +27,8 @@ export async function runFixtureComparison({
   sandboxRuntime,
   workspaceAdapterStore,
   sandboxAdapterStore,
+  workspaceCommandRunner,
+  sandboxCommandRunner,
   now = () => new Date().toISOString(),
 }: FixtureComparisonOptions): Promise<RunEvent[]> {
   const recorder = new RunEventRecorder({ runId, now });
@@ -49,16 +54,29 @@ export async function runFixtureComparison({
     }),
   ]);
 
-  if (workspaceAdapterStore && sandboxAdapterStore) {
+  if (
+    workspaceAdapterStore &&
+    sandboxAdapterStore &&
+    workspaceCommandRunner &&
+    sandboxCommandRunner
+  ) {
     const sourcePath = `${fixture.root}/src/index.ts`;
-    await createWorkspaceRuntimeAdapter({
+    const workspaceAdapter = createWorkspaceRuntimeAdapter({
       recorder,
       store: workspaceAdapterStore,
-    }).files.read(sourcePath);
-    await createSandboxRuntimeAdapter({
+      runner: workspaceCommandRunner,
+    });
+    const sandboxAdapter = createSandboxRuntimeAdapter({
       recorder,
       store: sandboxAdapterStore,
-    }).files.read(sourcePath);
+      runner: sandboxCommandRunner,
+    });
+
+    const smokeCommand = "node --version";
+    await workspaceAdapter.files.read(sourcePath);
+    await sandboxAdapter.files.read(sourcePath);
+    await workspaceAdapter.exec(smokeCommand);
+    await sandboxAdapter.exec(smokeCommand);
   }
 
   return recorder.events();

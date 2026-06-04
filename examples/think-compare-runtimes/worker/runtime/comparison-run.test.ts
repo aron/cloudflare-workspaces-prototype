@@ -43,6 +43,26 @@ describe("runFixtureComparison", () => {
           sandboxFiles.set(path, contents);
         },
       },
+      workspaceCommandRunner: {
+        async exec(command, options) {
+          expect(options?.cwd).toBeUndefined();
+          return {
+            exitCode: 0,
+            stdout: `workspace ${command}\n`,
+            stderr: "",
+          };
+        },
+      },
+      sandboxCommandRunner: {
+        async exec(command, options) {
+          expect(options?.cwd).toBeUndefined();
+          return {
+            exitCode: 0,
+            stdout: `sandbox ${command}\n`,
+            stderr: "",
+          };
+        },
+      },
     });
 
     expect(workspaceWrites).toEqual([
@@ -54,7 +74,7 @@ describe("runFixtureComparison", () => {
     expect(events.map((event) => event.sequence)).toEqual(
       Array.from({ length: events.length }, (_, sequence) => sequence),
     );
-    expect(events).toHaveLength(31);
+    expect(events).toHaveLength(35);
     expect(events[0]).toMatchObject({
       runtime: "both",
       kind: "run_started",
@@ -66,6 +86,8 @@ describe("runFixtureComparison", () => {
         "Sandbox fixture seeded",
         "read /workspace/repo/src/index.ts",
         "read complete",
+        "exec node --version",
+        "exec complete",
       ]),
     );
     expect(events.at(-4)).toMatchObject({ runtime: "workspace", kind: "tool_call" });

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { comparisonFixture } from "../../shared/fixture";
 import { seedFixture } from "./seed";
-import { createWorkspaceFileStore, createWorkspaceFixtureRuntime } from "./workspace";
+import {
+  createWorkspaceCommandRunner,
+  createWorkspaceFileStore,
+  createWorkspaceFixtureRuntime,
+} from "./workspace";
 
 describe("createWorkspaceFixtureRuntime", () => {
   test("seeds through Workspace.fs without connecting a shell backend", async () => {
@@ -69,5 +73,33 @@ describe("createWorkspaceFixtureRuntime", () => {
       "read /workspace/repo/src/index.ts utf8",
       "write /workspace/repo/src/index.ts updated",
     ]);
+  });
+
+  test("exec connects the Workspace shell lazily", async () => {
+    const calls: string[] = [];
+    const runner = createWorkspaceCommandRunner({
+      async ready() {
+        calls.push("ready");
+      },
+      shell: {
+        async exec(
+          command: string,
+          options?: { cwd?: string; encoding?: "utf8"; timeoutMs?: number },
+        ) {
+          calls.push(`${command} ${options?.cwd} ${options?.encoding} ${options?.timeoutMs}`);
+          return {
+            async result() {
+              calls.push("result");
+              return { exitCode: 0, stdout: "workspace\n", stderr: "", pushed: 1, pulled: 1 };
+            },
+          };
+        },
+      },
+    });
+
+    await expect(
+      runner.exec("npm test", { cwd: "/workspace/repo", timeoutMs: 30_000 }),
+    ).resolves.toEqual({ exitCode: 0, stdout: "workspace\n", stderr: "" });
+    expect(calls).toEqual(["ready", "npm test /workspace/repo utf8 30000", "result"]);
   });
 });

@@ -1,3 +1,4 @@
+import type { RuntimeCommandRunner, RuntimeExecOptions, RuntimeExecResult } from "./exec-tools";
 import type { RuntimeFileStore } from "./file-tools";
 import type { FixtureRuntime } from "./seed";
 
@@ -13,6 +14,10 @@ interface SandboxReadFileResult {
 interface SandboxFileStoreTarget {
   readFile(path: string): Promise<SandboxReadFileResult>;
   writeFile(path: string, contents: string): Promise<unknown>;
+}
+
+interface SandboxCommandTarget {
+  exec(command: string, options?: { cwd?: string; timeout?: number }): Promise<RuntimeExecResult>;
 }
 
 export function createSandboxFixtureRuntime(sandbox: SandboxFixtureTarget): FixtureRuntime {
@@ -37,5 +42,27 @@ export function createSandboxFileStore(sandbox: SandboxFileStoreTarget): Runtime
     async writeFile(path, contents) {
       await sandbox.writeFile(path, contents);
     },
+  };
+}
+
+export function createSandboxCommandRunner(sandbox: SandboxCommandTarget): RuntimeCommandRunner {
+  return {
+    async exec(command, options) {
+      const { exitCode, stdout, stderr } = await sandbox.exec(
+        command,
+        toSandboxExecOptions(options),
+      );
+      return { exitCode, stdout, stderr };
+    },
+  };
+}
+
+function toSandboxExecOptions(options: RuntimeExecOptions | undefined): {
+  cwd?: string;
+  timeout?: number;
+} {
+  return {
+    cwd: options?.cwd,
+    timeout: options?.timeoutMs,
   };
 }

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { comparisonFixture } from "../../shared/fixture";
-import { createSandboxFileStore, createSandboxFixtureRuntime } from "./sandbox";
+import {
+  createSandboxCommandRunner,
+  createSandboxFileStore,
+  createSandboxFixtureRuntime,
+} from "./sandbox";
 import { seedFixture } from "./seed";
 
 describe("createSandboxFixtureRuntime", () => {
@@ -62,5 +66,28 @@ describe("createSandboxFixtureRuntime", () => {
       "read /workspace/repo/src/index.ts",
       "write /workspace/repo/src/index.ts updated",
     ]);
+  });
+
+  test("exec adapts Sandbox SDK command results", async () => {
+    const calls: string[] = [];
+    const runner = createSandboxCommandRunner({
+      async exec(command: string, options?: { cwd?: string; timeout?: number }) {
+        calls.push(`${command} ${options?.cwd} ${options?.timeout}`);
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: "sandbox\n",
+          stderr: "",
+          command,
+          duration: 12,
+          timestamp: "2026-06-04T00:00:00.000Z",
+        };
+      },
+    });
+
+    await expect(
+      runner.exec("npm test", { cwd: "/workspace/repo", timeoutMs: 30_000 }),
+    ).resolves.toEqual({ exitCode: 0, stdout: "sandbox\n", stderr: "" });
+    expect(calls).toEqual(["npm test /workspace/repo 30000"]);
   });
 });
