@@ -75,6 +75,16 @@ function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+  const view = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < view.byteLength; i++) {
+    out += view[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
 async function readAll(ws: Workspace, path: string): Promise<Uint8Array> {
   const stream = await ws.fs.readFile(path);
   const reader = stream.getReader();
@@ -186,6 +196,12 @@ describe("R2Bucket provider", () => {
       mounts: { "/workspace/r2": R2Bucket(bucket) },
     });
     await ws.ensureMountsIndexed();
+    const readback = await readAll(ws, "/workspace/r2/big.bin");
+    // Byte-equality: source and readback hash to the same sha256.
+    // The chunk layout assertions below cover the streaming
+    // chunker; the hash covers content correctness.
+    expect(readback.byteLength).toBe(total);
+    expect(await sha256Hex(readback)).toBe(await sha256Hex(big));
     // Verify the stored chunks each fit within the configured chunk
     // size — no intermediate buffer reassembled the whole 16 MiB.
     const inodeRow = ws.db.one<{ inode: number }>(
@@ -202,5 +218,59 @@ describe("R2Bucket provider", () => {
       expect(c.size).toBeLessThanOrEqual(512 * 1024);
     }
     expect(chunks.reduce((s, c) => s + c.size, 0)).toBe(total);
+  });
+
+  it("materialize on an empty bucket leaves indexed=1 with no entries under the mount root", async () => {
+    const { bucket, spy } = fakeR2([]);
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/empty": R2Bucket(bucket) },
+    });
+    await ws.ensureMountsIndexed();
+    // No get() calls because list() returned nothing.
+    expect(spy.gets.length).toBe(0);
+    const row = ws.db.one<{ root: string; indexed: number }>(
+      "SELECT root, indexed FROM _vfs_mounts WHERE root = ?",
+      "/workspace/empty",
+    );
+    expect(row).toEqual({ root: "/workspace/empty", indexed: 1 });
+    // The indexer doesn't pre-create the mount root, so reading it
+    // back surfaces ENOENT — by design, the bucket was empty and
+    // nothing produced any entries.
+    await expect(ws.fs.readdir("/workspace/empty")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("materialize throws if get() returns null for a listed key", async () => {
+    // A bucket whose list() reports a key but whose get() returns
+    // null for it — the object was deleted between the two calls.
+    // The indexer must reject and roll back the subtree.
+    const sorted: Array<{ key: string; size: number }> = [{ key: "present.txt", size: 5 }];
+    const bucket = {
+      async list() {
+        return {
+          objects: sorted,
+          delimitedPrefixes: [],
+          truncated: false,
+          cursor: undefined as string | undefined,
+        };
+      },
+      async get() {
+        return null;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: duck-typed fake
+    } as any;
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/lost": R2Bucket(bucket) },
+    });
+    await expect(ws.ensureMountsIndexed()).rejects.toThrow(/disappeared mid-materialize/);
+    const row = ws.db.one<{ indexed: number }>(
+      "SELECT indexed FROM _vfs_mounts WHERE root = ?",
+      "/workspace/lost",
+    );
+    expect(row?.indexed ?? 0).toBe(0);
+    await expect(ws.fs.readdir("/workspace/lost")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

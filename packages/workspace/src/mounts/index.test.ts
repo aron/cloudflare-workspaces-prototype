@@ -1,6 +1,7 @@
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { BackendHandle, WorkspaceBackend } from "../backend.js";
 import { Workspace } from "../workspace.js";
 import type { EagerMount, MountWriteAPI } from "./types.js";
 
@@ -27,6 +28,19 @@ function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
 
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // crypto.subtle.digest accepts an ArrayBuffer view; the cast keeps
+  // TypeScript happy without copying. Returned as a hex string so
+  // expect(x).toBe(y) gives a readable diff on mismatch.
+  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+  const view = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < view.byteLength; i++) {
+    out += view[i].toString(16).padStart(2, "0");
+  }
+  return out;
 }
 
 interface FakeFile {
@@ -190,6 +204,10 @@ describe("mount indexer", () => {
     await ws.ensureMountsIndexed();
     const bytes = await readAll(ws, "/workspace/big/blob.bin");
     expect(bytes.byteLength).toBe(total);
+    // Byte-equality: source and readback hash to the same sha256.
+    // The chunk-count + per-chunk-size assertions below cover the
+    // chunker layout; the hash covers content correctness.
+    expect(await sha256Hex(bytes)).toBe(await sha256Hex(big));
     // The dofs CHUNK_SIZE is 512 KiB; a 1 MiB blob should land
     // exactly two chunks.
     const inodeRow = ws.db.one<{ inode: number }>(
@@ -229,12 +247,12 @@ describe("mount indexer", () => {
       "/workspace/m",
     );
     expect(persisted?.indexed ?? 0).toBe(0);
-    // No leftover dirents under the mount root.
-    const leftover = ws.db.all<{ name: string }>(
-      "SELECT d.name FROM vfs_dirents d JOIN vfs_nodes n ON n.inode = d.parent_inode",
-    );
-    const hasMountChildren = leftover.some((r) => r.name === "a.txt" || r.name === "b.txt");
-    expect(hasMountChildren).toBe(false);
+    // The mount root and everything under it is rolled back via
+    // rm(root, { recursive, force }), so the root itself no longer
+    // resolves — readdir() throws ENOENT. This is stricter than
+    // a name-spot-check: it asserts the whole subtree is gone, not
+    // just the two files we happened to know about.
+    await expect(ws.fs.readdir("/workspace/m")).rejects.toMatchObject({ code: "ENOENT" });
 
     // Second attempt: replace the mount with a clean one and run
     // again. The next pass should call materialize() again because
@@ -270,6 +288,148 @@ describe("mount indexer", () => {
     await expect(ws.ensureMountsIndexed()).rejects.toThrow(/maxBytes|byte/i);
     const inode = ws.db.one("SELECT inode FROM vfs_nodes WHERE manifest_hash IS NOT NULL");
     expect(inode).toBeUndefined();
+  });
+
+  it("throws when maxEntries is exceeded and rolls back the subtree", async () => {
+    const mount: EagerMount = {
+      kind: "capped",
+      mode: "read-only",
+      strategy: "eager",
+      maxEntries: 2,
+      async materialize(api) {
+        await api.writeFile("/workspace/cap/a.txt", streamOf(utf8("a")));
+        await api.writeFile("/workspace/cap/b.txt", streamOf(utf8("b")));
+        await api.writeFile("/workspace/cap/c.txt", streamOf(utf8("c")));
+      },
+    };
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/cap": mount },
+    });
+    await expect(ws.ensureMountsIndexed()).rejects.toThrow(/maxEntries/);
+    const persisted = ws.db.one<{ indexed: number }>(
+      "SELECT indexed FROM _vfs_mounts WHERE root = ?",
+      "/workspace/cap",
+    );
+    expect(persisted?.indexed ?? 0).toBe(0);
+    await expect(ws.fs.readdir("/workspace/cap")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("materialize() throws when writeFile targets a path outside the mount root", async () => {
+    const mount: EagerMount = {
+      kind: "escapes",
+      mode: "read-only",
+      strategy: "eager",
+      async materialize(api) {
+        await api.writeFile("/other/place.txt", streamOf(utf8("nope")));
+      },
+    };
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends,
+      mounts: { "/workspace/m": mount },
+    });
+    await expect(ws.ensureMountsIndexed()).rejects.toThrow(/outside the mount root/);
+    // Neither the mount root nor the escape target should have left
+    // anything behind in vfs_nodes.
+    await expect(ws.fs.readdir("/workspace/m")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(ws.fs.readdir("/other")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("ready() triggers ensureMountsIndexed before resolving", async () => {
+    // Wire a no-op SyncRPC just rich enough for #connect() to
+    // succeed and reconcileWatermarks() to find what it needs.
+    // Mirrors the fakeRpc() pattern from workspace.test.ts.
+    const sync: import("@cloudflare/workspace-rpc").SyncRPC = {
+      async push(input) {
+        const reader = input.changes.getReader();
+        try {
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return { rev: 0, appliedPushRev: input.senderRev };
+      },
+      async fetchChanges() {
+        return {
+          currentRev: 0,
+          appliedPushRev: 0,
+          stream: new ReadableStream<import("@cloudflare/dofs").ChangeEntry>({
+            start(c) {
+              c.close();
+            },
+          }),
+        };
+      },
+      async readEntry() {
+        return null;
+      },
+      async hasObjects() {
+        return [];
+      },
+      fetchObjects() {
+        return new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        });
+      },
+      async watermarks() {
+        return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+      },
+      async pushObjects(objects) {
+        const reader = objects.getReader();
+        try {
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    };
+    const notWired = () => Promise.reject(new Error("shell not wired"));
+    const shell: import("@cloudflare/workspace-rpc").ShellRPC = {
+      exec: notWired,
+      getExec: notWired,
+      killExec: notWired,
+      disposeExec: notWired,
+    };
+    const backend: WorkspaceBackend = {
+      id: "test",
+      async connect(): Promise<BackendHandle> {
+        return { rpc: { sync, shell }, close: async () => {} };
+      },
+    };
+    const materializeSpy = vi.fn(async (api: MountWriteAPI) => {
+      await api.writeFile("/workspace/r/hello.txt", streamOf(utf8("hi")));
+    });
+    const mount: EagerMount = {
+      kind: "ready-test",
+      mode: "read-only",
+      strategy: "eager",
+      materialize: materializeSpy,
+    };
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends: [backend],
+      mounts: { "/workspace/r": mount },
+    });
+    // The contract: ready() must drive ensureMountsIndexed() before
+    // resolving. So reading a mounted path immediately after ready()
+    // (without an explicit ensureMountsIndexed call) must succeed.
+    await ws.ready();
+    expect(materializeSpy).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(await readAll(ws, "/workspace/r/hello.txt"))).toBe("hi");
+    // A second ready() is idempotent: no extra materialize() call.
+    await ws.ready();
+    expect(materializeSpy).toHaveBeenCalledTimes(1);
+    await ws.close();
   });
 
   it("collapses concurrent ensureMountsIndexed() calls to one materialize", async () => {
