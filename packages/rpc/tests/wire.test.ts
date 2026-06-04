@@ -243,7 +243,7 @@ describe("SyncRPC pull convergence", () => {
     try {
       const { pullOnce } = await import("../src/sync-driver.js");
       const applied = await pullOnce(recvDb, client);
-      expect(applied).toBeGreaterThan(0);
+      expect(applied.applied).toBeGreaterThan(0);
       const recvProvider = new SQLiteWorkspaceProvider(recvDb, { now: () => 2500 });
       expect(recvProvider.readFileSync("/whole.txt", "utf8")).toBe("whole-file write");
     } finally {
@@ -273,7 +273,7 @@ describe("SyncRPC pull convergence", () => {
     try {
       const { pullOnce } = await import("../src/sync-driver.js");
       const applied = await pullOnce(recvDb, client);
-      expect(applied).toBeGreaterThan(0);
+      expect(applied.applied).toBeGreaterThan(0);
       const recvProvider = new SQLiteWorkspaceProvider(recvDb, { now: () => 2500 });
       expect(recvProvider.readFileSync("/from-fuse.txt", "utf8")).toBe("from-fuse\n");
     } finally {

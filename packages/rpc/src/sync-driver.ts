@@ -10,6 +10,7 @@
 // a manual `tick()` in tests so convergence is deterministic.
 
 import {
+  type ApplyResult,
   applyChanges,
   assertAppliedPushRev,
   type ChangeEntry,
@@ -17,6 +18,7 @@ import {
   currentRev,
   type Database,
   readWatermark,
+  type SkippedEntry,
   stageBlob,
   writeWatermark,
 } from "@cloudflare/dofs";
@@ -76,8 +78,10 @@ function maybeDispose(value: unknown): void {
 const PULL_BATCH_SIZE = 256;
 
 // Pull every entry the remote has produced since the last successful
-// pull, apply locally, advance fetchRev. Returns the number of
-// entries applied so callers can decide whether to tick again.
+// pull, apply locally, advance fetchRev. Returns an `ApplyResult`
+// folded across every batch so callers see both the applied count
+// (decide whether to tick again) and any entries skipped because
+// they targeted a read-only mount root (surface to the user).
 //
 // Bytes the receiver already holds (vfs_blobs.hash present) are
 // skipped on the wire; the hasObjects probe is what makes that
@@ -89,7 +93,7 @@ const PULL_BATCH_SIZE = 256;
 // require the wire to carry a rev cursor per entry. Crash safety is
 // idempotent re-apply: the receiver's alreadyApplied() check inside
 // applyChanges drops a re-fetched batch on the floor.
-export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
+export async function pullOnce(db: Database, remote: SyncRPC): Promise<ApplyResult> {
   const sinceRev = readWatermark(db, "fetchRev");
   const localPushRev = readWatermark(db, "pushRev");
   // fetchChanges hands back the remote's currentRev (cursor we
@@ -116,11 +120,12 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
     // Drain the (empty) stream so the remote's iterator is
     // released; cancel is the right surface for that.
     await stream.cancel().catch(() => {});
-    return 0;
+    return { applied: 0, skipped: [] };
   }
 
   const reader = stream.getReader();
   let totalApplied = 0;
+  const totalSkipped: SkippedEntry[] = [];
   let streamDone = false;
   try {
     while (!streamDone) {
@@ -187,11 +192,14 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
       // means the next pull resumes from batchMaxRev and re-fetches
       // only entries from later batches — bounded by PULL_BATCH_SIZE
       // instead of the whole stream.
-      await applyChanges(db, batch, new Map(), {
+      const batchResult = await applyChanges(db, batch, new Map(), {
         source: "upstream",
         advanceFetchRev: batchMaxRev,
       });
-      totalApplied += batch.length;
+      totalApplied += batchResult.applied;
+      if (batchResult.skipped.length > 0) {
+        for (const s of batchResult.skipped) totalSkipped.push(s);
+      }
     }
   } finally {
     reader.releaseLock();
@@ -208,7 +216,7 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
   if (remoteRev > current) {
     writeWatermark(db, "fetchRev", remoteRev);
   }
-  return totalApplied;
+  return { applied: totalApplied, skipped: totalSkipped };
 }
 
 // Push every entry the local store has produced since the last
@@ -295,7 +303,7 @@ export async function pushOnce(db: Database, remote: SyncRPC): Promise<number> {
 export async function tick(
   db: Database,
   remote: SyncRPC,
-): Promise<{ pulled: number; pushed: number }> {
+): Promise<{ pulled: ApplyResult; pushed: number }> {
   const pulled = await pullOnce(db, remote);
   const pushed = await pushOnce(db, remote);
   return { pulled, pushed };

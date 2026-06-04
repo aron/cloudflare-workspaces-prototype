@@ -42,7 +42,8 @@ describe("sync driver — pullOnce", () => {
       provider.writeFileSync("/hello.txt", "hello");
 
       const applied = await pullOnce(b.db, a.rpc);
-      expect(applied).toBe(1);
+      expect(applied.applied).toBe(1);
+      expect(applied.skipped).toEqual([]);
       expect(fileEntries(b.db)).toContain("hello.txt");
       // Asserting the bytes arrived, not just the dirent. The
       // production wsd-container example had a path where pullOnce
@@ -72,7 +73,8 @@ describe("sync driver — pullOnce", () => {
       providerA.closeSync(fd);
 
       const applied = await pullOnce(b.db, a.rpc);
-      expect(applied).toBe(1);
+      expect(applied.applied).toBe(1);
+      expect(applied.skipped).toEqual([]);
       expect(fileEntries(b.db)).toContain("fuse.txt");
 
       // The production bug: the dirent transferred but readback was
@@ -91,7 +93,8 @@ describe("sync driver — pullOnce", () => {
     try {
       await pullOnce(b.db, a.rpc);
       const applied = await pullOnce(b.db, a.rpc);
-      expect(applied).toBe(0);
+      expect(applied.applied).toBe(0);
+      expect(applied.skipped).toEqual([]);
     } finally {
       a.close();
       b.close();
@@ -292,8 +295,8 @@ describe("sync driver — bidirectional convergence", () => {
       }
       const result1 = await tick(a.db, b.rpc);
       const result2 = await tick(b.db, a.rpc);
-      expect(result1).toEqual({ pulled: 0, pushed: 0 });
-      expect(result2).toEqual({ pulled: 0, pushed: 0 });
+      expect(result1).toEqual({ pulled: { applied: 0, skipped: [] }, pushed: 0 });
+      expect(result2).toEqual({ pulled: { applied: 0, skipped: [] }, pushed: 0 });
     } finally {
       a.close();
       b.close();
@@ -395,7 +398,8 @@ describe("sync driver — streaming pullOnce", () => {
         },
       }) as typeof a.rpc;
       const applied = await pullOnce(b.db, wrapped);
-      expect(applied).toBe(total);
+      expect(applied.applied).toBe(total);
+      expect(applied.skipped).toEqual([]);
       expect(fileEntries(b.db).length).toBe(total);
       // With a 256-entry batch we expect at least 3 calls.
       expect(hasObjectsCalls).toBeGreaterThanOrEqual(3);

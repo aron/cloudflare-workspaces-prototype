@@ -1,4 +1,5 @@
 import { mkdir } from "../fs/mkdir.js";
+import { readOnlyRootFor } from "../fs/mount-guard.js";
 import { resolveInode } from "../fs/resolve.js";
 import { rm } from "../fs/rm.js";
 import { symlink } from "../fs/symlink.js";
@@ -7,6 +8,37 @@ import type { Database } from "../storage.js";
 import type { ChangeEntry } from "./changes.js";
 import { computeManifestHash } from "./manifests.js";
 import { currentRev, readWatermark, writeWatermark } from "./watermarks.js";
+
+// One container-side change that landed under a read-only mount and
+// was therefore skipped rather than applied. Callers (the workspace
+// pull surface, the shell exec bracket) surface these so the user
+// learns the mount stayed authoritative.
+export interface SkippedEntry {
+  // Absolute VFS path the change targeted.
+  path: string;
+  // Mount root that owns the path (the one whose mode is
+  // read-only). Lets callers group skipped entries by mount.
+  mountRoot: string;
+  // 'write' covers file / dir / symlink create-or-update; 'delete'
+  // covers tombstones. The single field is enough for callers to
+  // decide messaging.
+  op: "write" | "delete";
+  // Open shape: future skip reasons can join this union without
+  // breaking callers that match on 'read-only' today.
+  reason: "read-only";
+}
+
+// Return shape of applyChanges / applyChangesSync. Existing callers
+// that only wanted a count read `result.applied`; new callers can
+// surface `result.skipped`.
+export interface ApplyResult {
+  // Entries written through writeFile / mkdir / symlink / rm.
+  applied: number;
+  // Entries dropped because they targeted a read-only mount root.
+  // Empty when no such mounts are registered or the stream stayed
+  // clear of them.
+  skipped: SkippedEntry[];
+}
 
 export interface ApplyOptions {
   // Soft cap on bytes written per transactionSync batch. Default 64
@@ -58,7 +90,7 @@ export async function applyChanges(
   entries: Iterable<ChangeEntry> | AsyncIterable<ChangeEntry>,
   objects: Map<string, Uint8Array>,
   options: ApplyOptions = {},
-): Promise<void> {
+): Promise<ApplyResult> {
   // Snapshot rev before we touch anything. Used by the loopback-
   // suppression at the bottom to decide whether it's safe to
   // advance pushRev past the entries this apply produced.
@@ -68,6 +100,8 @@ export async function applyChanges(
 
   let bytesInBatch = 0;
   let pathsInBatch = 0;
+  let applied = 0;
+  const skipped: SkippedEntry[] = [];
   const flush = () => {
     bytesInBatch = 0;
     pathsInBatch = 0;
@@ -82,24 +116,42 @@ export async function applyChanges(
     if (options.source === "upstream" && entry.kind !== "delete") {
       if (alreadyApplied(db, entry)) continue;
     }
+    // Read-only mount guard. Entries under a registered read-only
+    // mount root are surfaced via the return value and not applied.
+    // The owning workspace's surface (Workspace.pull, exec()) folds
+    // these into its own return so callers see what stayed
+    // authoritative on the mount.
+    const blockingRoot = readOnlyRootFor(db, entry.path);
+    if (blockingRoot !== undefined) {
+      skipped.push({
+        path: entry.path,
+        mountRoot: blockingRoot,
+        op: entry.kind === "delete" ? "delete" : "write",
+        reason: "read-only",
+      });
+      continue;
+    }
     if (entry.kind === "delete") {
       try {
         rm(db, entry.path, { recursive: true, force: true });
       } catch {
         // Already gone is fine — idempotent apply.
       }
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
     }
     if (entry.kind === "dir") {
       mkdir(db, entry.path, { mode: entry.mode, recursive: true }, () => entry.mtime);
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
     }
     if (entry.kind === "symlink") {
       symlink(db, entry.target, entry.path, () => entry.mtime);
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
@@ -132,6 +184,7 @@ export async function applyChanges(
       off += p.byteLength;
     }
     await writeFile(db, entry.path, buf, { mode: entry.mode }, () => entry.mtime);
+    applied++;
     bytesInBatch += total;
     pathsInBatch++;
     if (bytesInBatch >= maxBytes || pathsInBatch >= maxPaths) flush();
@@ -174,6 +227,8 @@ export async function applyChanges(
       writeWatermark(db, "pushRev", revAfter);
     }
   }
+
+  return { applied, skipped };
 }
 
 // Synchronous variant of applyChanges. Same semantics; takes an
@@ -189,13 +244,15 @@ export function applyChangesSync(
   entries: readonly ChangeEntry[],
   objects: Map<string, Uint8Array>,
   options: ApplyOptions = {},
-): void {
+): ApplyResult {
   const revBeforeApply = currentRev(db);
   const maxBytes = options.maxBytesPerBatch ?? DEFAULT_MAX_BYTES;
   const maxPaths = options.maxPathsPerBatch ?? DEFAULT_MAX_PATHS;
 
   let bytesInBatch = 0;
   let pathsInBatch = 0;
+  let applied = 0;
+  const skipped: SkippedEntry[] = [];
   const flush = () => {
     bytesInBatch = 0;
     pathsInBatch = 0;
@@ -205,24 +262,37 @@ export function applyChangesSync(
     if (options.source === "upstream" && entry.kind !== "delete") {
       if (alreadyApplied(db, entry)) continue;
     }
+    const blockingRoot = readOnlyRootFor(db, entry.path);
+    if (blockingRoot !== undefined) {
+      skipped.push({
+        path: entry.path,
+        mountRoot: blockingRoot,
+        op: entry.kind === "delete" ? "delete" : "write",
+        reason: "read-only",
+      });
+      continue;
+    }
     if (entry.kind === "delete") {
       try {
         rm(db, entry.path, { recursive: true, force: true });
       } catch {
         // Already gone is fine — idempotent apply.
       }
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
     }
     if (entry.kind === "dir") {
       mkdir(db, entry.path, { mode: entry.mode, recursive: true }, () => entry.mtime);
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
     }
     if (entry.kind === "symlink") {
       symlink(db, entry.target, entry.path, () => entry.mtime);
+      applied++;
       pathsInBatch++;
       if (pathsInBatch >= maxPaths) flush();
       continue;
@@ -252,6 +322,7 @@ export function applyChangesSync(
       off += p.byteLength;
     }
     writeFileSync(db, entry.path, buf, { mode: entry.mode }, () => entry.mtime);
+    applied++;
     bytesInBatch += total;
     pathsInBatch++;
     if (bytesInBatch >= maxBytes || pathsInBatch >= maxPaths) flush();
@@ -271,6 +342,8 @@ export function applyChangesSync(
       writeWatermark(db, "pushRev", revAfter);
     }
   }
+
+  return { applied, skipped };
 }
 
 // Compare an entry against the local node graph. Returns true when

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { mkdir } from "../fs/mkdir.js";
+import { invalidateReadOnlyMountCache } from "../fs/mount-guard.js";
 import { readFile } from "../fs/readFile.js";
 import { resolveInode } from "../fs/resolve.js";
 import { withDB, withTwoDBs } from "../fs/with-db.js";
 import { writeFile } from "../fs/writeFile.js";
-import { applyChanges } from "./apply.js";
+import { applyChanges, applyChangesSync } from "./apply.js";
 import type { ChangeEntry } from "./changes.js";
 import { coalesceChanges } from "./coalesce.js";
 import { fetchObjects } from "./fetch.js";
@@ -294,6 +296,244 @@ describe("applyChanges loopback suppression — F1", () => {
       // Loopback suppression still works in the safe case:
       // pushRev advances to cover the apply's own rev bump.
       expect(readWatermark(db, "pushRev")).toBe(currentRev(db));
+    });
+  });
+});
+
+describe("applyChanges with read-only mount roots", () => {
+  function stageReadOnly(db: import("../storage.js").Database, root: string): void {
+    db.run(
+      "INSERT INTO _vfs_mounts (root, kind, indexed, mode) VALUES (?, ?, 1, 'read-only')",
+      root,
+      "test",
+    );
+    invalidateReadOnlyMountCache(db);
+  }
+
+  it("skips a write entry under a read-only mount and reports it", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      const result = await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            rev: 100,
+            path: "/workspace/r2/hello.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toEqual([
+        {
+          path: "/workspace/r2/hello.txt",
+          mountRoot: "/workspace/r2",
+          op: "write",
+          reason: "read-only",
+        },
+      ]);
+      // The skipped path is not on disk.
+      expect(resolveInode(db, "/workspace/r2/hello.txt")).toBeNull();
+    });
+  });
+
+  it("skips a delete entry under a read-only mount and reports op:delete", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      const result = await applyChanges(
+        db,
+        [{ kind: "delete", rev: 101, path: "/workspace/r2/gone.txt" }],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toEqual([
+        {
+          path: "/workspace/r2/gone.txt",
+          mountRoot: "/workspace/r2",
+          op: "delete",
+          reason: "read-only",
+        },
+      ]);
+    });
+  });
+
+  it("skips an entry whose path is exactly the mount root", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      const result = await applyChanges(
+        db,
+        [
+          {
+            kind: "dir",
+            rev: 102,
+            path: "/workspace/r2",
+            mode: 0o755,
+            mtime: 1,
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped[0]?.mountRoot).toBe("/workspace/r2");
+    });
+  });
+
+  it("applies entries that lie outside any mount and reports an empty skipped list", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      mkdir(db, "/scratch", { recursive: true }, () => 0);
+
+      const result = await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            rev: 103,
+            path: "/scratch/ok.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(1);
+      expect(result.skipped).toEqual([]);
+      expect(resolveInode(db, "/scratch/ok.txt")).not.toBeNull();
+    });
+  });
+
+  it("does not skip entries under a read-write mount", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/rw", { recursive: true }, () => 0);
+      db.run(
+        "INSERT INTO _vfs_mounts (root, kind, indexed, mode) VALUES (?, ?, 1, 'read-write')",
+        "/workspace/rw",
+        "test",
+      );
+      invalidateReadOnlyMountCache(db);
+
+      const result = await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            rev: 104,
+            path: "/workspace/rw/ok.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(1);
+      expect(result.skipped).toEqual([]);
+    });
+  });
+
+  it("folds skip + apply across a mixed batch", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      mkdir(db, "/scratch", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      const result = await applyChanges(
+        db,
+        [
+          {
+            kind: "file",
+            rev: 200,
+            path: "/scratch/a.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+          {
+            kind: "file",
+            rev: 201,
+            path: "/workspace/r2/blocked.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+          {
+            kind: "file",
+            rev: 202,
+            path: "/scratch/b.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(2);
+      expect(result.skipped).toEqual([
+        {
+          path: "/workspace/r2/blocked.txt",
+          mountRoot: "/workspace/r2",
+          op: "write",
+          reason: "read-only",
+        },
+      ]);
+    });
+  });
+
+  it("applyChangesSync emits the same SkippedEntry shape", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/workspace/r2", { recursive: true }, () => 0);
+      stageReadOnly(db, "/workspace/r2");
+
+      const result = applyChangesSync(
+        db,
+        [
+          {
+            kind: "file",
+            rev: 300,
+            path: "/workspace/r2/blocked.txt",
+            mode: 0o644,
+            mtime: 1,
+            size: 0,
+            chunks: [],
+          },
+        ],
+        new Map(),
+      );
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toEqual([
+        {
+          path: "/workspace/r2/blocked.txt",
+          mountRoot: "/workspace/r2",
+          op: "write",
+          reason: "read-only",
+        },
+      ]);
     });
   });
 });
