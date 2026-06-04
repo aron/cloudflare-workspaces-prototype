@@ -96,6 +96,7 @@ function createWriteAPI(opts: WriteAPIOptions): MountWriteAPI {
   }
 
   return {
+    root,
     async writeFile(
       absPath: string,
       source: ReadableStream<Uint8Array>,

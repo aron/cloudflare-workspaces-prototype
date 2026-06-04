@@ -19,6 +19,7 @@ import {
 import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { GuardedWorkspaceFilesystem } from "./mounts/guarded-fs.js";
 import { MountIndex } from "./mounts/index.js";
 import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
 import type { Mount } from "./mounts/types.js";
@@ -83,6 +84,7 @@ export class Workspace {
   readonly #now: () => number;
   readonly #mounts: Map<string, Mount>;
   readonly #mountIndex: MountIndex;
+  readonly #guardedFs: WorkspaceFilesystem;
   #handle: BackendHandle | undefined;
   #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
@@ -113,6 +115,8 @@ export class Workspace {
       fs: this.#fs,
       mounts: this.#mounts,
     });
+    this.#guardedFs =
+      this.#mounts.size === 0 ? this.#fs : new GuardedWorkspaceFilesystem(this.#fs, this.#mounts);
   }
 
   // Force every registered mount to materialize. Idempotent; safe to
@@ -138,8 +142,11 @@ export class Workspace {
   // Filesystem facade — the documented Workspace.fs surface from
   // docs/04. Available immediately; doesn't need ready() because
   // reads and writes hit the local store, not the wire.
+  //
+  // When read-only mounts are registered the returned facade rejects
+  // writes under those roots with EROFS; reads pass straight through.
   get fs(): WorkspaceFilesystem {
-    return this.#fs;
+    return this.#guardedFs;
   }
 
   /**

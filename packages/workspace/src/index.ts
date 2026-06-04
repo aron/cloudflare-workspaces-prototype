@@ -20,6 +20,7 @@ export {
   withWorkspaceContainer,
 } from "./backends/container-host.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2.js";
 export type {
   EagerMount,
   Mount,

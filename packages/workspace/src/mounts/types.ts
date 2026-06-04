@@ -78,7 +78,13 @@ export interface MountContext {
 // it cannot read, list, or delete. writeFile accepts a
 // ReadableStream so a multi-GB blob can flow through the chunked
 // blob writer without ever sitting whole in memory.
+//
+// The `root` field carries the absolute mount root the indexer
+// scoped this api to. Providers that work in terms of relative
+// keys (R2, GitHub) use it to build absolute paths without
+// threading a separate argument.
 export interface MountWriteAPI {
+  readonly root: string;
   writeFile(absPath: string, source: ReadableStream<Uint8Array>, mode?: number): Promise<void>;
   mkdir(absPath: string, mode?: number): Promise<void>;
 }
