@@ -32,11 +32,15 @@
   // R2Bucket(...). Seed it once with:
   //   npm run seed:r2 --workspace @cloudflare/example-wsd-container
   // which uploads ./seed/r2-hello/hello.txt to the bucket.
+  // `bucket_name` is what `wrangler dev` and `wrangler deploy` both
+  // look at; omitting `preview_bucket_name` makes the same bucket
+  // back the local miniflare and the deployed worker, which keeps
+  // the seed scripts honest (a `--local` put and a `--remote` put
+  // both target `workspace-container-hello`).
   "r2_buckets": [
     {
       "binding": "R2_HELLO",
-      "bucket_name": "workspace-container-hello",
-      "preview_bucket_name": "workspace-container-hello-preview"
+      "bucket_name": "workspace-container-hello"
     }
   ],
 
