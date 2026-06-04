@@ -169,7 +169,10 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     // session.
     let stopHeartbeat: (() => void) | undefined;
     const closed = new Promise<void>((resolve) => {
+      let fired = false;
       const onClose = () => {
+        if (fired) return;
+        fired = true;
         stopHeartbeat?.();
         resolve();
         this.#handle = undefined;
@@ -178,6 +181,15 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       // Some runtimes fire 'error' without a follow-up 'close' on
       // abrupt teardown; treat error as close too.
       ws.addEventListener("error", onClose, { once: true });
+      // capnweb's RPC layer can notice the session is broken (an
+      // abort frame, a malformed message) before the underlying
+      // WebSocket fires close. onRpcBroken closes that gap so the
+      // next ready() rebuilds against a fresh transport instead of
+      // waiting on a heartbeat or the next real RPC to discover
+      // the wedged session.
+      (stub as unknown as { onRpcBroken: (cb: (err: unknown) => void) => void }).onRpcBroken(
+        onClose,
+      );
     });
 
     if (this.#options.heartbeatIntervalMs > 0) {
@@ -199,6 +211,17 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
       closed,
       close: async () => {
         stopHeartbeat?.();
+        // Dispose the root stub first. Per capnweb's docs, this is
+        // the documented way to shut a session down — it lets the
+        // RPC layer send a clean abort frame to the peer before
+        // the socket dies. Falling through to ws.close() is
+        // belt-and-braces for runtimes where the dispose path
+        // doesn't (yet) close the transport.
+        try {
+          (stub as unknown as Disposable)[Symbol.dispose]?.();
+        } catch {
+          // already disposed; idempotent
+        }
         try {
           ws.close();
         } catch {

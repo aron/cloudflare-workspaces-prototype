@@ -53,6 +53,15 @@ export function createSyncClient(options: ClientOptions): SyncClient {
     get(target, prop, receiver) {
       if (prop === "close") {
         return async () => {
+          // Dispose the root stub first — per capnweb's docs this
+          // is the documented way to close a session and lets the
+          // RPC layer send a clean abort frame before the transport
+          // dies. ws.close() below is belt-and-braces.
+          try {
+            (target as unknown as Disposable)[Symbol.dispose]?.();
+          } catch {
+            // already disposed; idempotent
+          }
           await new Promise<void>((resolve) => {
             const w = ws as unknown as { readyState: number; close: () => void };
             if (w.readyState >= 2) {
@@ -140,6 +149,12 @@ export function createWorkspaceClient(options: {
     get(target, prop, receiver) {
       if (prop === "close") {
         return async () => {
+          // Same dispose-before-close pattern as createSyncClient.
+          try {
+            (target as unknown as Disposable)[Symbol.dispose]?.();
+          } catch {
+            // already disposed; idempotent
+          }
           await new Promise<void>((resolve) => {
             const w = ws as unknown as { readyState: number; close: () => void };
             if (w.readyState >= 2) {
