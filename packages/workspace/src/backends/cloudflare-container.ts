@@ -51,12 +51,25 @@ import type { BackendHandle, WorkspaceBackend } from "../backend.js";
 import { startHeartbeat } from "../heartbeat.js";
 import type { IWorkspaceContainerAPI, WorkspaceRef } from "./container-host.js";
 
+// What the backend's `container` factory returns: anything with
+// a getWorkspaceContainer() method — the shape withWorkspaceContainer
+// installs. Same-DO callers pass `this`; cross-DO callers pass a
+// DO stub whose target was extended with withWorkspaceContainer
+// (Workers RPC exposes the method as a pipelined callable).
+export interface ContainerHostHolder {
+  getWorkspaceContainer(): IWorkspaceContainerAPI | Promise<IWorkspaceContainerAPI>;
+}
+
 export interface CloudflareContainerBackendOptions {
   // Resolves the container host to drive on each connect(). Called
   // anew per dial so a pool-backed factory can re-pick. Returning
   // a Promise is supported for pickers that consult external state
   // (KV, a coordinator DO, etc.).
-  container: () => IWorkspaceContainerAPI | Promise<IWorkspaceContainerAPI>;
+  //
+  // The returned value exposes getWorkspaceContainer() — the same
+  // shape withWorkspaceContainer installs. Pass `this` (same-DO)
+  // or a DO stub (cross-DO); the backend calls the method itself.
+  container: () => ContainerHostHolder | Promise<ContainerHostHolder>;
 
   // Identifies the Workspace-owning DO. Fixed for the lifetime of
   // the backend: the backend lives inside this DO and the /ws
@@ -127,7 +140,8 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
     if (this.#handle) return this.#handle;
 
     const deadline = Date.now() + this.#options.connectTimeoutMs;
-    const host = await this.#options.container();
+    const holder = await this.#options.container();
+    const host = await holder.getWorkspaceContainer();
 
     await host.start({
       PORT: String(this.#options.containerPort),

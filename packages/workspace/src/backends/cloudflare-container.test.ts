@@ -73,7 +73,7 @@ describe("CloudflareContainerBackend", () => {
   test("connect() throws when the container port never opens", async () => {
     const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
@@ -90,7 +90,7 @@ describe("CloudflareContainerBackend", () => {
   test("egressHost option overrides the default", async () => {
     const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
       egressHost: "wsd.local",
       connectTimeoutMs: 300,
@@ -102,7 +102,7 @@ describe("CloudflareContainerBackend", () => {
   test("containerEnv option merges onto the start() env", async () => {
     const fake = makeFakeHost({ healthy: false });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
       containerEnv: { CUSTOM: "1", PORT: "9000" },
       connectTimeoutMs: 300,
@@ -117,7 +117,7 @@ describe("CloudflareContainerBackend", () => {
 
   test("container factory is invoked per connect()", async () => {
     const fake = makeFakeHost({ healthy: false });
-    const factory = vi.fn(() => fake.host);
+    const factory = vi.fn(() => ({ getWorkspaceContainer: () => fake.host }));
     const backend = new CloudflareContainerBackend({
       container: factory,
       workspace: fakeWorkspace,
@@ -135,7 +135,7 @@ describe("CloudflareContainerBackend", () => {
     const backend = new CloudflareContainerBackend({
       container: async () => {
         await Promise.resolve();
-        return fake.host;
+        return { getWorkspaceContainer: () => fake.host };
       },
       workspace: fakeWorkspace,
       connectTimeoutMs: 300,
@@ -147,7 +147,7 @@ describe("CloudflareContainerBackend", () => {
   test("connect() throws when /connect returns non-2xx", async () => {
     const fake = makeFakeHost({ connectStatus: 502 });
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
@@ -158,7 +158,7 @@ describe("CloudflareContainerBackend", () => {
   test("connect() throws when the /ws upgrade never arrives", async () => {
     const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
       connectTimeoutMs: 600,
     });
@@ -169,7 +169,7 @@ describe("CloudflareContainerBackend", () => {
   test("handleFetch rejects non-/ws paths", async () => {
     const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
     });
     const res = await backend.handleFetch(new Request("http://workspace.internal/other"));
@@ -179,7 +179,7 @@ describe("CloudflareContainerBackend", () => {
   test("handleFetch rejects missing upgrade header", async () => {
     const fake = makeFakeHost();
     const backend = new CloudflareContainerBackend({
-      container: () => fake.host,
+      container: () => ({ getWorkspaceContainer: () => fake.host }),
       workspace: fakeWorkspace,
     });
     const res = await backend.handleFetch(new Request("http://workspace.internal/ws"));

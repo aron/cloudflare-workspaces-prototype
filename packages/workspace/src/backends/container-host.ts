@@ -102,10 +102,13 @@ export class WorkspaceContainerAPI extends RpcTarget implements IWorkspaceContai
 // biome-ignore lint/suspicious/noExplicitAny: mixin constructor shape requires any[]
 type DOCtor = new (...args: any[]) => object;
 
-// Mixin: add a single `ws` accessor to a DO class. The accessor
-// returns a fresh WorkspaceContainerAPI bound to this DO's ctx.
-// One name added to the consumer's class — nothing to forward to
-// super, nothing else to override.
+// Mixin: add a single `getWorkspaceContainer()` method to a DO
+// class. Returns a fresh WorkspaceContainerAPI bound to this DO's
+// ctx. One name added to the consumer's class — nothing to
+// forward to super, nothing else to override. A method (not a
+// getter) so it crosses Workers RPC as a callable, and the
+// long-form name keeps it from colliding with anything the
+// consumer's base class might already expose.
 //
 // Same-DO usage (Agent owns the container):
 //
@@ -113,37 +116,36 @@ type DOCtor = new (...args: any[]) => object;
 //     class extends DurableObject<Env> {},
 //   ) {
 //     #backend = new CloudflareContainerBackend({
-//       container: () => this.ws,
+//       container: () => this,
 //       workspace: { binding: "Agent", id: this.ctx.id.toString() },
 //     });
 //   }
 //
-// Cross-DO usage (pool member exposes ws across RPC):
+// Cross-DO usage (pool member owns the container):
 //
 //   export class WsdHost extends withWorkspaceContainer(
 //     class extends DurableObject<Env> {},
-//   ) {
-//     host() { return this.ws; }
-//   }
+//   ) {}
 //
 //   #backend = new CloudflareContainerBackend({
-//     container: () => this.env.WsdHost.get(memberId).host(),
+//     container: () => this.env.WsdHost.get(memberId),
 //     workspace: { binding: "Agent", id: this.ctx.id.toString() },
 //   });
+//
 // Constructor type the mixin returns. Written explicitly so
 // rolldown-plugin-dts can emit a stable .d.ts (anonymous returned
-// classes with getters trip its TS transformer).
+// classes with method declarations trip its TS transformer).
 export type WithWorkspaceContainerCtor<TBase extends DOCtor> = TBase &
   (new (
     // biome-ignore lint/suspicious/noExplicitAny: mirror mixin constructor shape
     ...args: any[]
-  ) => InstanceType<TBase> & { readonly ws: WorkspaceContainerAPI });
+  ) => InstanceType<TBase> & { getWorkspaceContainer(): WorkspaceContainerAPI });
 
 export function withWorkspaceContainer<TBase extends DOCtor>(
   Base: TBase,
 ): WithWorkspaceContainerCtor<TBase> {
   class WithWorkspaceContainer extends Base {
-    get ws(): WorkspaceContainerAPI {
+    getWorkspaceContainer(): WorkspaceContainerAPI {
       return new WorkspaceContainerAPI((this as unknown as { ctx: DurableObjectState }).ctx);
     }
   }
