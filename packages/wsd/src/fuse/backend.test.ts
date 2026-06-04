@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { expect, test } from "vitest";
 
 import { detectFUSEBackend } from "./index.js";
 

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, onTestFinished, test } from "vitest";
+import { expect, onTestFinished, test } from "vitest";
 
 // Pure logger primitives: a single appendToLogFile that's idempotent
 // over a file handle and a formatError that surfaces stack traces.
@@ -34,7 +34,7 @@ test("formatLogEntry: prefixes with ISO timestamp and level", () => {
   expect(errOut).toMatch(/\[error\]/);
 });
 
-test("createFileLogger: appends entries to the given path", async (ctx) => {
+test("createFileLogger: appends entries to the given path", async (_ctx) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "wsd-logger-"));
   const logPath = path.join(dir, "wsd.log");
   onTestFinished(() => fsp.rm(dir, { recursive: true, force: true }));
@@ -49,7 +49,7 @@ test("createFileLogger: appends entries to the given path", async (ctx) => {
   expect(contents).toMatch(/\[error\] second/);
 });
 
-test("createFileLogger: appends (does not truncate) when reopening", async (ctx) => {
+test("createFileLogger: appends (does not truncate) when reopening", async (_ctx) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "wsd-logger-"));
   const logPath = path.join(dir, "wsd.log");
   onTestFinished(() => fsp.rm(dir, { recursive: true, force: true }));
@@ -66,7 +66,7 @@ test("createFileLogger: appends (does not truncate) when reopening", async (ctx)
   expect(contents).toMatch(/new line/);
 });
 
-test("createFileLogger: creates the file if it doesn't exist", async (ctx) => {
+test("createFileLogger: creates the file if it doesn't exist", async (_ctx) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "wsd-logger-"));
   const logPath = path.join(dir, "nested/wsd.log");
   onTestFinished(() => fsp.rm(dir, { recursive: true, force: true }));
@@ -78,7 +78,7 @@ test("createFileLogger: creates the file if it doesn't exist", async (ctx) => {
   expect(fs.existsSync(logPath)).toBeTruthy();
 });
 
-test("installLogging: mirrors console.{log,error} into the log file", async (t) => {
+test("installLogging: mirrors console.{log,error} into the log file", async (_t) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "wsd-logger-"));
   const logPath = path.join(dir, "wsd.log");
   onTestFinished(() => fsp.rm(dir, { recursive: true, force: true }));
@@ -109,7 +109,7 @@ test("installLogging: restores console methods on teardown", () => {
   expect(console.error).toBe(originalError);
 });
 
-test("installLogging: uncaughtException handler writes to LOG_FILE before exit", async (ctx) => {
+test("installLogging: uncaughtException handler writes to LOG_FILE before exit", async (_ctx) => {
   // Spawn a tiny Node script that imports installLogging, then
   // throws asynchronously to trigger uncaughtException. The exit
   // code should be 1 and the log file should contain the formatted

@@ -49,7 +49,7 @@ test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
   expect(stderr).toMatch(/EXEC_LOG_MAX_BYTES must be a positive integer/);
 });
 
-test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (t) => {
+test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (_t) => {
   // Boot the daemon with LOG_FILE pointed at a temp file. The
   // startup banner line on stdout should also show up in the file,
   // proving the console patch landed and didn't replace the original
@@ -101,7 +101,7 @@ test("wsd exposes file IO through the mounted filesystem", async (ctx) => {
   expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello fuse");
 });
 
-test("/ws serves a capnweb WorkspaceRPC session", async (ctx) => {
+test("/ws serves a capnweb WorkspaceRPC session", async (_ctx) => {
   const { createWorkspaceClient } = await import("@cloudflare/workspace-rpc/client");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
@@ -126,7 +126,7 @@ test("/ws serves a capnweb WorkspaceRPC session", async (ctx) => {
   }
 });
 
-test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (ctx) => {
+test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (_ctx) => {
   const { newHttpBatchRpcSession } = await import("capnweb");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
@@ -137,7 +137,7 @@ test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (ctx) => {
   expect(await stub.sync.hasObjects([])).toEqual([]);
 });
 
-test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (ctx) => {
+test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (_ctx) => {
   // No FUSE backend required — the shim runs in user space and is
   // explicitly opt-in via FUSE_SHIM=1. Mirrors the real-FUSE test
   // above but for the dev fallback path.
@@ -158,7 +158,7 @@ test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (ctx) => 
   expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello shim");
 });
 
-test("FUSE_SHIM materialises an RPC push under the mount point", async (ctx) => {
+test("FUSE_SHIM materialises an RPC push under the mount point", async (_ctx) => {
   // End-to-end version of the cross-namespace fix: a peer pushes a
   // file at `${MOUNT_POINT}/repo/a.txt` into wsd's VFS over
   // capnweb, and the shim drops it on disk at the same absolute
@@ -209,7 +209,7 @@ test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
   expect(stderr).toMatch(/mutually exclusive/);
 });
 
-test("/connect re-dial tears down the prior WebSocket session", async (ctx) => {
+test("/connect re-dial tears down the prior WebSocket session", async (_ctx) => {
   // After a DO hibernate, the new incarnation calls POST /connect
   // again to bootstrap a fresh capnweb session against the still-
   // running wsd. wsd must close the previous outbound socket before

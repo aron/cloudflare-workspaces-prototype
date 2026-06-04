@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { expect, onTestFinished, test } from "vitest";
 
 import { createNodeVirtualFileSystem } from "../fuse/index.js";
 import { mountShim } from "./index.js";
@@ -40,7 +40,7 @@ async function setup() {
   return { vfs, mountPoint, shim };
 }
 
-test("shim mirrors VFS writes onto disk", async (ctx) => {
+test("shim mirrors VFS writes onto disk", async (_ctx) => {
   const { vfs, mountPoint } = await setup();
   // VFS and host namespaces share the same absolute prefix:
   // `${mountPoint}/proj/hello.txt` is the same path in both.
@@ -54,7 +54,7 @@ test("shim mirrors VFS writes onto disk", async (ctx) => {
   });
 });
 
-test("shim mirrors disk writes back into the VFS", async (ctx) => {
+test("shim mirrors disk writes back into the VFS", async (_ctx) => {
   const { vfs, mountPoint } = await setup();
   await fs.mkdir(path.join(mountPoint, "sub"));
   await fs.writeFile(path.join(mountPoint, "sub", "note.md"), "from host");
@@ -66,7 +66,7 @@ test("shim mirrors disk writes back into the VFS", async (ctx) => {
   });
 });
 
-test("shim mirrors deletions in both directions", async (ctx) => {
+test("shim mirrors deletions in both directions", async (_ctx) => {
   const { vfs, mountPoint } = await setup();
 
   // VFS -> disk delete.
@@ -92,7 +92,7 @@ test("shim mirrors deletions in both directions", async (ctx) => {
   await eventually(() => !vfs.existsSync(`${mountPoint}/b.txt`));
 });
 
-test("shim does not echo identical writes back and forth", async (ctx) => {
+test("shim does not echo identical writes back and forth", async (_ctx) => {
   const { vfs, mountPoint } = await setup();
   const vfsPath = `${mountPoint}/stable.txt`;
   vfs.writeFileSync(vfsPath, Buffer.from("same"));
@@ -114,7 +114,7 @@ test("shim does not echo identical writes back and forth", async (ctx) => {
   expect(after).toBe(before, "identical disk write should not bump VFS mtime");
 });
 
-test("shim picks up nested directory creates on disk", async (ctx) => {
+test("shim picks up nested directory creates on disk", async (_ctx) => {
   const { vfs, mountPoint } = await setup();
   await fs.mkdir(path.join(mountPoint, "a", "b", "c"), { recursive: true });
   await fs.writeFile(path.join(mountPoint, "a", "b", "c", "leaf.txt"), "leaf");
@@ -126,7 +126,7 @@ test("shim picks up nested directory creates on disk", async (ctx) => {
   });
 });
 
-test("shim.flush() settles VFS writes onto disk before resolving", async (ctx) => {
+test("shim.flush() settles VFS writes onto disk before resolving", async (_ctx) => {
   // Use a very slow poll so the watcher/poll loops can't accidentally
   // serve the assertion. If flush() works, the file is on disk before
   // any tick fires; if it doesn't, the read fails because nothing else
@@ -149,7 +149,7 @@ test("shim.flush() settles VFS writes onto disk before resolving", async (ctx) =
   expect(await fs.readFile(path.join(mountPoint, "proj", "b.txt"), "utf8")).toBe("beta");
 });
 
-test("shim.flush() is idempotent and cheap on a clean tree", async (ctx) => {
+test("shim.flush() is idempotent and cheap on a clean tree", async (_ctx) => {
   // Second flush should be a no-op (shadow short-circuits every
   // syncVfsPathToDisk call) and complete promptly.
   const { vfs, mountPoint, shim } = await setup();
@@ -161,7 +161,7 @@ test("shim.flush() is idempotent and cheap on a clean tree", async (ctx) => {
   expect(mtime2).toBe(mtime1, "flush should not rewrite an unchanged file");
 });
 
-test("shim.flush() resolves on an unmounted shim without throwing", async (ctx) => {
+test("shim.flush() resolves on an unmounted shim without throwing", async (_ctx) => {
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-flush-unmount-"));
   const { vfs } = await createNodeVirtualFileSystem();
   const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: TICK_MS });
@@ -172,7 +172,7 @@ test("shim.flush() resolves on an unmounted shim without throwing", async (ctx) 
   await shim.flush();
 });
 
-test("shim drops VFS writes outside the mount point", async (ctx) => {
+test("shim drops VFS writes outside the mount point", async (_ctx) => {
   // Pin the cross-namespace contract that backed the original bug:
   // a write into the VFS at `${mountPoint}/foo` lands on disk at
   // the same absolute path, and a write at bare "/foo" (outside

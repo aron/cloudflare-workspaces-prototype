@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "vitest";
+import { expect, test } from "vitest";
 
 import { createNodeVirtualFileSystem } from "./index.js";
 

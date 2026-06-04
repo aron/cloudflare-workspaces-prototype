@@ -138,14 +138,6 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    */
   readonly #backend: CloudflareContainerBackend;
   readonly #containerWs: Workspace;
-  /**
-   * Shared isomorphic-git cache. Reused across every isogit call this
-   * agent makes (clone, walk, resolveRef, …). Without this, each call
-   * re-parses the packfile from scratch — a ~20 MB read through the
-   * SQLite-backed VFS — which is what makes a naive `gitDiff` take
-   * many minutes on a real repo.
-   */
-  readonly #gitCache: Record<string, unknown> = {};
 
   /** Cached context written by the Worker before the workflow runs. */
   #context: TriageContext | null = null;
@@ -339,8 +331,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
         return {
           status: "failed",
           text: collectAssistantText(this.messages),
-          reason:
-            `Agent turn ended in status=${insp.status}` + (insp.error ? `: ${insp.error}` : ""),
+          reason: `Agent turn ended in status=${insp.status}${insp.error ? `: ${insp.error}` : ""}`,
         };
       }
       await sleep(POLL_MS);
