@@ -27,11 +27,14 @@
   // Seed it with `npm run seed:r2 --workspace @cloudflare/example-think`
   // which uploads ./seed/r2-skills/.agents/skills/triage/SKILL.md to
   // the bucket under the `.agents/` prefix.
+  // No `preview_bucket_name`: `wrangler dev` and `wrangler deploy`
+  // both bind to `think-example-skills`, so the seed scripts only
+  // have one bucket to populate. See examples/wsd-container for the
+  // same shape and the reasoning.
   "r2_buckets": [
     {
       "binding": "R2_SKILLS",
-      "bucket_name": "think-example-skills",
-      "preview_bucket_name": "think-example-skills-preview"
+      "bucket_name": "think-example-skills"
     }
   ],
 
