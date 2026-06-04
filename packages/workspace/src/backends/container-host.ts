@@ -1,23 +1,24 @@
-// ContainerHost — the seam CloudflareContainerBackend drives instead
-// of talking to a Container binding directly. Two reasons it exists:
+// IWorkspaceContainerAPI — the seam CloudflareContainerBackend
+// drives instead of talking to a Container binding directly. Two
+// reasons it exists:
 //
 //   1. Same-DO vs cross-DO. A container-pool deployment wants the
 //      DO that owns the Workspace (e.g. an Agent DO) to be separate
 //      from the DO that owns the Container binding (a pool member
 //      that can be re-leased between sessions). The pool member's
 //      ctx.container isn't reachable from the Agent's isolate, but
-//      a DO stub satisfying ContainerHost is.
+//      an RpcTarget stub satisfying IWorkspaceContainerAPI is.
 //
 //   2. Testability. The interface is narrower than `Container` —
-//      three async methods — and fakes don't need to mimic the
-//      full runtime surface.
+//      three methods — and fakes don't need to mimic the full
+//      runtime surface.
 //
-// The workspace argument to interceptOutboundHttp is intentionally a
-// union: Fetcher for the same-DO case (where the caller can build a
-// WorkspaceProxy loopback fetcher in the right isolate), or
-// WorkspaceRef plain data for the cross-DO case (Fetcher can't
-// travel over Workers RPC, so the host-side constructs the
-// WorkspaceProxy itself from {binding, id}).
+// Consumers don't implement this interface directly. They mix
+// `withWorkspaceContainer(Base)` into their DO class, which adds a
+// single `ws` accessor returning a `WorkspaceContainerAPI` —
+// an RpcTarget so it works the same in-isolate and across RPC.
+
+import { RpcTarget } from "cloudflare:workers";
 
 // Identifies the Durable Object that owns the Workspace and answers
 // the /ws upgrade. Plain data so it can travel over Workers RPC.
@@ -29,106 +30,122 @@ export interface WorkspaceRef {
   id: string;
 }
 
-// Driver surface CloudflareContainerBackend talks to. Same-DO
-// callers use localContainerHost(ctx); cross-DO callers extend
-// ContainerHostDO and pass an RPC stub.
-export interface ContainerHost {
+// Driver surface CloudflareContainerBackend talks to. Implemented
+// by WorkspaceContainerAPI below; exposed on consumer DOs through
+// the `ws` accessor that withWorkspaceContainer installs.
+export interface IWorkspaceContainerAPI {
   // Idempotent start. Returns once the runtime has accepted the
   // start command; readiness is verified by the backend polling
-  // /health via fetchPort.
+  // /health via port().
   start(env: Record<string, string>): Promise<void>;
 
   // Wire `host` → workspace inside the container's egress table.
-  // Called once per backend connect(). Same-DO ContainerHost
-  // implementations accept a Fetcher built locally; cross-DO ones
-  // accept a WorkspaceRef and construct the fetcher themselves.
-  interceptOutboundHttp(host: string, workspace: Fetcher | WorkspaceRef): Promise<void>;
+  // Called once per backend connect(). The implementation
+  // constructs the loopback Fetcher locally from {binding, id},
+  // because Fetchers can't survive a Workers RPC hop.
+  interceptOutboundHttp(host: string, workspace: WorkspaceRef): Promise<void>;
 
-  // Forward an HTTP request to the named TCP port inside the
+  // Return a Fetcher bound to the named TCP port inside the
   // container. The backend uses this for the /health poll and the
-  // POST /connect handshake.
-  fetchPort(port: number, request: Request): Promise<Response>;
+  // POST /connect handshake — call `.fetch(request)` on the result.
+  // Across RPC, the Workers runtime auto-stubs the Fetcher so a
+  // chained `.fetch(...)` pipelines into one round-trip.
+  port(port: number): Fetcher;
 }
 
-// Same-DO adapter. Wraps `ctx.container` directly. The caller is
-// responsible for handing in a workspace Fetcher when calling
-// connect() through the backend — typically `ctx.exports.WorkspaceProxy(...)`.
-//
-// We don't construct the WorkspaceProxy fetcher in here because
-// ctx.exports requires per-binding type augmentation that lives in
-// the user's worker-configuration.d.ts, not in @cloudflare/workspace.
-// Pushing the construction to the call site keeps this helper
-// type-portable across users.
-export function localContainerHost(ctx: DurableObjectState): ContainerHost {
-  const container = ctx.container;
-  if (!container) {
-    throw new Error("localContainerHost: DO is not container-enabled (check wrangler.jsonc)");
+// Concrete implementation. Extends RpcTarget so it travels intact
+// across a Workers RPC boundary; in-isolate callers see plain
+// method calls. Constructed by withWorkspaceContainer's `ws`
+// getter — consumers don't instantiate this directly.
+export class WorkspaceContainerAPI extends RpcTarget implements IWorkspaceContainerAPI {
+  readonly #container: NonNullable<DurableObjectState["container"]>;
+  readonly #ctx: DurableObjectState;
+
+  constructor(ctx: DurableObjectState) {
+    super();
+    if (!ctx.container) {
+      throw new Error("WorkspaceContainerAPI: DO is not container-enabled (check wrangler.jsonc)");
+    }
+    this.#container = ctx.container;
+    this.#ctx = ctx;
   }
-  return {
-    async start(env) {
-      if (container.running) return;
-      container.start({ enableInternet: true, env });
-    },
-    async interceptOutboundHttp(host, workspace) {
-      if (!isFetcher(workspace)) {
-        throw new Error(
-          "localContainerHost: same-DO callers must pass a Fetcher (e.g. ctx.exports.WorkspaceProxy(...)); WorkspaceRef is only used by cross-DO ContainerHostDO",
-        );
-      }
-      await container.interceptOutboundHttp(host, workspace);
-    },
-    async fetchPort(port, request) {
-      return container.getTcpPort(port).fetch(request);
-    },
-  };
+
+  async start(env: Record<string, string>) {
+    if (this.#container.running) return;
+    this.#container.start({ enableInternet: true, env });
+  }
+
+  async interceptOutboundHttp(host: string, ref: WorkspaceRef) {
+    // ctx.exports.WorkspaceProxy is bound by name in the
+    // consumer's Worker (they re-export WorkspaceProxy from this
+    // package). The cast keeps us independent of the consumer's
+    // worker-configuration.d.ts.
+    // ctx.exports is present at runtime but not on the public
+    // DurableObjectState type; cast through unknown to reach it.
+    const exports = (this.#ctx as unknown as { exports: Record<string, unknown> }).exports as {
+      WorkspaceProxy: (opts: { props: WorkspaceRef }) => Fetcher;
+    };
+    await this.#container.interceptOutboundHttp(host, exports.WorkspaceProxy({ props: ref }));
+  }
+
+  port(port: number) {
+    return this.#container.getTcpPort(port);
+  }
 }
 
-function isFetcher(value: Fetcher | WorkspaceRef): value is Fetcher {
-  return typeof (value as Fetcher).fetch === "function";
-}
+// TS requires a mixin class's constructor to take a single rest
+// parameter, so we widen here. DurableObject's runtime signature
+// is still (ctx, env); the rest tuple just makes TS happy. We
+// don't constrain the instance shape because DurableObject's
+// `ctx` is protected — visible inside the mixin's class body via
+// `extends Base`, but not as a public structural property.
+// biome-ignore lint/suspicious/noExplicitAny: mixin constructor shape requires any[]
+type DOCtor = new (...args: any[]) => object;
 
-// Cross-DO callers implement ContainerHost on a container-enabled
-// DO of their own. The shape is roughly:
+// Mixin: add a single `ws` accessor to a DO class. The accessor
+// returns a fresh WorkspaceContainerAPI bound to this DO's ctx.
+// One name added to the consumer's class — nothing to forward to
+// super, nothing else to override.
 //
-//   import { DurableObject } from "cloudflare:workers";
-//   import {
-//     type ContainerHost,
-//     type WorkspaceRef,
-//     WorkspaceProxy,
-//   } from "@cloudflare/workspace";
+// Same-DO usage (Agent owns the container):
 //
-//   export { WorkspaceProxy };
-//
-//   export class WsdHost extends DurableObject<Env> implements ContainerHost {
-//     async start(env: Record<string, string>) {
-//       const c = this.ctx.container!;
-//       if (!c.running) c.start({ enableInternet: true, env });
-//     }
-//     async interceptOutboundHttp(host: string, workspace: Fetcher | WorkspaceRef) {
-//       if (typeof (workspace as Fetcher).fetch === "function") {
-//         throw new Error("WsdHost only accepts WorkspaceRef across the RPC boundary");
-//       }
-//       const { binding, id } = workspace as WorkspaceRef;
-//       await this.ctx.container!.interceptOutboundHttp(
-//         host,
-//         this.ctx.exports.WorkspaceProxy({ props: { binding, id } }),
-//       );
-//     }
-//     async fetchPort(port: number, req: Request) {
-//       return this.ctx.container!.getTcpPort(port).fetch(req);
-//     }
+//   export class Agent extends withWorkspaceContainer(
+//     class extends DurableObject<Env> {},
+//   ) {
+//     #backend = new CloudflareContainerBackend({
+//       container: () => this.ws,
+//       workspace: { binding: "Agent", id: this.ctx.id.toString() },
+//     });
 //   }
 //
-// Then in the Agent DO:
+// Cross-DO usage (pool member exposes ws across RPC):
+//
+//   export class WsdHost extends withWorkspaceContainer(
+//     class extends DurableObject<Env> {},
+//   ) {
+//     host() { return this.ws; }
+//   }
 //
 //   #backend = new CloudflareContainerBackend({
-//     container: async () => {
-//       const memberId = await pickPoolMember(this.env, this.ctx.id);
-//       return this.env.WsdHost.get(this.env.WsdHost.idFromString(memberId));
-//     },
-//     workspace: { binding: "AgentDO", id: this.ctx.id.toString() },
+//     container: () => this.env.WsdHost.get(memberId).host(),
+//     workspace: { binding: "Agent", id: this.ctx.id.toString() },
 //   });
-//
-// The base class isn't shipped from @cloudflare/workspace itself
-// because ctx.exports.WorkspaceProxy depends on per-Worker type
-// augmentation that lives in the consumer's worker-configuration.d.ts.
+// Constructor type the mixin returns. Written explicitly so
+// rolldown-plugin-dts can emit a stable .d.ts (anonymous returned
+// classes with getters trip its TS transformer).
+export type WithWorkspaceContainerCtor<TBase extends DOCtor> = TBase &
+  (new (
+    // biome-ignore lint/suspicious/noExplicitAny: mirror mixin constructor shape
+    ...args: any[]
+  ) => InstanceType<TBase> & { readonly ws: WorkspaceContainerAPI });
+
+export function withWorkspaceContainer<TBase extends DOCtor>(
+  Base: TBase,
+): WithWorkspaceContainerCtor<TBase> {
+  class WithWorkspaceContainer extends Base {
+    get ws(): WorkspaceContainerAPI {
+      return new WorkspaceContainerAPI((this as unknown as { ctx: DurableObjectState }).ctx);
+    }
+  }
+  return WithWorkspaceContainer as WithWorkspaceContainerCtor<TBase>;
+}

@@ -14,9 +14,10 @@ export {
   type CloudflareContainerBackendOptions,
 } from "./backends/cloudflare-container.js";
 export {
-  type ContainerHost,
-  localContainerHost,
+  type IWorkspaceContainerAPI,
+  WorkspaceContainerAPI,
   type WorkspaceRef,
+  withWorkspaceContainer,
 } from "./backends/container-host.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
 export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";

@@ -1,5 +1,5 @@
 // CloudflareContainerBackend tests — exercise the lifecycle
-// plumbing against an in-process fake ContainerHost.
+// plumbing against an in-process fake IWorkspaceContainerAPI.
 //
 // The successful connect() path constructs a WebSocketPair, which
 // is a workerd global not available under the vitest node runner.
@@ -12,7 +12,7 @@
 import { describe, expect, test, vi } from "vitest";
 
 import { CloudflareContainerBackend } from "./cloudflare-container.js";
-import type { ContainerHost, WorkspaceRef } from "./container-host.js";
+import type { IWorkspaceContainerAPI, WorkspaceRef } from "./container-host.js";
 
 interface FakeHostOptions {
   healthy?: boolean;
@@ -20,7 +20,7 @@ interface FakeHostOptions {
 }
 
 interface FakeHost {
-  host: ContainerHost;
+  host: IWorkspaceContainerAPI;
   calls: { name: string; args: unknown[] }[];
   startEnv?: Record<string, string>;
   interceptedHost?: string;
@@ -38,25 +38,30 @@ function makeFakeHost(opts: FakeHostOptions = {}): FakeHost {
       calls.push({ name: "start", args: [env] });
       state.startEnv = env;
     },
-    async interceptOutboundHttp(host, workspace) {
-      calls.push({ name: "interceptOutboundHttp", args: [host, workspace] });
+    async interceptOutboundHttp(host, ref) {
+      calls.push({ name: "interceptOutboundHttp", args: [host, ref] });
       state.interceptedHost = host;
-      state.interceptedWorkspace = workspace;
+      state.interceptedWorkspace = ref;
     },
-    async fetchPort(port, request) {
-      const url = new URL(request.url);
-      calls.push({ name: "fetchPort", args: [port, url.pathname, request.method] });
-      if (url.pathname === "/health") {
-        if (!healthy) throw new Error("connection refused");
-        return new Response(null, { status: 200 });
-      }
-      if (url.pathname === "/connect") {
-        if (connectStatus !== 200) {
-          return new Response(`/connect ${connectStatus}`, { status: connectStatus });
-        }
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-      throw new Error(`unexpected fetchPort path: ${url.pathname}`);
+    port(port) {
+      return {
+        async fetch(input, init) {
+          const request = input instanceof Request ? input : new Request(input, init);
+          const url = new URL(request.url);
+          calls.push({ name: "port", args: [port, url.pathname, request.method] });
+          if (url.pathname === "/health") {
+            if (!healthy) throw new Error("connection refused");
+            return new Response(null, { status: 200 });
+          }
+          if (url.pathname === "/connect") {
+            if (connectStatus !== 200) {
+              return new Response(`/connect ${connectStatus}`, { status: connectStatus });
+            }
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          throw new Error(`unexpected port path: ${url.pathname}`);
+        },
+      } as unknown as Fetcher;
     },
   };
   return state;
