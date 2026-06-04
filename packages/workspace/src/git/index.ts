@@ -24,25 +24,8 @@ import {
   type ReadFileFn,
 } from "./diff.js";
 
-export type { IsomorphicGitFSClient } from "./adapter.js";
-export { workspaceIsomorphicGitClient } from "./adapter.js";
-export type {
-  CloneWithDeps,
-  GitCloneOptions,
-  IsomorphicGitClient,
-  MessageCallback,
-  ProgressCallback,
-} from "./clone.js";
-export { cloneWith } from "./clone.js";
-export type {
-  CreatePatchFn,
-  DiffWithDeps,
-  GitDiffOptions,
-  IsomorphicGitDiffClient,
-  ReadFileFn,
-  StatusRow,
-} from "./diff.js";
-export { diffWith } from "./diff.js";
+export type { GitCloneOptions, MessageCallback, ProgressCallback } from "./clone.js";
+export type { GitDiffOptions, StatusRow } from "./diff.js";
 
 /** Duck-typed workspace handle. Only `.provider()` is required. */
 export interface WorkspaceLike {
