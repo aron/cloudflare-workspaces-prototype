@@ -19,6 +19,8 @@ import {
 import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
+import type { Mount } from "./mounts/types.js";
 import { WorkspaceShell } from "./shell.js";
 import { WorkspaceStub } from "./stub.js";
 
@@ -36,6 +38,16 @@ export interface WorkspaceOptions {
   // Clock used for mtime / last_seen on local FS writes. Defaults
   // to Date.now. Override for deterministic tests.
   now?: () => number;
+
+  // Identifier for this workspace / session. Forwarded to mount
+  // factories via MountContext.sessionId. Optional; defaults to "".
+  sessionId?: string;
+
+  // Mounts to register against the workspace. Keys are absolute
+  // mount roots (no trailing slash, no nesting). Values are either
+  // bare Mount objects or factories that take a MountContext and
+  // return one. Factories are called once at construction.
+  mounts?: Record<string, MountValue>;
 
   // Bounded retry policy for ready(). When omitted, ready() runs
   // the backend list once and surfaces the first failure — the
@@ -68,6 +80,7 @@ export class Workspace {
   readonly #backends: WorkspaceBackend[];
   readonly #reconnect: ReconnectOptions;
   readonly #now: () => number;
+  readonly #mounts: Map<string, Mount>;
   #handle: BackendHandle | undefined;
   #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
@@ -89,6 +102,16 @@ export class Workspace {
     this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
     this.#backends = options.backends.slice();
     this.#reconnect = options.reconnect ?? { attempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
+    this.#mounts = buildMountRegistry(options.mounts, {
+      sessionId: options.sessionId,
+      vfs: () => this.provider(),
+    });
+  }
+
+  // Resolved mount registry, keyed by absolute mount root. Returned
+  // as a defensive copy so callers can't mutate the internal map.
+  mounts(): Map<string, Mount> {
+    return new Map(this.#mounts);
   }
 
   // Local store. Exposed for tests / diagnostics and for the

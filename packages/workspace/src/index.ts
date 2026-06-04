@@ -20,6 +20,15 @@ export {
   withWorkspaceContainer,
 } from "./backends/container-host.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export type {
+  EagerMount,
+  Mount,
+  MountBase,
+  MountContext,
+  MountFactory,
+  MountOptions,
+  MountWriteAPI,
+} from "./mounts/types.js";
 export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";
 export type {
   ExecEncoding,
