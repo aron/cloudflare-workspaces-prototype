@@ -10,7 +10,9 @@
     "predeploy": "npm run build:wsd",
     "dev": "wrangler dev --ip 0.0.0.0",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed:r2": "wrangler r2 object put think-example-skills/.agents/skills/triage/SKILL.md --file ./seed/r2-skills/.agents/skills/triage/SKILL.md --remote",
+    "seed:r2:local": "wrangler r2 object put think-example-skills/.agents/skills/triage/SKILL.md --file ./seed/r2-skills/.agents/skills/triage/SKILL.md --local"
   },
   "bin": {
     "triage": "./cli/triage.mjs"

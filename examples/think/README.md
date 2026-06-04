@@ -69,6 +69,37 @@ packfile has to fit in workerd's heap, which is fine for small to
 medium repos at `depth: 1` (the default) but not for huge monorepos.
 No Cloudflare Artifacts binding required.
 
+## R2-mounted skill
+
+The DO mounts an R2 bucket (`R2_SKILLS`) at `/workspace/.agents` via
+`R2Bucket(env.R2_SKILLS, { prefix: ".agents/" })`. On the first call
+into the workspace the indexer pages through the bucket and streams
+every object into `vfs_nodes`; from then on the agent sees
+`/workspace/.agents/skills/triage/SKILL.md` like any other file. The
+mount is read-only — writes under `/workspace/.agents` reject with
+`EROFS`.
+
+The system prompt tells the model to read that file before it
+starts, so the playbook (clone, decide bet, fix or write findings,
+report progress, summary contract) is delivered in-band instead of
+being baked into the prompt.
+
+Seed the bucket once with the bundled fixture before running:
+
+```sh
+# Local miniflare bucket — use this with `wrangler dev`.
+npm run seed:r2:local --workspace @cloudflare/example-think
+
+# Real Cloudflare R2 bucket — use this after `wrangler deploy`.
+npm run seed:r2 --workspace @cloudflare/example-think
+```
+
+The fixture lives at
+`examples/think/seed/r2-skills/.agents/skills/triage/SKILL.md`; edit
+it and re-run the seed script to update the bucket. The DO picks the
+new bytes up on the next session (eager mount, indexed once per
+workspace lifetime).
+
 ## Running it locally
 
 ```sh

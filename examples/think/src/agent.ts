@@ -29,6 +29,7 @@ import { Think } from "@cloudflare/think";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
+  R2Bucket,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
@@ -161,6 +162,17 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     this.#containerWs = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
       backends: [this.#backend],
+      // Mount the shared skills bucket at /workspace/.agents. The
+      // R2 keys live under `.agents/` (e.g.
+      // `.agents/skills/triage/SKILL.md`); the prefix is stripped
+      // when computing the in-VFS path, so the agent reads
+      // /workspace/.agents/skills/triage/SKILL.md. Read-only —
+      // writes under the mount root reject with EROFS. Seed the
+      // bucket once with `npm run seed:r2` to upload the bundled
+      // triage skill.
+      mounts: {
+        "/workspace/.agents": R2Bucket(env.R2_SKILLS, { prefix: ".agents/" }),
+      },
     });
 
     // Hand Think an adapter that satisfies its WorkspaceLike, so the
@@ -377,6 +389,10 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
       "You are a triage assistant for a GitHub issue.",
       "",
       `Repository will be cloned into ${REPO_ROOT}.`,
+      "",
+      "Read /workspace/.agents/skills/triage/SKILL.md before you start.",
+      "It captures the playbook you should follow and the exact shape",
+      "of the summary you should produce.",
       "",
       "Tools available, in preference order. Reach for `exec` last —",
       "the dedicated tools are faster, give structured output, and",

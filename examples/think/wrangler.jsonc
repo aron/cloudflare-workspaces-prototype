@@ -23,6 +23,18 @@
     "bindings": [{ "name": "TriageAgent", "class_name": "TriageAgent" }]
   },
 
+  // R2 bucket mounted into every Workspace at /workspace/.agents.
+  // Seed it with `npm run seed:r2 --workspace @cloudflare/example-think`
+  // which uploads ./seed/r2-skills/.agents/skills/triage/SKILL.md to
+  // the bucket under the `.agents/` prefix.
+  "r2_buckets": [
+    {
+      "binding": "R2_SKILLS",
+      "bucket_name": "think-example-skills",
+      "preview_bucket_name": "think-example-skills-preview"
+    }
+  ],
+
   "workflows": [
     {
       "name": "TRIAGE_WORKFLOW",
