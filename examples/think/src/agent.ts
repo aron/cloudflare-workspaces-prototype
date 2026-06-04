@@ -657,6 +657,7 @@ function adaptToThinkWorkspace(ws: Workspace) {
         return {
           path,
           name: path.split("/").pop() ?? path,
+          type: s.isDirectory ? ("directory" as const) : ("file" as const),
           size: s.size,
           modifiedAt: new Date(s.mtime),
           isDirectory: s.isDirectory,
@@ -672,6 +673,7 @@ function adaptToThinkWorkspace(ws: Workspace) {
       return entries.map((e) => ({
         path: `${dir}/${e.name}`,
         name: e.name,
+        type: e.isDirectory ? ("directory" as const) : ("file" as const),
         size: 0,
         modifiedAt: new Date(0),
         isDirectory: e.isDirectory,
@@ -680,15 +682,20 @@ function adaptToThinkWorkspace(ws: Workspace) {
     },
     async glob(pattern: string) {
       // Cheap shim — full glob semantics aren't needed in this demo.
-      // `find` returns absolute paths; we filter to those matching.
+      // Think's built-in grep filters by `entry.type === "file"`, so
+      // we have to stat each candidate to know whether it's a blob.
+      // ws.fs.find already returns the type alongside the path, so
+      // forward it directly instead of re-stat'ing. Without this,
+      // every grep returned filesSearched: 0.
       const matches = await ws.fs.find("/workspace", pattern);
       return matches.map((m) => ({
         path: m.path,
         name: m.path.split("/").pop() ?? m.path,
+        type: m.type === "dir" ? ("directory" as const) : ("file" as const),
         size: 0,
         modifiedAt: new Date(0),
-        isDirectory: false,
-        isFile: true,
+        isDirectory: m.type === "dir",
+        isFile: m.type === "file",
       }));
     },
   };
