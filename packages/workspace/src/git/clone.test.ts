@@ -1,15 +1,16 @@
-// Unit tests for `@cloudflare/workspace/git`'s clone() wrapper.
+// Tests for `@cloudflare/workspace/git`'s `cloneWith` wrapper.
 //
-// isomorphic-git itself is not exercised here: doing so would
-// require either a real HTTPS endpoint or a complete fake of the
-// smart-HTTP upload-pack protocol, both of which test
-// isomorphic-git rather than this wrapper. The tests instead
-// inject a fake `git` module and assert the call shape: two
-// phases (clone with noCheckout, then checkout), the right
-// options forwarded, sensible defaults, and the FsClient sourcing
-// rules (explicit fs vs. derive from a workspace-shaped object).
+// `cloneWith` is fundamentally an option-translator: it sets a
+// handful of defaults, splits the user's request into a
+// `git.clone({ noCheckout: true })` followed by a
+// `git.checkout({ filepaths })`, and forwards everything else
+// through. The tests here cover that translation surface, plus
+// one behavioural check that the two-phase model actually delivers
+// a subset checkout when run against real isomorphic-git on memfs.
 
-import { describe, expect, it, vi } from "vitest";
+import git from "isomorphic-git";
+import { fs as memfs, vol } from "memfs";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneWith, type IsomorphicGitClient } from "./clone.js";
 
@@ -30,14 +31,13 @@ function fakeGit() {
   return { git, cloneCalls, checkoutCalls };
 }
 
-// The FsClient shape is opaque to this wrapper — isomorphic-git
-// inspects it, the wrapper only forwards. A branded empty object
-// suffices.
-const fakeFs = { __brand: "fake-fs" } as unknown as object;
-const fakeHttp = { __brand: "fake-http" } as unknown as object;
+// FsClient and HttpClient are opaque collaborators for cloneWith;
+// it never inspects them, only forwards.
+const fakeFs: object = { __brand: "fake-fs" };
+const fakeHttp: object = { __brand: "fake-http" };
 
-describe("cloneWith", () => {
-  it("clones with noCheckout, then checks out HEAD", async () => {
+describe("cloneWith option translation", () => {
+  it("splits the request into a noCheckout clone and a checkout, with sensible defaults", async () => {
     const { git, cloneCalls, checkoutCalls } = fakeGit();
 
     await cloneWith({
@@ -47,44 +47,31 @@ describe("cloneWith", () => {
       url: "https://example.test/repo.git",
     });
 
-    expect(cloneCalls).toHaveLength(1);
-    expect(cloneCalls[0]).toMatchObject({
-      fs: fakeFs,
-      http: fakeHttp,
-      url: "https://example.test/repo.git",
-      noCheckout: true,
-    });
-
-    expect(checkoutCalls).toHaveLength(1);
-    expect(checkoutCalls[0]).toMatchObject({
-      fs: fakeFs,
-      ref: "HEAD",
-      force: true,
-    });
-    // Absent `paths` means full checkout, so filepaths is undefined.
-    expect(checkoutCalls[0].filepaths).toBeUndefined();
+    expect(cloneCalls).toEqual([
+      expect.objectContaining({
+        fs: fakeFs,
+        http: fakeHttp,
+        url: "https://example.test/repo.git",
+        dir: "/",
+        depth: 1,
+        singleBranch: true,
+        noTags: true,
+        noCheckout: true,
+      }),
+    ]);
+    expect(checkoutCalls).toEqual([
+      expect.objectContaining({
+        fs: fakeFs,
+        dir: "/",
+        ref: "HEAD",
+        force: true,
+        filepaths: undefined,
+      }),
+    ]);
   });
 
-  it("applies sensible defaults: dir='/', depth=1, singleBranch, noTags", async () => {
-    const { git, cloneCalls } = fakeGit();
-
-    await cloneWith({
-      git,
-      http: fakeHttp,
-      fs: fakeFs,
-      url: "https://example.test/repo.git",
-    });
-
-    expect(cloneCalls[0]).toMatchObject({
-      dir: "/",
-      depth: 1,
-      singleBranch: true,
-      noTags: true,
-    });
-  });
-
-  it("forwards ref, headers, corsProxy, and progress hooks", async () => {
-    const { git, cloneCalls } = fakeGit();
+  it("forwards explicit ref, depth, dir, singleBranch, noTags, headers, corsProxy, paths, and hooks", async () => {
+    const { git, cloneCalls, checkoutCalls } = fakeGit();
     const onProgress = vi.fn();
     const onMessage = vi.fn();
 
@@ -93,58 +80,42 @@ describe("cloneWith", () => {
       http: fakeHttp,
       fs: fakeFs,
       url: "https://example.test/repo.git",
+      dir: "/work",
       ref: "develop",
+      depth: 5,
+      singleBranch: false,
+      noTags: false,
       headers: { Authorization: "Bearer xyz" },
       corsProxy: "https://cors.example.test",
+      paths: ["README.md", "packages/foo"],
       onProgress,
       onMessage,
     });
 
     expect(cloneCalls[0]).toMatchObject({
+      dir: "/work",
       ref: "develop",
+      depth: 5,
+      singleBranch: false,
+      noTags: false,
       headers: { Authorization: "Bearer xyz" },
       corsProxy: "https://cors.example.test",
       onProgress,
       onMessage,
     });
-  });
-
-  it("uses the given ref for the checkout phase", async () => {
-    const { git, checkoutCalls } = fakeGit();
-
-    await cloneWith({
-      git,
-      http: fakeHttp,
-      fs: fakeFs,
-      url: "https://example.test/repo.git",
-      ref: "v1.2.3",
-    });
-
-    expect(checkoutCalls[0].ref).toBe("v1.2.3");
-  });
-
-  it("passes filepaths to checkout when `paths` is provided", async () => {
-    const { git, cloneCalls, checkoutCalls } = fakeGit();
-
-    await cloneWith({
-      git,
-      http: fakeHttp,
-      fs: fakeFs,
-      url: "https://example.test/repo.git",
-      paths: ["README.md", "packages/foo"],
-    });
-
-    // `paths` must not leak into the clone phase — isomorphic-git's
-    // clone() has no filepaths option, and silently dropping
-    // unknown keys is the kind of thing that breaks later when a
-    // future isomorphic-git release adds a same-named option.
+    // `paths` is a checkout-phase concern; isomorphic-git's clone()
+    // has no filepaths option and silently dropping unknown keys
+    // would be brittle, so verify it does not leak.
     expect(cloneCalls[0]).not.toHaveProperty("filepaths");
     expect(cloneCalls[0]).not.toHaveProperty("paths");
-
-    expect(checkoutCalls[0].filepaths).toEqual(["README.md", "packages/foo"]);
+    expect(checkoutCalls[0]).toMatchObject({
+      dir: "/work",
+      ref: "develop",
+      filepaths: ["README.md", "packages/foo"],
+    });
   });
 
-  it("omits depth when depth=0 or Infinity (full history)", async () => {
+  it("omits depth when full history is requested (depth=0 or Infinity)", async () => {
     for (const depth of [0, Number.POSITIVE_INFINITY]) {
       const { git, cloneCalls } = fakeGit();
       await cloneWith({
@@ -156,32 +127,6 @@ describe("cloneWith", () => {
       });
       expect(cloneCalls[0].depth, `depth=${depth}`).toBeUndefined();
     }
-  });
-
-  it("honours explicit singleBranch=false and noTags=false", async () => {
-    const { git, cloneCalls } = fakeGit();
-    await cloneWith({
-      git,
-      http: fakeHttp,
-      fs: fakeFs,
-      url: "https://example.test/repo.git",
-      singleBranch: false,
-      noTags: false,
-    });
-    expect(cloneCalls[0]).toMatchObject({ singleBranch: false, noTags: false });
-  });
-
-  it("uses the dir option for both clone and checkout", async () => {
-    const { git, cloneCalls, checkoutCalls } = fakeGit();
-    await cloneWith({
-      git,
-      http: fakeHttp,
-      fs: fakeFs,
-      dir: "/work/repo",
-      url: "https://example.test/repo.git",
-    });
-    expect(cloneCalls[0].dir).toBe("/work/repo");
-    expect(checkoutCalls[0].dir).toBe("/work/repo");
   });
 
   it("propagates errors from the clone phase and never runs checkout", async () => {
@@ -203,5 +148,71 @@ describe("cloneWith", () => {
     ).rejects.toBe(boom);
 
     expect(git.checkout).not.toHaveBeenCalled();
+  });
+});
+
+// The HTTP side of `git.clone` is not easy to fake without a
+// real packfile fixture, so this test exercises only the
+// noCheckout+checkout-with-filepaths handshake that backs the
+// subset-checkout promise. The clone phase is faked: a real
+// `git.init` + commit produces the same on-disk state a
+// `noCheckout: true` clone would leave behind (refs and objects
+// populated, working tree empty), and `cloneWith` then drives
+// real `git.checkout` against it.
+describe("cloneWith subset checkout (real isomorphic-git + memfs)", () => {
+  const DIR = "/repo";
+  const AUTHOR = { name: "test", email: "t@example.test" };
+
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("materializes only the requested paths into the working tree", async () => {
+    // Build a repo with three files and commit them, then strip
+    // the working tree so the state mirrors a fresh `clone({
+    // noCheckout: true })`.
+    await memfs.promises.mkdir(DIR, { recursive: true });
+    await git.init({ fs: memfs, dir: DIR, defaultBranch: "main" });
+    for (const [name, content] of [
+      ["README.md", "readme\n"],
+      ["keep/file.txt", "keep\n"],
+      ["drop/file.txt", "drop\n"],
+    ] as const) {
+      const full = `${DIR}/${name}`;
+      const idx = full.lastIndexOf("/");
+      await memfs.promises.mkdir(full.slice(0, idx), { recursive: true });
+      await memfs.promises.writeFile(full, content);
+      await git.add({ fs: memfs, dir: DIR, filepath: name });
+    }
+    await git.commit({ fs: memfs, dir: DIR, message: "init", author: AUTHOR });
+
+    // Strip the working tree but keep `.git/`.
+    for (const name of ["README.md", "keep", "drop"]) {
+      await memfs.promises.rm(`${DIR}/${name}`, { recursive: true });
+    }
+
+    // A clone module whose `clone` is a no-op (the repo is already
+    // populated above), but whose `checkout` is the real one.
+    const fakeClone: IsomorphicGitClient = {
+      clone: vi.fn(async () => {}),
+      checkout: (args) => git.checkout({ ...args, fs: memfs }) as unknown as Promise<void>,
+    };
+
+    await cloneWith({
+      git: fakeClone,
+      http: fakeHttp,
+      fs: memfs,
+      url: "ignored — clone phase is faked",
+      dir: DIR,
+      paths: ["README.md", "keep"],
+    });
+
+    // Requested paths are present.
+    expect(await memfs.promises.readFile(`${DIR}/README.md`, "utf8")).toBe("readme\n");
+    expect(await memfs.promises.readFile(`${DIR}/keep/file.txt`, "utf8")).toBe("keep\n");
+
+    // The un-requested path stays absent. isomorphic-git's
+    // `checkout` writes only the requested filepaths to disk.
+    await expect(memfs.promises.stat(`${DIR}/drop/file.txt`)).rejects.toThrow();
   });
 });
