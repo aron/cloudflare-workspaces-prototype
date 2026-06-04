@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { comparisonFixture } from "../../shared/fixture";
-import { createSandboxFixtureRuntime } from "./sandbox";
+import { createSandboxFileStore, createSandboxFixtureRuntime } from "./sandbox";
 import { seedFixture } from "./seed";
 
 describe("createSandboxFixtureRuntime", () => {
@@ -39,6 +39,28 @@ describe("createSandboxFixtureRuntime", () => {
         path: "/workspace/repo/src/index.test.ts",
         contents: comparisonFixture.files[2]?.contents,
       },
+    ]);
+  });
+
+  test("adapts Sandbox SDK files to the text file store interface", async () => {
+    const calls: string[] = [];
+    const sandbox = {
+      async readFile(path: string) {
+        calls.push(`read ${path}`);
+        return { content: "contents" };
+      },
+      async writeFile(path: string, contents: string) {
+        calls.push(`write ${path} ${contents}`);
+      },
+    };
+    const store = createSandboxFileStore(sandbox);
+
+    await expect(store.readFile("/workspace/repo/src/index.ts")).resolves.toBe("contents");
+    await store.writeFile("/workspace/repo/src/index.ts", "updated");
+
+    expect(calls).toEqual([
+      "read /workspace/repo/src/index.ts",
+      "write /workspace/repo/src/index.ts updated",
     ]);
   });
 });

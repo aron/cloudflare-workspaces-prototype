@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { comparisonFixture } from "../../shared/fixture";
 import { seedFixture } from "./seed";
-import { createWorkspaceFixtureRuntime } from "./workspace";
+import { createWorkspaceFileStore, createWorkspaceFixtureRuntime } from "./workspace";
 
 describe("createWorkspaceFixtureRuntime", () => {
   test("seeds through Workspace.fs without connecting a shell backend", async () => {
@@ -44,6 +44,30 @@ describe("createWorkspaceFixtureRuntime", () => {
         path: "/workspace/repo/src/index.test.ts",
         contents: comparisonFixture.files[2]?.contents,
       },
+    ]);
+  });
+
+  test("adapts Workspace.fs to the text file store interface", async () => {
+    const calls: string[] = [];
+    const workspace = {
+      fs: {
+        async readFile(path: string, encoding: "utf8") {
+          calls.push(`read ${path} ${encoding}`);
+          return "contents";
+        },
+        async writeFile(path: string, contents: string) {
+          calls.push(`write ${path} ${contents}`);
+        },
+      },
+    };
+    const store = createWorkspaceFileStore(workspace);
+
+    await expect(store.readFile("/workspace/repo/src/index.ts")).resolves.toBe("contents");
+    await store.writeFile("/workspace/repo/src/index.ts", "updated");
+
+    expect(calls).toEqual([
+      "read /workspace/repo/src/index.ts utf8",
+      "write /workspace/repo/src/index.ts updated",
     ]);
   });
 });
