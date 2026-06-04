@@ -16,6 +16,12 @@
       "class_name": "CompareRun",
       "image": "./Dockerfile.workspace",
       "max_instances": 2
+    },
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile.sandbox",
+      "instance_type": "lite",
+      "max_instances": 2
     }
   ],
   "durable_objects": {
@@ -23,6 +29,10 @@
       {
         "name": "CompareRun",
         "class_name": "CompareRun"
+      },
+      {
+        "name": "Sandbox",
+        "class_name": "Sandbox"
       }
     ]
   },
@@ -30,6 +40,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["CompareRun"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["Sandbox"]
     }
   ],
   "observability": {

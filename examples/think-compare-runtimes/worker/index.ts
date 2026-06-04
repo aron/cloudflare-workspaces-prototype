@@ -1,3 +1,4 @@
+import { getSandbox, type Sandbox as SandboxDO } from "@cloudflare/sandbox";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
@@ -8,14 +9,18 @@ import { getServerByName, routePartykitRequest, Server } from "partyserver";
 import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { handleApiRequest } from "./http";
+import { createSandboxFixtureRuntime } from "./runtime/sandbox";
+import { runSandboxFixtureSetup } from "./runtime/sandbox-run";
 import { createWorkspaceFixtureRuntime } from "./runtime/workspace";
 import { runWorkspaceFixtureSetup } from "./runtime/workspace-run";
 import { startComparisonRun } from "./start-run";
 
+export { Sandbox } from "@cloudflare/sandbox";
 export { WorkspaceProxy };
 
 export interface Env {
   CompareRun: DurableObjectNamespace<CompareRun>;
+  Sandbox: DurableObjectNamespace<SandboxDO>;
 }
 
 interface DurableObjectStateWithExports extends DurableObjectState {
@@ -90,14 +95,25 @@ export class CompareRun extends Server<Env> {
       detail: "Workspace and Sandbox agents are queued from the same fixture.",
       timestamp,
     };
-    const workspaceEvents = await runWorkspaceFixtureSetup({
-      runId,
-      fixture: comparisonFixture,
-      runtime: createWorkspaceFixtureRuntime(this.#workspace),
-      now: () => new Date().toISOString(),
-    });
+    const sandbox = getSandbox(this.env.Sandbox, `${runId}-sandbox`);
+    const [workspaceEvents, sandboxEvents] = await Promise.all([
+      runWorkspaceFixtureSetup({
+        runId,
+        fixture: comparisonFixture,
+        runtime: createWorkspaceFixtureRuntime(this.#workspace),
+        now: () => new Date().toISOString(),
+      }),
+      runSandboxFixtureSetup({
+        runId,
+        fixture: comparisonFixture,
+        runtime: createSandboxFixtureRuntime(sandbox),
+        now: () => new Date().toISOString(),
+      }),
+    ]);
 
-    this.#events = [started, ...workspaceEvents];
+    this.#events = [started, ...workspaceEvents, ...sandboxEvents].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
     await this.ctx.storage.put(EVENTS_KEY, this.#events);
     this.broadcast(JSON.stringify({ type: "history", events: this.#events }));
 
