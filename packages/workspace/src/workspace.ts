@@ -10,6 +10,7 @@
 // on Workspace.shell.exec.
 
 import {
+  type ApplyResult,
   Database,
   type DurableObjectStorageLike,
   initializeSchema,
@@ -230,8 +231,15 @@ export class Workspace {
   // call these directly for FS-only flows that need to hand off to
   // the container via a tool other than exec.
   //
-  // Returns the number of entries transferred so a polling loop
-  // can decide whether to tick again.
+  // push() returns the number of entries shipped to the remote so
+  // a polling loop can decide whether to tick again. pull() returns
+  // the dofs ApplyResult { applied, skipped } — `applied` is the
+  // number of entries written into the local store, `skipped`
+  // surfaces container-side writes the apply path rejected because
+  // they targeted a read-only mount root. Callers that don't care
+  // about read-only enforcement read `applied`; the shell exec
+  // bracket folds `skipped` into its ExecResult so users see what
+  // stayed authoritative on the mount.
   push(): Promise<number> {
     return this.#serialize(async () => {
       await this.ready();
@@ -240,7 +248,7 @@ export class Workspace {
     });
   }
 
-  pull(): Promise<number> {
+  pull(): Promise<ApplyResult> {
     return this.#serialize(async () => {
       await this.ready();
       if (!this.#handle) throw new Error("Workspace not connected");

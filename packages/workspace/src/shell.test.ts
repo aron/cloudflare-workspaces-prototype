@@ -15,13 +15,22 @@ import { type Sync, WorkspaceShell } from "./shell.js";
 // push/pull bracket — they just need a Sync that returns 0 from
 // both methods so the bracket plumbing is a no-op. Workspace.test.ts
 // covers the bracket against a real workspace.
+//
+// pull() returns the dofs ApplyResult shape ({ applied, skipped });
+// tests that only care about counts use the `applied` helper below
+// to build a synthetic result. Tests that want to exercise the
+// skipped path build the shape inline.
+function applied(n: number) {
+  return { applied: n, skipped: [] };
+}
+
 function makeSync(): Sync {
   return {
     async push() {
       return 0;
     },
     async pull() {
-      return 0;
+      return applied(0);
     },
   };
 }
@@ -228,7 +237,7 @@ describe("WorkspaceShell.exec — RPC forwarding", () => {
       },
       async pull() {
         pullCalls += 1;
-        return 0;
+        return applied(0);
       },
     };
     const shell = new WorkspaceShell(f.rpc.shell, sync);
@@ -494,7 +503,7 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
         return 5;
       },
       async pull() {
-        return 7;
+        return applied(7);
       },
     };
     const shell = new WorkspaceShell(f.rpc.shell, sync);
@@ -503,6 +512,41 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
     expect(result.exitCode).toBe(0);
     expect(result.pushed).toBe(5);
     expect(result.pulled).toBe(7);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("surfaces skipped read-only entries from the post-drain pull", async () => {
+    const f = fakeRpc({ events: [exit(1, 0)] });
+    const sync: Sync = {
+      async push() {
+        return 0;
+      },
+      async pull() {
+        return {
+          applied: 2,
+          skipped: [
+            {
+              path: "/workspace/r2/touched.txt",
+              mountRoot: "/workspace/r2",
+              op: "write",
+              reason: "read-only",
+            },
+          ],
+        };
+      },
+    };
+    const shell = new WorkspaceShell(f.rpc.shell, sync);
+    const handle = await shell.exec("noop");
+    const result = await handle.result();
+    expect(result.pulled).toBe(2);
+    expect(result.skipped).toEqual([
+      {
+        path: "/workspace/r2/touched.txt",
+        mountRoot: "/workspace/r2",
+        op: "write",
+        reason: "read-only",
+      },
+    ]);
   });
 
   it("calls push() before spawn and pull() after drain, in that order", async () => {
@@ -515,7 +559,7 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
       },
       async pull() {
         order.push("pull");
-        return 0;
+        return applied(0);
       },
     };
     const shell = new WorkspaceShell(f.rpc.shell, sync);
@@ -532,7 +576,7 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
         throw new Error("push offline");
       },
       async pull() {
-        return 3;
+        return applied(3);
       },
     };
     const shell = new WorkspaceShell(f.rpc.shell, sync);
@@ -544,7 +588,7 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
     expect(result.pulled).toBe(3);
   });
 
-  it("falls back to pulled = 0 when sync.pull() throws", async () => {
+  it("falls back to pulled = 0 and skipped = [] when sync.pull() throws", async () => {
     const f = fakeRpc({ events: [exit(1, 0)] });
     const sync: Sync = {
       async push() {
@@ -560,6 +604,7 @@ describe("WorkspaceShell.exec — push/pull bracket", () => {
     expect(result.exitCode).toBe(0);
     expect(result.pushed).toBe(2);
     expect(result.pulled).toBe(0);
+    expect(result.skipped).toEqual([]);
   });
 });
 
@@ -624,7 +669,7 @@ describe("WorkspaceShell.get — reattach", () => {
       },
       async pull() {
         pullCalls += 1;
-        return 2;
+        return applied(2);
       },
     };
     const shell = new WorkspaceShell(f.rpc.shell, sync);

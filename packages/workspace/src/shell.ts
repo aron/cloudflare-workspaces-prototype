@@ -29,6 +29,7 @@
 // effort, can be 0 if nothing landed in wsd between reattach and
 // drain.
 
+import type { ApplyResult, SkippedEntry } from "@cloudflare/dofs";
 import type { ExecEvent, ShellRPC } from "@cloudflare/workspace-rpc";
 
 export type ExecEncoding = "utf8" | undefined;
@@ -47,14 +48,19 @@ export interface ExecResult<E extends ExecEncoding = undefined> {
   stdout: Chunk<E>;
   stderr: Chunk<E>;
   // VFS sync stats from the docs/05 bracket.
-  //   pushed — entries shipped by the pre-exec pushOnce.
-  //   pulled — entries applied by the post-drain pullOnce.
-  // Both fields are populated only when handle.result() is
-  // awaited. Consuming the stream directly leaves pulled at 0;
-  // pushed is observed before the stream is returned, so it
-  // reflects the real push count either way.
+  //   pushed  — entries shipped by the pre-exec pushOnce.
+  //   pulled  — entries the post-drain pullOnce applied locally.
+  //   skipped — entries the post-drain pullOnce did NOT apply
+  //             because they targeted a read-only mount root.
+  //             Empty when no read-only mounts are registered or
+  //             the container stayed clear of them.
+  // pulled / skipped are populated only when handle.result() is
+  // awaited. Consuming the stream directly leaves both at their
+  // empty values; pushed is observed before the stream is returned
+  // so it reflects the real push count either way.
   pushed: number;
   pulled: number;
+  skipped: SkippedEntry[];
 }
 
 export type KillSignal = "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP";
@@ -108,9 +114,11 @@ export interface GetExecOptions<E extends ExecEncoding = undefined> {
 // behind a Sync object that exposes the entry counts.
 // Workspace itself satisfies this interface (push() / pull() are
 // public methods); tests pass a plain { push, pull } object.
+// pull() returns the dofs ApplyResult so the shell can surface
+// skipped read-only entries on ExecResult.
 export interface Sync {
   push(): Promise<number>;
-  pull(): Promise<number>;
+  pull(): Promise<ApplyResult>;
 }
 
 export class WorkspaceShell {
@@ -309,12 +317,16 @@ async function drainToResult<E extends ExecEncoding>(
   }
   // Post-drain pull: apply anything wsd produced during the exec.
   // Failures non-fatal per docs/05 ("failed pushes/pulls do not
-  // abort the command"); pulled stays 0 in that case.
+  // abort the command"); pulled / skipped stay at their empty
+  // values in that case.
   let pulled = 0;
+  let skipped: SkippedEntry[] = [];
   try {
-    pulled = await sync.pull();
+    const result = await sync.pull();
+    pulled = result.applied;
+    skipped = result.skipped;
   } catch {
-    // pulled stays 0
+    // pulled / skipped stay empty
   }
   return {
     exitCode,
@@ -322,6 +334,7 @@ async function drainToResult<E extends ExecEncoding>(
     stderr: joinParts<E>(stderrParts, encoding),
     pushed,
     pulled,
+    skipped,
   };
 }
 

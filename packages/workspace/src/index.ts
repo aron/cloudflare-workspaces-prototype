@@ -6,7 +6,12 @@
 // pluggable; today TestBackend (point at a URL) and
 // CloudflareContainerBackend (Container DO binding) ship.
 
-export type { DurableObjectStorageLike, SQLiteWorkspaceProviderOptions } from "@cloudflare/dofs";
+export type {
+  ApplyResult,
+  DurableObjectStorageLike,
+  SkippedEntry,
+  SQLiteWorkspaceProviderOptions,
+} from "@cloudflare/dofs";
 export { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 export type { BackendHandle, WorkspaceBackend } from "./backend.js";
 export {

@@ -362,6 +362,20 @@ describe("Workspace.fs against the local store", () => {
   });
 });
 
+describe("Workspace.pull return shape", () => {
+  it("resolves to the dofs ApplyResult shape", async () => {
+    // The fake SyncRPC's fetchChanges returns an empty stream, so
+    // applied is 0 and skipped is []. The point of the test isn't
+    // counts but the shape: pull() now returns the structured
+    // result so callers can read skipped[] without an extra
+    // round trip.
+    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake")] });
+    await ws.ready();
+    const result = await ws.pull();
+    expect(result).toEqual({ applied: 0, skipped: [] });
+  });
+});
+
 describe("Workspace mutation serialization", () => {
   it("serializes concurrent push() / pull() through a per-Workspace FIFO", async () => {
     // Build a fake SyncRPC that gates push and pull on releaser
