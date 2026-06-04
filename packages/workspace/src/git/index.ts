@@ -57,6 +57,13 @@ export interface CreateGitClientOptions {
  * across subsequent calls — `@platformatic/vfs.create()` is cheap
  * but not free, and the workspace provider is stable for the
  * lifetime of the client.
+ *
+ * An isomorphic-git pack/index cache is also created per client
+ * and threaded into every isogit call. Without this, each
+ * `readBlob` / `statusMatrix` / `walk` re-parses the packfile
+ * from the SQLite-backed VFS — fine for tiny repos, catastrophic
+ * for anything with a real history (the difference between a
+ * sub-second `diff` and one that hangs for minutes).
  */
 export function createGitClient({
   ws,
@@ -67,6 +74,7 @@ export function createGitClient({
     if (!fsPromise) fsPromise = adapter(ws.provider());
     return fsPromise;
   };
+  const cache: Record<string, unknown> = {};
 
   return {
     async clone(options) {
@@ -75,6 +83,7 @@ export function createGitClient({
         fs: await fs(),
         git: await loadIsomorphicGit<IsomorphicGitClient>(),
         http: await loadDefaultHTTP(),
+        cache,
       });
     },
     async diff(options = {}) {
@@ -85,6 +94,7 @@ export function createGitClient({
         git: await loadIsomorphicGit<IsomorphicGitDiffClient>(),
         createPatch: await loadCreatePatch(),
         readFile: readFileFrom(f),
+        cache,
       });
     },
   };

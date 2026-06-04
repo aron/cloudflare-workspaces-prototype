@@ -129,6 +129,20 @@ describe("cloneWith option translation", () => {
     }
   });
 
+  it("forwards a shared cache to both phases", async () => {
+    const { git, cloneCalls, checkoutCalls } = fakeGit();
+    const cache = {};
+    await cloneWith({
+      git,
+      http: fakeHttp,
+      fs: fakeFs,
+      url: "https://example.test/repo.git",
+      cache,
+    });
+    expect(cloneCalls[0].cache).toBe(cache);
+    expect(checkoutCalls[0].cache).toBe(cache);
+  });
+
   it("propagates errors from the clone phase and never runs checkout", async () => {
     const boom = new Error("upload-pack 502");
     const git: IsomorphicGitClient = {

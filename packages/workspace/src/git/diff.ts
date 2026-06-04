@@ -23,12 +23,18 @@ export type StatusRow = [string, number, number, number];
 /** Subset of isomorphic-git's API used to compute a working-tree diff. */
 export interface IsomorphicGitDiffClient {
   resolveRef(args: { fs: object; dir: string; ref: string }): Promise<string>;
-  statusMatrix(args: { fs: object; dir: string; ref?: string }): Promise<StatusRow[]>;
+  statusMatrix(args: {
+    fs: object;
+    dir: string;
+    ref?: string;
+    cache?: object;
+  }): Promise<StatusRow[]>;
   readBlob(args: {
     fs: object;
     dir: string;
     oid: string;
     filepath: string;
+    cache?: object;
   }): Promise<{ blob: Uint8Array; oid: string }>;
 }
 
@@ -60,6 +66,12 @@ export interface DiffWithDeps extends GitDiffOptions {
   fs: IsomorphicGitFSClient | object;
   createPatch: CreatePatchFn;
   readFile: ReadFileFn;
+  /**
+   * isomorphic-git's pack/index cache. Shared with the surrounding
+   * GitClient so the packfile is parsed once across clone, diff,
+   * and any other isogit call. See clone.ts's CloneWithDeps.cache.
+   */
+  cache?: object;
 }
 
 export async function diffWith(opts: DiffWithDeps): Promise<string> {
@@ -80,7 +92,7 @@ export async function diffWith(opts: DiffWithDeps): Promise<string> {
   // requested commit rather than always HEAD. Without this the
   // `ref` argument would only affect blob reads, leaving the
   // status walk silently skewed.
-  const status = await opts.git.statusMatrix({ fs: opts.fs, dir, ref });
+  const status = await opts.git.statusMatrix({ fs: opts.fs, dir, ref, cache: opts.cache });
   const chunks: string[] = [];
   for (const [filepath, headStatus, workdirStatus] of status) {
     // workdirStatus: 0 absent, 1 == HEAD, 2 differs. Skip
@@ -88,7 +100,9 @@ export async function diffWith(opts: DiffWithDeps): Promise<string> {
     if (workdirStatus === 1) continue;
 
     const headText =
-      headStatus === 1 ? await readBlobAsText(opts.git, opts.fs, dir, head, filepath) : "";
+      headStatus === 1
+        ? await readBlobAsText(opts.git, opts.fs, dir, head, filepath, opts.cache)
+        : "";
     const workdirText =
       workdirStatus === 2 ? await readWorkdirAsText(opts.readFile, dir, filepath) : "";
     const patch = opts.createPatch(filepath, headText, workdirText, "", "");
@@ -103,9 +117,10 @@ async function readBlobAsText(
   dir: string,
   oid: string,
   filepath: string,
+  cache: object | undefined,
 ): Promise<string> {
   try {
-    const { blob } = await git.readBlob({ fs, dir, oid, filepath });
+    const { blob } = await git.readBlob({ fs, dir, oid, filepath, cache });
     // Best-effort UTF-8 decode. A real diff tool would skip
     // binaries entirely; for the general case here a noisy diff
     // beats a thrown error.

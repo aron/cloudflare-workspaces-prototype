@@ -30,6 +30,7 @@ export interface IsomorphicGitClient {
     singleBranch?: boolean;
     noTags?: boolean;
     noCheckout?: boolean;
+    cache?: object;
     onProgress?: ProgressCallback;
     onMessage?: MessageCallback;
   }): Promise<void>;
@@ -40,6 +41,7 @@ export interface IsomorphicGitClient {
     ref: string;
     filepaths?: string[];
     force?: boolean;
+    cache?: object;
   }): Promise<void>;
 }
 
@@ -89,6 +91,14 @@ export interface CloneWithDeps extends GitCloneOptions {
   git: IsomorphicGitClient;
   http: object;
   fs: object;
+  /**
+   * isomorphic-git's pack/index cache. Pass the same object to
+   * every isogit call against this repo so the packfile is parsed
+   * once. Without this, each `readBlob` / `walk` / `statusMatrix`
+   * re-parses the pack from the SQLite-backed VFS (~tens of MB),
+   * which is the difference between sub-second diffs and minutes.
+   */
+  cache?: object;
 }
 
 export async function cloneWith(opts: CloneWithDeps): Promise<void> {
@@ -111,6 +121,7 @@ export async function cloneWith(opts: CloneWithDeps): Promise<void> {
     singleBranch: opts.singleBranch ?? true,
     noTags: opts.noTags ?? true,
     noCheckout: true,
+    cache: opts.cache,
     onProgress: opts.onProgress,
     onMessage: opts.onMessage,
   });
@@ -124,5 +135,6 @@ export async function cloneWith(opts: CloneWithDeps): Promise<void> {
     ref: ref ?? "HEAD",
     filepaths: opts.paths,
     force: true,
+    cache: opts.cache,
   });
 }

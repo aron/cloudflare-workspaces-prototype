@@ -14,7 +14,7 @@
 import { createPatch } from "diff";
 import git from "isomorphic-git";
 import { fs as memfs, vol } from "memfs";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { diffWith, type IsomorphicGitDiffClient } from "./diff.js";
 
@@ -113,6 +113,33 @@ describe("diffWith (real isomorphic-git + memfs)", () => {
     expect(out).toContain("--- b.txt");
     expect(out).toContain("+alpha v2");
     expect(out).toContain("+beta v2");
+  });
+
+  it("forwards the cache to statusMatrix and readBlob", async () => {
+    await init();
+    await commitFile("a.txt", "hello\n", "init");
+    await memfs.promises.writeFile(`${DIR}/a.txt`, "hello world\n");
+
+    const cache = {};
+    const statusSpy = vi.spyOn(git, "statusMatrix");
+    const blobSpy = vi.spyOn(git, "readBlob");
+    try {
+      await diffWith({
+        git: isomorphicGit,
+        fs: memfs,
+        createPatch,
+        readFile: (path) => memfs.promises.readFile(path) as Promise<Uint8Array | string>,
+        dir: DIR,
+        cache,
+      });
+      // Both passes the *same* cache reference; isomorphic-git
+      // mutates it in place, so identity matters more than shape.
+      expect(statusSpy.mock.calls[0][0]).toMatchObject({ cache });
+      expect(blobSpy.mock.calls[0][0]).toMatchObject({ cache });
+    } finally {
+      statusSpy.mockRestore();
+      blobSpy.mockRestore();
+    }
   });
 
   it("respects the `ref` argument when diffing against an older commit", async () => {
