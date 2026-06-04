@@ -15,6 +15,8 @@ export interface StartRuntimeThinkAgentsOptions {
   fixture: ComparisonFixture;
   workspaceAgent: RuntimeThinkAgentHandle;
   sandboxAgent: RuntimeThinkAgentHandle;
+  onAgentStart?: (runtime: RuntimeId) => void | Promise<void>;
+  onAgentComplete?: (runtime: RuntimeId) => void | Promise<void>;
   onAgentError?: (runtime: RuntimeId, error: unknown) => void | Promise<void>;
 }
 
@@ -23,18 +25,26 @@ export async function startRuntimeThinkAgents({
   fixture,
   workspaceAgent,
   sandboxAgent,
+  onAgentStart,
+  onAgentComplete,
   onAgentError,
 }: StartRuntimeThinkAgentsOptions): Promise<void> {
-  const results = await Promise.allSettled([
-    workspaceAgent.runComparison({ runId, fixture }),
-    sandboxAgent.runComparison({ runId, fixture }),
-  ]);
-  const runtimes: RuntimeId[] = ["workspace", "sandbox"];
+  const agents: Array<{ runtime: RuntimeId; agent: RuntimeThinkAgentHandle }> = [
+    { runtime: "workspace", agent: workspaceAgent },
+    { runtime: "sandbox", agent: sandboxAgent },
+  ];
+
+  await Promise.all(agents.map(({ runtime }) => onAgentStart?.(runtime)));
+
+  const results = await Promise.allSettled(
+    agents.map(({ agent }) => agent.runComparison({ runId, fixture })),
+  );
 
   await Promise.all(
     results.map((result, index) => {
-      if (result.status === "fulfilled") return undefined;
-      return onAgentError?.(runtimes[index] ?? "workspace", result.reason);
+      const runtime = agents[index]?.runtime ?? "workspace";
+      if (result.status === "fulfilled") return onAgentComplete?.(runtime);
+      return onAgentError?.(runtime, result.reason);
     }),
   );
 }

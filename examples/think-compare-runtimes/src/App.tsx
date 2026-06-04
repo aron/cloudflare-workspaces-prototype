@@ -6,7 +6,12 @@ import { useMemo, useState } from "react";
 import type { RunEvent, RuntimeId } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { agentEventsForRuntime, formatEventDetail, runtimeEventsForRuntime } from "./event-lanes";
-import { applyRunMessage, type RunMessage } from "./run-state";
+import {
+  applyRunMessage,
+  deriveRunSummary,
+  type RunMessage,
+  type RuntimeRunSummary,
+} from "./run-state";
 
 interface RunSessionResponse {
   runId: string;
@@ -15,6 +20,7 @@ interface RunSessionResponse {
 }
 
 type StartState = "idle" | "starting" | "running" | "failed";
+type DisplayState = StartState | "completed";
 
 const runtimeCopy: Record<
   RuntimeId,
@@ -42,11 +48,12 @@ const runtimeCopy: Record<
   },
 };
 
-const startStateVariant: Record<StartState, "neutral" | "warning" | "success" | "error"> = {
+const startStateVariant: Record<DisplayState, "neutral" | "warning" | "success" | "error"> = {
   idle: "neutral",
   starting: "warning",
   running: "success",
   failed: "error",
+  completed: "success",
 };
 
 export function App() {
@@ -65,6 +72,10 @@ export function App() {
     },
   });
 
+  const runSummary = useMemo(() => deriveRunSummary(events), [events]);
+  const displayState: DisplayState =
+    startState === "starting" || events.length === 0 ? startState : runSummary.status;
+  const displayElapsed = formatElapsed(runSummary.elapsedMs);
   const lanesByRuntime = useMemo(
     () => ({
       workspace: {
@@ -133,13 +144,18 @@ export function App() {
             <span className="font-mono text-xs tracking-[0.18em] text-kumo-subtle uppercase">
               Run state
             </span>
-            <Badge variant={startStateVariant[startState]} appearance="dot">
-              {startState}
+            <Badge variant={startStateVariant[displayState]} appearance="dot">
+              {displayState}
             </Badge>
           </div>
           <strong className="text-3xl font-semibold capitalize text-kumo-default">
-            {startState}
+            {displayState}
           </strong>
+          {displayElapsed ? (
+            <span className="font-mono text-xs tracking-[0.14em] text-kumo-subtle uppercase">
+              {displayElapsed} elapsed
+            </span>
+          ) : null}
           <Button
             className="w-full justify-center"
             disabled={startState === "starting"}
@@ -159,8 +175,16 @@ export function App() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2" aria-label="Runtime timelines">
-        <RuntimePanel runtime="workspace" lanes={lanesByRuntime.workspace} />
-        <RuntimePanel runtime="sandbox" lanes={lanesByRuntime.sandbox} />
+        <RuntimePanel
+          runtime="workspace"
+          lanes={lanesByRuntime.workspace}
+          summary={runSummary.runtimes.workspace}
+        />
+        <RuntimePanel
+          runtime="sandbox"
+          lanes={lanesByRuntime.sandbox}
+          summary={runSummary.runtimes.sandbox}
+        />
       </section>
     </main>
   );
@@ -169,9 +193,11 @@ export function App() {
 function RuntimePanel({
   runtime,
   lanes,
+  summary,
 }: {
   runtime: RuntimeId;
   lanes: { agent: RunEvent[]; runtime: RunEvent[] };
+  summary: RuntimeRunSummary;
 }) {
   const copy = runtimeCopy[runtime];
 
@@ -189,10 +215,25 @@ function RuntimePanel({
             {copy.label}
           </h2>
         </div>
-        <Badge variant={copy.badgeVariant} className="shrink-0">
-          {copy.eyebrow}
-        </Badge>
+        <div className="grid justify-items-end gap-2">
+          <Badge variant={copy.badgeVariant} className="shrink-0">
+            {copy.eyebrow}
+          </Badge>
+          <Badge variant={startStateVariant[summary.status]} appearance="dot">
+            {summary.status}
+          </Badge>
+          {summary.elapsedMs !== null ? (
+            <span className="font-mono text-[0.65rem] tracking-[0.16em] text-kumo-subtle uppercase">
+              {formatElapsed(summary.elapsedMs)}
+            </span>
+          ) : null}
+        </div>
       </header>
+      {capacityHint(summary.error) ? (
+        <div className="mt-5 rounded-2xl border border-kumo-danger/40 bg-kumo-danger/10 p-4 text-sm text-kumo-danger">
+          {capacityHint(summary.error)}
+        </div>
+      ) : null}
       <div className="grid gap-5 pt-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
         <EventLane
           accent={copy.accent}
@@ -286,6 +327,18 @@ function EventCard({
       <EventDetail detail={event.detail} />
     </li>
   );
+}
+
+function formatElapsed(elapsedMs: number | null): string | null {
+  if (elapsedMs === null) return null;
+  return `${(elapsedMs / 1000).toFixed(1)}s`;
+}
+
+function capacityHint(error: string | null): string | null {
+  if (!error) return null;
+  return error.includes("Capacity temporarily exceeded")
+    ? "Upstream model capacity; retry later."
+    : null;
 }
 
 function EventDetail({ detail }: { detail: string }) {

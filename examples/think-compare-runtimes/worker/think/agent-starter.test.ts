@@ -53,4 +53,44 @@ describe("startRuntimeThinkAgents", () => {
     expect(calls.sort()).toEqual(["sandbox complete", "workspace start"]);
     expect(failures).toEqual(["workspace workspace failed"]);
   });
+
+  test("emits lifecycle callbacks for runtime terminal status", async () => {
+    const lifecycle: string[] = [];
+
+    await startRuntimeThinkAgents({
+      runId: "run-abc",
+      fixture: comparisonFixture,
+      workspaceAgent: {
+        async runComparison() {
+          lifecycle.push("workspace run");
+        },
+      },
+      sandboxAgent: {
+        async runComparison() {
+          lifecycle.push("sandbox run");
+          throw new Error("capacity exceeded");
+        },
+      },
+      onAgentStart(runtime) {
+        lifecycle.push(`${runtime} started`);
+      },
+      onAgentComplete(runtime) {
+        lifecycle.push(`${runtime} completed`);
+      },
+      onAgentError(runtime, error) {
+        lifecycle.push(
+          `${runtime} failed ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    });
+
+    expect(lifecycle).toEqual([
+      "workspace started",
+      "sandbox started",
+      "workspace run",
+      "sandbox run",
+      "workspace completed",
+      "sandbox failed capacity exceeded",
+    ]);
+  });
 });

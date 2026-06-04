@@ -46,6 +46,95 @@ describe("App", () => {
     expect(screen.getAllByText("Comparison run started")).toHaveLength(2);
   });
 
+  test("renders per-runtime terminal status and capacity errors", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json(
+        {
+          runId: "run-789",
+          socketPath: "/parties/compare-run/run-789",
+          events: [
+            {
+              id: "run-789:0",
+              runId: "run-789",
+              sequence: 0,
+              runtime: "both",
+              kind: "run_started",
+              title: "Comparison run started",
+              detail: "Both agents are starting.",
+              timestamp: "2026-06-04T00:00:00.000Z",
+            },
+            {
+              id: "run-789:1",
+              runId: "run-789",
+              sequence: 1,
+              runtime: "workspace",
+              kind: "runtime_started",
+              title: "Workspace runtime started",
+              detail: "Workspace Think agent is running.",
+              timestamp: "2026-06-04T00:00:01.000Z",
+            },
+            {
+              id: "run-789:2",
+              runId: "run-789",
+              sequence: 2,
+              runtime: "workspace",
+              kind: "runtime_completed",
+              title: "Workspace runtime completed",
+              detail: "Workspace Think agent completed.",
+              timestamp: "2026-06-04T00:00:06.000Z",
+            },
+            {
+              id: "run-789:3",
+              runId: "run-789",
+              sequence: 3,
+              runtime: "sandbox",
+              kind: "runtime_started",
+              title: "Sandbox runtime started",
+              detail: "Sandbox Think agent is running.",
+              timestamp: "2026-06-04T00:00:02.000Z",
+            },
+            {
+              id: "run-789:4",
+              runId: "run-789",
+              sequence: 4,
+              runtime: "sandbox",
+              kind: "runtime_failed",
+              title: "Sandbox runtime failed",
+              detail: "3040: Capacity temporarily exceeded, please try again.",
+              timestamp: "2026-06-04T00:00:08.500Z",
+            },
+            {
+              id: "run-789:5",
+              runId: "run-789",
+              sequence: 5,
+              runtime: "both",
+              kind: "run_completed",
+              title: "Comparison run complete",
+              detail: "Workspace completed; Sandbox failed.",
+              timestamp: "2026-06-04T00:00:08.500Z",
+            },
+          ],
+        },
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Start comparison" }));
+
+    const workspacePanel = await screen.findByLabelText("Workspace timeline");
+    const sandboxPanel = screen.getByLabelText("Sandbox timeline");
+
+    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
+    expect(screen.getByText("8.5s elapsed")).toBeTruthy();
+    expect(within(workspacePanel).getByText("completed")).toBeTruthy();
+    expect(within(workspacePanel).getByText("5.0s")).toBeTruthy();
+    expect(within(sandboxPanel).getByText("failed")).toBeTruthy();
+    expect(within(sandboxPanel).getByText("6.5s")).toBeTruthy();
+    expect(within(sandboxPanel).getByText("Upstream model capacity; retry later.")).toBeTruthy();
+  });
+
   test("renders Think transcript and runtime trace lanes with structured details", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json(

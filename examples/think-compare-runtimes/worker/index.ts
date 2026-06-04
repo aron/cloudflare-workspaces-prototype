@@ -3,10 +3,11 @@ import { getAgentByName } from "agents";
 import { getServerByName, routePartykitRequest, Server } from "partyserver";
 import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
+import { runComparisonAgents } from "./comparison-agents";
 import { handleApiRequest } from "./http";
 import type { RunEventInput } from "./run-events";
 import { startComparisonRun } from "./start-run";
-import { type RuntimeThinkAgentHandle, startRuntimeThinkAgents } from "./think/agent-starter";
+import type { RuntimeThinkAgentHandle } from "./think/agent-starter";
 import { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent } from "./think/agents";
 
 export { Sandbox } from "@cloudflare/sandbox";
@@ -85,18 +86,13 @@ export class CompareRun extends Server<Env> {
         `${runId}-workspace`,
       );
       const sandboxAgent = await getAgentHandle(this.env.SandboxThinkAgent, `${runId}-sandbox`);
-      await startRuntimeThinkAgents({
+      await runComparisonAgents({
         runId,
         fixture: comparisonFixture,
         workspaceAgent,
         sandboxAgent,
-        onAgentError: async (runtime, error) => {
-          await this.appendEvent({
-            runtime,
-            kind: "agent_tool_error",
-            title: "Think agent failed",
-            detail: error instanceof Error ? error.message : String(error),
-          });
+        appendEvent: async (input) => {
+          await this.appendEvent(input);
         },
       });
     } catch (error) {
