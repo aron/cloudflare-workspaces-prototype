@@ -10,11 +10,7 @@
  */
 
 import type { SQLiteWorkspaceProvider } from "@cloudflare/workspace";
-import {
-  clone,
-  type IsomorphicGitFSClient,
-  workspaceIsomorphicGitClient,
-} from "@cloudflare/workspace/git";
+import { clone, workspaceIsomorphicGitClient } from "@cloudflare/workspace/git";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -56,8 +52,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
   return tool({
     description:
       "Shallow-clone a public GitHub repository into the workspace " +
-      "filesystem using isomorphic-git. Returns the resolved HEAD " +
-      "commit and total bytes written. Run this once at the start " +
+      "filesystem using isomorphic-git. Run this once at the start " +
       "of triage so the rest of the tools have files to read.",
     inputSchema,
     execute: async ({ repo, dest, ref, depth }) => {
@@ -87,27 +82,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
         repo,
         ref: ref ?? "default",
         dest,
-        head: await resolveHead(fs, dest),
       };
     },
   });
-}
-
-/**
- * Best-effort `git rev-parse HEAD` against the freshly cloned
- * repo. Reads `.git/HEAD` and follows one level of symbolic-ref
- * indirection. Returns undefined on any I/O failure — the tool's
- * caller treats `head` as informational, not load-bearing.
- */
-async function resolveHead(fs: IsomorphicGitFSClient, dir: string): Promise<string | undefined> {
-  try {
-    const head = await fs.promises.readFile(`${dir}/.git/HEAD`);
-    const raw = (typeof head === "string" ? head : new TextDecoder().decode(head)).trim();
-    if (!raw.startsWith("ref: ")) return raw;
-    const refPath = raw.slice("ref: ".length).trim();
-    const oid = await fs.promises.readFile(`${dir}/.git/${refPath}`);
-    return (typeof oid === "string" ? oid : new TextDecoder().decode(oid)).trim();
-  } catch {
-    return undefined;
-  }
 }
