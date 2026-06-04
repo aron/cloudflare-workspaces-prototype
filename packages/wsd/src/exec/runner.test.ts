@@ -1,6 +1,6 @@
-import { Database } from "@cloudflare/dofs";
+import { Database, initializeSchema, WorkspaceFilesystem } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
-import { beforeAll, describe, expect, test } from "vitest";
+import { expect, test } from "vitest";
 
 import { Runner } from "./runner.js";
 
@@ -12,14 +12,18 @@ type ExecEvent =
 function fixture(options: Record<string, unknown> = {}): {
   runner: InstanceType<typeof Runner>;
   db: Database;
+  fs: WorkspaceFilesystem;
   dispose: () => void;
 } {
   const storage = new SQLiteTestStorage();
   const db = new Database(storage);
+  initializeSchema(db, () => Date.now());
+  const fs = new WorkspaceFilesystem(db, { now: () => Date.now() });
   const runner = new Runner({ db, ...options });
   return {
     runner,
     db,
+    fs,
     dispose: () => {
       runner.disposeAll();
       storage.close?.();
@@ -292,6 +296,79 @@ test("exit-event surfaces an error on the subscriber when setExit throws", async
     }
     expect(caught instanceof Error).toBeTruthy();
     expect((caught as Error).message).toMatch(/setExit after dispose/);
+  } finally {
+    dispose();
+  }
+});
+
+test("exec(cwd) does not pass cwd to spawn; threads it through the shell", async () => {
+  // Pre-flighting via dofs's stat means the cwd must exist as a
+  // directory in the local Database. The shell then `cd`s into it,
+  // which requires the same path to exist on the host filesystem
+  // (the spawned /bin/sh runs against the OS, not the dofs VFS).
+  // /tmp is both: a real directory the OS knows about, and one we
+  // can mkdir into the dofs DB without escaping the sandbox.
+  const { runner, fs, dispose } = fixture();
+  try {
+    await fs.mkdir("/tmp", { recursive: true });
+    const handle = runner.exec("pwd", { cwd: "/tmp" });
+    const events = await drain(handle.events);
+    const stdout = events
+      .filter((e) => e.name === "stdout")
+      .map((e) => decode(e.value as Uint8Array))
+      .join("");
+    const exit = events.find((e) => e.name === "exit");
+    expect(stdout.trim()).toBe("/tmp");
+    expect(exit?.value).toBe(0);
+  } finally {
+    dispose();
+  }
+});
+
+test("exec(cwd) with a missing path synthesises a spawn-failed shape", async () => {
+  // dofs's stat throws ENOENT for a path that doesn't exist in the
+  // local Database. The runner converts that into the same
+  // stderr-then-exit-(-1) shape it produces when libuv emits a
+  // real spawn error event, so the externally observable contract
+  // is identical regardless of which side caught the failure.
+  const { runner, dispose } = fixture();
+  try {
+    const handle = runner.exec("echo unreachable", { cwd: "/nope/missing" });
+    const events = await drain(handle.events);
+    const stderr = events
+      .filter((e) => e.name === "stderr")
+      .map((e) => decode(e.value as Uint8Array))
+      .join("");
+    const exit = events.find((e) => e.name === "exit");
+    expect(stderr).toMatch(/^spawn failed: /);
+    expect(stderr).toMatch(/no such path|ENOENT/i);
+    expect(exit?.value).toBe(-1);
+  } finally {
+    dispose();
+  }
+});
+
+test("exec(cwd) quotes path segments with spaces and single quotes", async () => {
+  // The shellQuote helper has to survive both spaces and embedded
+  // single quotes without giving /bin/sh a chance to misparse. Use
+  // a real on-disk path so the spawned shell can actually cd to
+  // it, and mkdir the matching entry into the dofs DB so the
+  // pre-flight passes.
+  const { runner, fs, dispose } = fixture();
+  const tricky = "/tmp/wsd test 'quoted' dir";
+  try {
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(tricky, { recursive: true });
+    await fs.mkdir(tricky, { recursive: true });
+    const handle = runner.exec("pwd", { cwd: tricky });
+    const events = await drain(handle.events);
+    const stdout = events
+      .filter((e) => e.name === "stdout")
+      .map((e) => decode(e.value as Uint8Array))
+      .join("");
+    const exit = events.find((e) => e.name === "exit");
+    expect(stdout.trim()).toBe(tricky);
+    expect(exit?.value).toBe(0);
   } finally {
     dispose();
   }

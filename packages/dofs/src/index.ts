@@ -21,7 +21,7 @@ export {
 export type { WorkspaceDirentResult } from "./fs/readdir.js";
 export type { ReadFileOptions } from "./fs/readFile.js";
 export type { RmOptions } from "./fs/rm.js";
-export type { WorkspaceStatResult } from "./fs/stat.js";
+export { stat, type WorkspaceStatResult } from "./fs/stat.js";
 export type { WriteFileContent, WriteFileOptions } from "./fs/writeFile.js";
 export type { SQLiteWorkspaceProviderOptions } from "./provider.js";
 export { SQLiteWorkspaceProvider } from "./provider.js";

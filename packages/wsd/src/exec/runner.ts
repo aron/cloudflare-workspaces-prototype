@@ -18,7 +18,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-import type { Database } from "@cloudflare/dofs";
+import { type Database, stat } from "@cloudflare/dofs";
 
 import { createLog, type EventLog, openLog } from "./log.js";
 import { clearExecState, initializeExecSchema } from "./schema.js";
@@ -108,8 +108,37 @@ export class Runner {
 
     const cwd = options.cwd ?? this.opts.cwd;
     const env = { ...process.env, ...this.opts.env, ...options.env };
-    const child = spawn("/bin/sh", ["-c", command], {
-      cwd,
+    // Pre-flight the cwd via dofs's stat which walks vfs_nodes /
+    // vfs_dirents in SQLite directly — no node:fs.statSync, no
+    // FUSE callback. Preserves the historical ENOENT-cwd error
+    // shape callers see when the path doesn't exist, without
+    // taking a route that could deadlock against wsd's own FUSE
+    // server.
+    if (cwd !== undefined) {
+      try {
+        stat(this.db, cwd);
+      } catch (err) {
+        return this.spawnFailed(id, err);
+      }
+    }
+    // Don't pass cwd to spawn. libuv's uv_spawn does fork +
+    // chdir + execve in the child while the parent blocks on a
+    // status pipe. If cwd lives inside wsd's own FUSE mount, the
+    // child's chdir issues a FUSE LOOKUP that wsd can't service
+    // (its event loop is stuck in uv_spawn), and the whole
+    // process deadlocks. Have /bin/sh do the chdir instead: by
+    // the time the shell runs its `cd`, wsd's event loop is back
+    // and can answer the FUSE callback normally.
+    //
+    // No `exec` prefix on the user command: the user's argument
+    // may be a compound expression (`echo a && exit 3`), and
+    // `exec` only binds to the next simple command, which would
+    // cut off everything after the first `&&`. The shell stays
+    // as the spawned process either way — the original code
+    // (`spawn("/bin/sh", ["-c", command])`) was already a shell-
+    // owned exec, so this is no change in process shape.
+    const wrapped = cwd !== undefined ? `cd ${shellQuote(cwd)} && ${command}` : command;
+    const child = spawn("/bin/sh", ["-c", wrapped], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -373,6 +402,34 @@ export class Runner {
     this.records.delete(record.id);
   }
 
+  // Synthesise the same stderr + exit + closed-stream shape that
+  // `child.once("error", ...)` produces for a real spawn failure,
+  // for cases where we know the spawn would fail (e.g. cwd doesn't
+  // exist) and want to surface it via the same return path without
+  // ever calling `spawn`. Keeps the externally observable error
+  // contract identical regardless of whether the failure was
+  // detected pre-spawn or as a libuv ECHILD/ENOENT/etc on the
+  // child itself.
+  private spawnFailed(id: string, err: unknown): ExecHandle {
+    const message = err instanceof Error ? err.message : String(err);
+    const log = createLog(this.db, id, {
+      maxBytes: this.opts.logMaxBytes,
+      now: this.opts.now,
+    });
+    const value = new TextEncoder().encode(`spawn failed: ${message}\n`);
+    const stderrSeq = log.append("stderr", value);
+    const exitSeq = log.setExit(-1);
+    log.dispose();
+    const events = new ReadableStream<ExecEvent>({
+      start(controller) {
+        controller.enqueue({ id, seq: stderrSeq, name: "stderr", value });
+        controller.enqueue({ id, seq: exitSeq, name: "exit", value: -1 });
+        controller.close();
+      },
+    });
+    return { id, events };
+  }
+
   private scheduleSweep(): void {
     if (this.sweepTimer !== undefined) return;
     if (this.records.size === 0) return;
@@ -383,6 +440,15 @@ export class Runner {
     }, this.opts.sweepIntervalMs);
     this.sweepTimer.unref?.();
   }
+}
+
+// Quote a single argument for /bin/sh -c. Wraps in single quotes
+// and escapes any embedded single quote as '\''. Used to thread
+// the spawn cwd into `cd <path> && exec <command>` without giving
+// the shell a chance to misparse paths with spaces or shell
+// metacharacters.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 function mapExitCode(code: number | null, signal: NodeJS.Signals | null): number {
