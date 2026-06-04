@@ -155,7 +155,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#backend = new CloudflareContainerBackend({
-      container: () => this.ws,
+      container: () => this,
       workspace: { binding: "TriageAgent", id: ctx.id.toString() },
     });
     this.#containerWs = new Workspace({

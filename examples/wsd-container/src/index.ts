@@ -46,7 +46,7 @@ export class ContainerExample extends withWorkspaceContainer(class extends Durab
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#backend = new CloudflareContainerBackend({
-      container: () => this.ws,
+      container: () => this,
       workspace: { binding: "ContainerExample", id: ctx.id.toString() },
     });
     this.#workspace = new Workspace({
