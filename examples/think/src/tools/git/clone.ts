@@ -33,6 +33,15 @@ export interface GitCloneToolOptions {
   provider: SQLiteWorkspaceProvider;
   /** Default clone depth. Default 1 (shallow). */
   defaultDepth?: number;
+  /**
+   * Shared isomorphic-git cache. Passed into `git.clone` so the
+   * packfile parsed during the fetch is reused by later isogit calls
+   * (statusMatrix, walk, readBlob) on the same provider. Without
+   * sharing, every subsequent call re-parses the pack from scratch —
+   * fine for small repos, catastrophic for anything with a real
+   * history. Pass the same object you hand to `git.walk` etc.
+   */
+  cache?: Record<string, unknown>;
 }
 
 const inputSchema = z.object({
@@ -79,6 +88,7 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
         ref,
         singleBranch: true,
         depth: depth ?? depthDefault,
+        cache: opts.cache,
       });
       let head: string | undefined;
       try {

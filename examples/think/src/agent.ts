@@ -135,6 +135,14 @@ export class TriageAgent extends Think<Env> {
    */
   readonly #backend: CloudflareContainerBackend;
   readonly #containerWs: Workspace;
+  /**
+   * Shared isomorphic-git cache. Reused across every isogit call this
+   * agent makes (clone, walk, resolveRef, …). Without this, each call
+   * re-parses the packfile from scratch — a ~20 MB read through the
+   * SQLite-backed VFS — which is what makes a naive `gitDiff` take
+   * many minutes on a real repo.
+   */
+  readonly #gitCache: Record<string, unknown> = {};
 
   /** Cached context written by the Worker before the workflow runs. */
   #context: TriageContext | null = null;
@@ -253,15 +261,48 @@ export class TriageAgent extends Think<Env> {
     } catch {
       return "";
     }
-    const status = await git.statusMatrix({ fs: vfs, dir });
+    // Single tree walk — compare HEAD tree to the working tree in
+    // one pass. The earlier shape was `statusMatrix` + a per-file
+    // `readBlob`, which is O(files × packfile-parse) because
+    // isomorphic-git's readBlob defaults to `cache: {}` per call:
+    // every lookup re-parses the entire pack from the SQLite-backed
+    // VFS. On a 950-entry / ~20 MB-pack repo that hangs for many
+    // minutes. `git.walk` reuses one cache across the whole
+    // traversal, and we pass our own #gitCache so subsequent calls
+    // (and the clone) don't re-pay the parse either.
     const chunks: string[] = [];
-    for (const [filepath, headStatus, workdirStatus] of status) {
-      // workdirStatus: 0 absent, 1 == HEAD, 2 differs
-      if (workdirStatus === 1) continue;
-      const headText = headStatus === 1 ? await readBlobAsText(vfs, dir, head, filepath) : "";
-      const workdirText = workdirStatus === 2 ? await readWorkdirAsText(vfs, dir, filepath) : "";
-      const patch = createPatch(filepath, headText, workdirText, "", "");
-      if (patch.trim().length > 0) chunks.push(patch);
+    try {
+      await git.walk({
+        fs: vfs,
+        dir,
+        cache: this.#gitCache,
+        trees: [git.TREE({ ref: head }), git.WORKDIR()],
+        map: async (filepath, [headEntry, workEntry]) => {
+          if (filepath === "." || filepath.startsWith(".git")) return;
+          const headType = headEntry ? await headEntry.type() : null;
+          const workType = workEntry ? await workEntry.type() : null;
+          // Only diff blobs. Pure directories on either side carry
+          // no bytes to compare.
+          const isHeadFile = headType === "blob";
+          const isWorkFile = workType === "blob";
+          if (!isHeadFile && !isWorkFile) return;
+          const headText =
+            isHeadFile && headEntry
+              ? bufferToText((await headEntry.content()) as Uint8Array | undefined)
+              : "";
+          const workText =
+            isWorkFile && workEntry
+              ? bufferToText((await workEntry.content()) as Uint8Array | undefined)
+              : "";
+          if (headText === workText) return;
+          const patch = createPatch(filepath, headText, workText, "", "");
+          if (patch.trim().length > 0) chunks.push(patch);
+        },
+      });
+    } catch {
+      // Walk can fail if HEAD points at an object we don't have
+      // (a partial / interrupted clone). Treat as "no diff".
+      return "";
     }
     return chunks.join("\n");
   }
@@ -447,6 +488,7 @@ export class TriageAgent extends Think<Env> {
     return {
       git_clone: createGitCloneTool({
         provider: containerWs.provider(),
+        cache: this.#gitCache,
       }),
       // Per-tool caps. Kimi K2.6 has a 262k context window so we
       // don't need to be paranoid; the caps are mostly so a
@@ -787,42 +829,13 @@ function redact(value: unknown): unknown {
 }
 
 /**
- * Read a file from a git commit by path. Returns "" if the blob is
- * missing (which `statusMatrix` shouldn't hand us, but be defensive).
- * Binary content is best-effort decoded as UTF-8; a real diff tool
- * would skip binaries entirely, but for the demo a noisy diff beats
- * a thrown error.
+ * Best-effort UTF-8 decode for a WalkerEntry.content() buffer. The
+ * isomorphic-git walker hands back a Uint8Array for blobs and null
+ * for non-blob entries (the caller filters those out before calling
+ * us). Binary content is decoded with replacement chars rather than
+ * thrown — a noisy diff still ships a patch the user can read.
  */
-async function readBlobAsText(
-  fs: import("./tools/git/vfs.js").WorkspaceGitFsHandle,
-  dir: string,
-  oid: string,
-  filepath: string,
-): Promise<string> {
-  try {
-    const { blob } = await git.readBlob({ fs, dir, oid, filepath });
-    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(blob);
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Read a file from the working tree via the same WorkspaceGitFs
- * adapter the rest of the agent uses. Centralised here so `gitDiff`
- * doesn't reach into `workspace.fs` directly.
- */
-async function readWorkdirAsText(
-  fs: import("./tools/git/vfs.js").WorkspaceGitFsHandle,
-  dir: string,
-  filepath: string,
-): Promise<string> {
-  try {
-    const data = await fs.promises.readFile(`${dir}/${filepath}`);
-    if (typeof data === "string") return data;
-    // `data` is a Node `Buffer` (Uint8Array subclass) under platformatic.
-    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(data);
-  } catch {
-    return "";
-  }
+function bufferToText(buf: Uint8Array | null | undefined): string {
+  if (!buf) return "";
+  return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(buf);
 }
