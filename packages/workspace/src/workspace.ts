@@ -19,6 +19,7 @@ import {
 import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { MountIndex } from "./mounts/index.js";
 import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
 import type { Mount } from "./mounts/types.js";
 import { WorkspaceShell } from "./shell.js";
@@ -81,6 +82,7 @@ export class Workspace {
   readonly #reconnect: ReconnectOptions;
   readonly #now: () => number;
   readonly #mounts: Map<string, Mount>;
+  readonly #mountIndex: MountIndex;
   #handle: BackendHandle | undefined;
   #shell: WorkspaceShell | undefined;
   #readyPromise: Promise<void> | undefined;
@@ -106,6 +108,19 @@ export class Workspace {
       sessionId: options.sessionId,
       vfs: () => this.provider(),
     });
+    this.#mountIndex = new MountIndex({
+      db: this.#db,
+      fs: this.#fs,
+      mounts: this.#mounts,
+    });
+  }
+
+  // Force every registered mount to materialize. Idempotent; safe to
+  // call from multiple places (ready(), tests, future fs/shell
+  // entry points). Concurrent callers share one materialize() pass
+  // per mount.
+  ensureMountsIndexed(): Promise<void> {
+    return this.#mountIndex.ensureIndexed();
   }
 
   // Resolved mount registry, keyed by absolute mount root. Returned
@@ -176,7 +191,13 @@ export class Workspace {
   // the same in-flight connection attempt.
   ready(): Promise<void> {
     if (this.#readyPromise) return this.#readyPromise;
-    this.#readyPromise = this.#connect();
+    this.#readyPromise = (async () => {
+      await this.#connect();
+      // Index after the backend is wired so reads of mounted paths
+      // are populated before the first push() inside an exec()
+      // bracket can ship them.
+      await this.#mountIndex.ensureIndexed();
+    })();
     return this.#readyPromise;
   }
 

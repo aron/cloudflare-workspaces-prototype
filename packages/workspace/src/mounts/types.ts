@@ -30,6 +30,13 @@ export interface MountOptions {
 export interface MountBase {
   readonly kind: string;
   readonly writable: boolean;
+  // Hard cap on total bytes the mount may land in vfs_nodes. The
+  // indexer aborts and rolls back if exceeded. Undefined means no
+  // cap.
+  readonly maxBytes?: number;
+  // Hard cap on entry count (files + directories) the mount may
+  // create. Same enforcement timing as maxBytes.
+  readonly maxEntries?: number;
 }
 
 // Eager mounts populate everything in one shot through MountWriteAPI.
