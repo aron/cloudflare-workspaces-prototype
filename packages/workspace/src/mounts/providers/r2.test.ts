@@ -220,7 +220,7 @@ describe("R2Bucket provider", () => {
     expect(chunks.reduce((s, c) => s + c.size, 0)).toBe(total);
   });
 
-  it("materialize on an empty bucket leaves indexed=1 with no entries under the mount root", async () => {
+  it("materialize on an empty bucket creates the mount root with no children", async () => {
     const { bucket, spy } = fakeR2([]);
     const ws = new Workspace({
       storage: makeStorage(),
@@ -235,10 +235,12 @@ describe("R2Bucket provider", () => {
       "/workspace/empty",
     );
     expect(row).toEqual({ root: "/workspace/empty", indexed: 1 });
-    // The indexer doesn't pre-create the mount root, so reading it
-    // back surfaces ENOENT — by design, the bucket was empty and
-    // nothing produced any entries.
-    await expect(ws.fs.readdir("/workspace/empty")).rejects.toMatchObject({ code: "ENOENT" });
+    // The indexer pre-creates the mount root, so even when the
+    // backing bucket is empty the configured root resolves and
+    // readdir returns []. A consumer enumerating an empty mount
+    // doesn't need to know whether the bucket happened to be
+    // empty.
+    await expect(ws.fs.readdir("/workspace/empty")).resolves.toEqual([]);
   });
 
   it("materialize throws if get() returns null for a listed key", async () => {

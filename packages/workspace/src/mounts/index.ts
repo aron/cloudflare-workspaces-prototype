@@ -51,6 +51,15 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
 
       const api = createWriteAPI({ fs, root, mount });
       try {
+        // Pre-create the mount root so an empty mount (one whose
+        // materialize() produces zero entries) still has a
+        // resolvable inode. Without this, only non-empty mounts get
+        // a root — as a side effect of the first writeFile's parent
+        // mkdir chain — and readdir(root) on an empty mount rejects
+        // with ENOENT. The mkdir is inside the try block so a crash
+        // mid-materialize rolls it back via the existing fs.rm path
+        // below.
+        await fs.mkdir(root, { recursive: true });
         await mount.materialize(api);
       } catch (error) {
         // Roll back anything the partial materialize landed under
