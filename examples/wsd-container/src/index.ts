@@ -22,6 +22,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
+  R2Bucket,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
@@ -55,6 +56,14 @@ export class ContainerExample extends withWorkspaceContainer(class extends Durab
       // matches. Cast through unknown to bypass invariance.
       storage: ctx.storage as unknown as DurableObjectStorageLike,
       backends: [this.#backend],
+      // Mount the R2_HELLO bucket at /workspace/r2. Seed it with
+      // `npm run seed:r2` (uploads ./seed/r2-hello/hello.txt) so
+      // the first read returns "hello world". The bucket is read-
+      // only here; writes through Workspace.fs under /workspace/r2
+      // reject with EROFS until M6 wires the write-back path.
+      mounts: {
+        "/workspace/r2": R2Bucket(env.R2_HELLO),
+      },
     });
   }
 

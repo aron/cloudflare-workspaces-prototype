@@ -59,6 +59,33 @@ writes. Cloudflare Containers expose `/dev/fuse` to the workload.
 to set `DISABLE_FUSE=1` first; `exec` then runs against the
 container's own root filesystem rather than the VFS.
 
+## R2 mount
+
+The DO mounts the `R2_HELLO` R2 bucket at `/workspace/r2` via
+`R2Bucket(env.R2_HELLO)`. On the first call into the workspace the
+mount indexer pages through the bucket, streams each object into
+`vfs_nodes`, and from then on `/workspace/r2/<key>` reads like any
+other file. The mount is read-only; writes under `/workspace/r2`
+reject with `EROFS`.
+
+Seed the bucket once with the bundled fixture (`./seed/r2-hello/hello.txt`,
+which contains the bytes `hello world`):
+
+```sh
+# Local miniflare bucket — use this with `wrangler dev`.
+npm run seed:r2:local --workspace @cloudflare/example-wsd-container
+
+# Real Cloudflare R2 bucket — use this after `wrangler deploy`.
+npm run seed:r2 --workspace @cloudflare/example-wsd-container
+```
+
+Then:
+
+```sh
+curl http://127.0.0.1:8787/c/demo/file/workspace/r2/hello.txt
+# => hello world
+```
+
 ## HTTP surface
 
 ```

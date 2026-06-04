@@ -28,6 +28,18 @@
     ]
   },
 
+  // R2 bucket mounted into every Workspace at /workspace/r2 via
+  // R2Bucket(...). Seed it once with:
+  //   npm run seed:r2 --workspace @cloudflare/example-wsd-container
+  // which uploads ./seed/r2-hello/hello.txt to the bucket.
+  "r2_buckets": [
+    {
+      "binding": "R2_HELLO",
+      "bucket_name": "workspace-container-hello",
+      "preview_bucket_name": "workspace-container-hello-preview"
+    }
+  ],
+
   "migrations": [
     {
       "tag": "v1",
