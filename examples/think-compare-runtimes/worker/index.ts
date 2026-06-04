@@ -1,13 +1,12 @@
 import type { Sandbox as SandboxDO } from "@cloudflare/sandbox";
-import { getAgentByName } from "agents";
 import { getServerByName, routePartykitRequest, Server } from "partyserver";
 import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { runComparisonAgents } from "./comparison-agents";
 import { handleApiRequest } from "./http";
 import type { RunEventInput } from "./run-events";
+import { getRuntimeAgentHandles } from "./runtime-agent-handles";
 import { startComparisonRun } from "./start-run";
-import type { RuntimeThinkAgentHandle } from "./think/agent-starter";
 import { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent } from "./think/agents";
 
 export { Sandbox } from "@cloudflare/sandbox";
@@ -16,6 +15,7 @@ export { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent };
 export interface Env {
   AI: Ai;
   CompareRun: DurableObjectNamespace<CompareRun>;
+  SANDBOX_TRANSPORT: "rpc";
   Sandbox: DurableObjectNamespace<SandboxDO>;
   WorkspaceThinkAgent: DurableObjectNamespace<WorkspaceThinkAgent>;
   SandboxThinkAgent: DurableObjectNamespace<SandboxThinkAgent>;
@@ -81,11 +81,11 @@ export class CompareRun extends Server<Env> {
 
   async #startAgents(runId: string): Promise<void> {
     try {
-      const workspaceAgent = await getAgentHandle(
-        this.env.WorkspaceThinkAgent,
-        `${runId}-workspace`,
-      );
-      const sandboxAgent = await getAgentHandle(this.env.SandboxThinkAgent, `${runId}-sandbox`);
+      const { workspaceAgent, sandboxAgent } = await getRuntimeAgentHandles({
+        runId,
+        workspaceNamespace: this.env.WorkspaceThinkAgent,
+        sandboxNamespace: this.env.SandboxThinkAgent,
+      });
       await runComparisonAgents({
         runId,
         fixture: comparisonFixture,
@@ -123,17 +123,6 @@ export class CompareRun extends Server<Env> {
     this.broadcast(JSON.stringify({ type: "event", event }));
     return event;
   }
-}
-
-async function getAgentHandle(
-  namespace: DurableObjectNamespace,
-  name: string,
-): Promise<RuntimeThinkAgentHandle> {
-  const getAgent = getAgentByName as unknown as (
-    namespace: DurableObjectNamespace,
-    name: string,
-  ) => Promise<unknown>;
-  return (await getAgent(namespace, name)) as RuntimeThinkAgentHandle;
 }
 
 export default {

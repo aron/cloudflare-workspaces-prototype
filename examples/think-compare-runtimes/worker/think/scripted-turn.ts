@@ -23,7 +23,7 @@ export async function runScriptedThinkToolSmoke({
     detail: "Deterministic harness is exercising the Think-facing tool surface.",
   });
 
-  await executeRuntimeThinkTool(tools, "read", { path: `${root}/src/index.ts` });
+  await executeRuntimeThinkTool(tools, "read", { path: `${root}/src/request-policy.ts` });
   await executeRuntimeThinkTool(tools, "write", {
     path: `${root}/THINK_NOTES.md`,
     contents: "Think tool smoke: pending\n",

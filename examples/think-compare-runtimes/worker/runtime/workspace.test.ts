@@ -29,26 +29,7 @@ describe("createWorkspaceFixtureRuntime", () => {
 
     await seedFixture(createWorkspaceFixtureRuntime(workspace), comparisonFixture);
 
-    expect(calls).toEqual([
-      { type: "mkdir", path: "/workspace/repo" },
-      {
-        type: "write",
-        path: "/workspace/repo/package.json",
-        contents: comparisonFixture.files[0]?.contents,
-      },
-      { type: "mkdir", path: "/workspace/repo/src" },
-      {
-        type: "write",
-        path: "/workspace/repo/src/index.ts",
-        contents: comparisonFixture.files[1]?.contents,
-      },
-      { type: "mkdir", path: "/workspace/repo/src" },
-      {
-        type: "write",
-        path: "/workspace/repo/src/index.test.ts",
-        contents: comparisonFixture.files[2]?.contents,
-      },
-    ]);
+    expect(calls).toEqual(expectedSeedCalls());
   });
 
   test("adapts Workspace.fs to the text file store interface", async () => {
@@ -103,3 +84,17 @@ describe("createWorkspaceFixtureRuntime", () => {
     expect(calls).toEqual(["ready", "npm test /workspace/repo utf8 30000", "result"]);
   });
 });
+
+function expectedSeedCalls(): Array<{ type: "mkdir" | "write"; path: string; contents?: string }> {
+  return [
+    { type: "mkdir", path: comparisonFixture.root },
+    ...comparisonFixture.files.flatMap((file) => {
+      const path = `${comparisonFixture.root}/${file.path}`;
+      const directory = path.slice(0, path.lastIndexOf("/"));
+      const calls: Array<{ type: "mkdir" | "write"; path: string; contents?: string }> = [];
+      if (directory !== comparisonFixture.root) calls.push({ type: "mkdir", path: directory });
+      calls.push({ type: "write", path, contents: file.contents });
+      return calls;
+    }),
+  ];
+}

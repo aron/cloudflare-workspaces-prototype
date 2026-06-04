@@ -65,16 +65,12 @@ describe("runFixtureComparison", () => {
       },
     });
 
-    expect(workspaceWrites).toEqual([
-      "/workspace/repo/package.json",
-      "/workspace/repo/src/index.ts",
-      "/workspace/repo/src/index.test.ts",
-    ]);
+    expect(workspaceWrites).toEqual(expectedFixturePaths());
     expect(sandboxWrites).toEqual(workspaceWrites);
     expect(events.map((event) => event.sequence)).toEqual(
       Array.from({ length: events.length }, (_, sequence) => sequence),
     );
-    const fixtureSetupEventCount = 1 + 2 * (comparisonFixture.files.length * 4 + 1);
+    const fixtureSetupEventCount = 1 + 2 * perRuntimeFixtureSetupEventCount();
     const scriptedTurnEventCount = 2 * (2 + 4 * 4);
     expect(events).toHaveLength(fixtureSetupEventCount + scriptedTurnEventCount);
     expect(events[0]).toMatchObject({
@@ -86,7 +82,7 @@ describe("runFixtureComparison", () => {
       expect.arrayContaining([
         "Workspace fixture seeded",
         "Sandbox fixture seeded",
-        "read /workspace/repo/src/index.ts",
+        "read /workspace/repo/src/request-policy.ts",
         "read complete",
         "Scripted Think turn started",
         "Think requested read",
@@ -112,3 +108,19 @@ describe("runFixtureComparison", () => {
     );
   });
 });
+
+function expectedFixturePaths(): string[] {
+  return comparisonFixture.files.map((file) => `${comparisonFixture.root}/${file.path}`);
+}
+
+function perRuntimeFixtureSetupEventCount(): number {
+  const rootMkdirEvents = 2;
+  const seededEvent = 1;
+  const fileEvents = comparisonFixture.files.reduce((count, file) => {
+    const path = `${comparisonFixture.root}/${file.path}`;
+    const directory = path.slice(0, path.lastIndexOf("/"));
+    return count + (directory === comparisonFixture.root ? 2 : 4);
+  }, 0);
+
+  return rootMkdirEvents + fileEvents + seededEvent;
+}

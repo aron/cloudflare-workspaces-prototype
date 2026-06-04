@@ -8,6 +8,7 @@ import {
 } from "@cloudflare/workspace";
 import type { ToolSet } from "ai";
 import { getServerByName } from "partyserver";
+import type { RuntimeId } from "../../shared/events";
 import type { ComparisonFixture } from "../../shared/fixture";
 import type { CompareRun } from "../index";
 import {
@@ -27,6 +28,7 @@ import {
   createWorkspaceFixtureRuntime,
 } from "../runtime/workspace";
 import { createRuntimeThinkModel } from "./model";
+import { createRuntimeSystemPrompt } from "./prompts";
 import { runRealThinkTurn } from "./real-turn";
 import { type CompareRunEventSink, createRemoteRunEventRecorder } from "./remote-recorder";
 import { createRuntimeThinkTools, type RuntimeThinkToolRecorder } from "./runtime-tools";
@@ -55,6 +57,7 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
 
   override chatRecovery = false;
 
+  abstract readonly runtime: RuntimeId;
   abstract readonly runtimeLabel: "Workspace" | "Sandbox";
 
   protected abstract createAdapter(
@@ -69,13 +72,7 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
   }
 
   override getSystemPrompt(): string {
-    return [
-      "You are one side of a strict Think-vs-Think runtime comparison.",
-      `You are running against the ${this.runtimeLabel} runtime.`,
-      "Use the available read, write, edit, and exec tools to complete the task.",
-      "Prefer read/write/edit for file operations. Use exec for runtime verification when useful.",
-      "When finished, summarize what you changed and what runtime behavior you observed.",
-    ].join("\n");
+    return createRuntimeSystemPrompt(this.runtime);
   }
 
   async runComparison(config: RunConfig): Promise<void> {
@@ -136,6 +133,7 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
 }
 
 export class WorkspaceThinkAgent extends RuntimeThinkAgent {
+  readonly runtime = "workspace";
   readonly runtimeLabel = "Workspace";
   readonly #backend: CloudflareContainerBackend;
   readonly #workspace: Workspace;
@@ -180,6 +178,7 @@ export class WorkspaceThinkAgent extends RuntimeThinkAgent {
 }
 
 export class SandboxThinkAgent extends RuntimeThinkAgent {
+  readonly runtime = "sandbox";
   readonly runtimeLabel = "Sandbox";
 
   protected async seedRuntime(config: RunConfig): Promise<void> {

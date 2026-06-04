@@ -1,13 +1,13 @@
 import type { RuntimeId } from "../shared/events";
 import type { ComparisonFixture } from "../shared/fixture";
 import type { RunEventInput } from "./run-events";
-import { type RuntimeThinkAgentHandle, startRuntimeThinkAgents } from "./think/agent-starter";
+import { type RuntimeThinkAgentHandleInput, startRuntimeThinkAgents } from "./think/agent-starter";
 
 export interface RunComparisonAgentsOptions {
   runId: string;
   fixture: ComparisonFixture;
-  workspaceAgent: RuntimeThinkAgentHandle;
-  sandboxAgent: RuntimeThinkAgentHandle;
+  workspaceAgent: RuntimeThinkAgentHandleInput;
+  sandboxAgent: RuntimeThinkAgentHandleInput;
   appendEvent(input: RunEventInput): void | Promise<void>;
 }
 

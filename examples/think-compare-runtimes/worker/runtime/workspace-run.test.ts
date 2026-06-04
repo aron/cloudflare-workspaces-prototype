@@ -24,11 +24,7 @@ describe("runWorkspaceFixtureSetup", () => {
       },
     });
 
-    expect(writes).toEqual([
-      "/workspace/repo/package.json",
-      "/workspace/repo/src/index.ts",
-      "/workspace/repo/src/index.test.ts",
-    ]);
+    expect(writes).toEqual(expectedFixturePaths());
     expect(
       events.map(({ sequence, runtime, kind, title }) => ({
         sequence,
@@ -36,40 +32,48 @@ describe("runWorkspaceFixtureSetup", () => {
         kind,
         title,
       })),
-    ).toEqual([
-      { sequence: 0, runtime: "workspace", kind: "tool_call", title: "mkdir /workspace/repo" },
-      { sequence: 1, runtime: "workspace", kind: "tool_result", title: "mkdir complete" },
-      {
-        sequence: 2,
-        runtime: "workspace",
-        kind: "tool_call",
-        title: "write /workspace/repo/package.json",
-      },
-      { sequence: 3, runtime: "workspace", kind: "tool_result", title: "write complete" },
-      { sequence: 4, runtime: "workspace", kind: "tool_call", title: "mkdir /workspace/repo/src" },
-      { sequence: 5, runtime: "workspace", kind: "tool_result", title: "mkdir complete" },
-      {
-        sequence: 6,
-        runtime: "workspace",
-        kind: "tool_call",
-        title: "write /workspace/repo/src/index.ts",
-      },
-      { sequence: 7, runtime: "workspace", kind: "tool_result", title: "write complete" },
-      { sequence: 8, runtime: "workspace", kind: "tool_call", title: "mkdir /workspace/repo/src" },
-      { sequence: 9, runtime: "workspace", kind: "tool_result", title: "mkdir complete" },
-      {
-        sequence: 10,
-        runtime: "workspace",
-        kind: "tool_call",
-        title: "write /workspace/repo/src/index.test.ts",
-      },
-      { sequence: 11, runtime: "workspace", kind: "tool_result", title: "write complete" },
-      {
-        sequence: 12,
-        runtime: "workspace",
-        kind: "runtime_note",
-        title: "Workspace fixture seeded",
-      },
-    ]);
+    ).toEqual(expectedFixtureEventSummaries());
   });
 });
+
+function expectedFixturePaths(): string[] {
+  return comparisonFixture.files.map((file) => `${comparisonFixture.root}/${file.path}`);
+}
+
+function expectedFixtureEventSummaries(): Array<{
+  sequence: number;
+  runtime: "workspace";
+  kind: "tool_call" | "tool_result" | "runtime_note";
+  title: string;
+}> {
+  const summaries = [
+    { runtime: "workspace" as const, kind: "tool_call" as const, title: "mkdir /workspace/repo" },
+    { runtime: "workspace" as const, kind: "tool_result" as const, title: "mkdir complete" },
+    ...comparisonFixture.files.flatMap((file) => {
+      const path = `${comparisonFixture.root}/${file.path}`;
+      const directory = path.slice(0, path.lastIndexOf("/"));
+      const events: Array<{
+        runtime: "workspace";
+        kind: "tool_call" | "tool_result";
+        title: string;
+      }> = [];
+      if (directory !== comparisonFixture.root) {
+        events.push(
+          { runtime: "workspace", kind: "tool_call", title: `mkdir ${directory}` },
+          { runtime: "workspace", kind: "tool_result", title: "mkdir complete" },
+        );
+      }
+      events.push(
+        { runtime: "workspace", kind: "tool_call", title: `write ${path}` },
+        { runtime: "workspace", kind: "tool_result", title: "write complete" },
+      );
+      return events;
+    }),
+    {
+      runtime: "workspace" as const,
+      kind: "runtime_note" as const,
+      title: "Workspace fixture seeded",
+    },
+  ];
+  return summaries.map((summary, sequence) => ({ sequence, ...summary }));
+}

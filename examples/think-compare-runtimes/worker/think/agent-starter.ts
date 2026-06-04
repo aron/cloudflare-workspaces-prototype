@@ -10,11 +10,15 @@ export interface RuntimeThinkAgentHandle {
   runComparison(input: RuntimeThinkAgentRunInput): Promise<void>;
 }
 
+export type RuntimeThinkAgentHandleInput =
+  | RuntimeThinkAgentHandle
+  | Promise<RuntimeThinkAgentHandle>;
+
 export interface StartRuntimeThinkAgentsOptions {
   runId: string;
   fixture: ComparisonFixture;
-  workspaceAgent: RuntimeThinkAgentHandle;
-  sandboxAgent: RuntimeThinkAgentHandle;
+  workspaceAgent: RuntimeThinkAgentHandleInput;
+  sandboxAgent: RuntimeThinkAgentHandleInput;
   onAgentStart?: (runtime: RuntimeId) => void | Promise<void>;
   onAgentComplete?: (runtime: RuntimeId) => void | Promise<void>;
   onAgentError?: (runtime: RuntimeId, error: unknown) => void | Promise<void>;
@@ -29,22 +33,21 @@ export async function startRuntimeThinkAgents({
   onAgentComplete,
   onAgentError,
 }: StartRuntimeThinkAgentsOptions): Promise<void> {
-  const agents: Array<{ runtime: RuntimeId; agent: RuntimeThinkAgentHandle }> = [
+  const agents: Array<{ runtime: RuntimeId; agent: RuntimeThinkAgentHandleInput }> = [
     { runtime: "workspace", agent: workspaceAgent },
     { runtime: "sandbox", agent: sandboxAgent },
   ];
 
-  await Promise.all(agents.map(({ runtime }) => onAgentStart?.(runtime)));
+  const runs = agents.map(async ({ runtime, agent }) => {
+    try {
+      const resolvedAgent = await agent;
+      await onAgentStart?.(runtime);
+      await resolvedAgent.runComparison({ runId, fixture });
+      await onAgentComplete?.(runtime);
+    } catch (error) {
+      await onAgentError?.(runtime, error);
+    }
+  });
 
-  const results = await Promise.allSettled(
-    agents.map(({ agent }) => agent.runComparison({ runId, fixture })),
-  );
-
-  await Promise.all(
-    results.map((result, index) => {
-      const runtime = agents[index]?.runtime ?? "workspace";
-      if (result.status === "fulfilled") return onAgentComplete?.(runtime);
-      return onAgentError?.(runtime, result.reason);
-    }),
-  );
+  await Promise.all(runs);
 }

@@ -5,19 +5,27 @@
 @layer base {
   :root {
     color-scheme: dark;
+    font-family: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    background: #0e1013;
   }
 
   body {
     min-width: 320px;
     min-height: 100vh;
     margin: 0;
-    background:
-      radial-gradient(circle at 14% 8%, color-mix(in oklab, var(--color-kumo-brand) 24%, transparent), transparent 32rem),
-      radial-gradient(circle at 88% 18%, color-mix(in oklab, var(--color-kumo-info) 18%, transparent), transparent 34rem),
-      linear-gradient(135deg, var(--color-kumo-canvas), #120c08 54%, var(--color-kumo-canvas));
+    background: #0e1013;
   }
 
   button {
     font: inherit;
+  }
+
+  code,
+  pre,
+  kbd,
+  samp,
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      "Liberation Mono", "Courier New", monospace;
   }
 }

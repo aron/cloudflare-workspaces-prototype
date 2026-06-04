@@ -12,6 +12,9 @@
     "not_found_handling": "single-page-application"
   },
   "ai": { "binding": "AI" },
+  "vars": {
+    "SANDBOX_TRANSPORT": "rpc"
+  },
   "containers": [
     {
       "class_name": "WorkspaceThinkAgent",

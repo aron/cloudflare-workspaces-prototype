@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { RunEvent, RuntimeId } from "../../shared/events";
 import type { RunEventInput } from "../run-events";
 import type { RuntimeAdapter } from "../runtime/adapter";
+import { createRuntimeToolDescriptions } from "./prompts";
 
 type RuntimeThinkToolName = "read" | "write" | "edit" | "exec";
 
@@ -55,13 +56,14 @@ export function createRuntimeThinkTools({
   recorder,
 }: RuntimeThinkToolsOptions): RuntimeThinkToolSet {
   const runtime = adapter.runtime;
+  const descriptions = createRuntimeToolDescriptions(runtime);
 
   return {
     read: createRuntimeThinkTool({
       runtime,
       recorder,
       name: "read",
-      description: "Read a text file from the runtime workspace.",
+      description: descriptions.read,
       inputSchema: readInputSchema,
       execute: async (input) => {
         const { path } = readInputSchema.parse(input);
@@ -72,7 +74,7 @@ export function createRuntimeThinkTools({
       runtime,
       recorder,
       name: "write",
-      description: "Write a text file in the runtime workspace.",
+      description: descriptions.write,
       inputSchema: writeInputSchema,
       execute: async (input) => {
         const { path, contents } = writeInputSchema.parse(input);
@@ -84,7 +86,7 @@ export function createRuntimeThinkTools({
       runtime,
       recorder,
       name: "edit",
-      description: "Apply exact text replacements to a runtime workspace file.",
+      description: descriptions.edit,
       inputSchema: editInputSchema,
       execute: async (input) => {
         const { path, edits } = editInputSchema.parse(input);
@@ -96,7 +98,7 @@ export function createRuntimeThinkTools({
       runtime,
       recorder,
       name: "exec",
-      description: "Run a shell command through the runtime.",
+      description: descriptions.exec,
       inputSchema: execInputSchema,
       execute: async (input) => {
         const { command, cwd, timeoutMs } = execInputSchema.parse(input);

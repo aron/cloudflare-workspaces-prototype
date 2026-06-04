@@ -1,6 +1,7 @@
 import type { RuntimeId } from "../../shared/events";
 import type { ComparisonFixture } from "../../shared/fixture";
 import type { RuntimeAdapter } from "../runtime/adapter";
+import { createTaskPrompt } from "./prompts";
 import type { RuntimeThinkToolRecorder } from "./runtime-tools";
 
 export interface ThinkTurnInvocation {
@@ -33,7 +34,7 @@ export async function runRealThinkTurn({
   });
 
   try {
-    const result = await invoke({ prompt: createRuntimePrompt(fixture) });
+    const result = await invoke({ prompt: createTaskPrompt(fixture) });
     if (result.text.trim().length === 0) {
       throw new Error("Think turn completed without assistant text.");
     }
@@ -54,19 +55,6 @@ export async function runRealThinkTurn({
     });
     throw error;
   }
-}
-
-export function createRuntimePrompt(fixture: ComparisonFixture): string {
-  return [
-    "You are comparing runtime behavior for the same coding task.",
-    "Use the available tools to inspect and update the fixture as needed.",
-    "Prefer read/write/edit for file operations. Use exec for runtime verification when useful.",
-    "",
-    `Workspace root: ${fixture.root}`,
-    `Task: ${fixture.task}`,
-    "",
-    "When finished, summarize what you changed and what you observed about the runtime.",
-  ].join("\n");
 }
 
 function runtimeLabel(runtime: RuntimeId): string {

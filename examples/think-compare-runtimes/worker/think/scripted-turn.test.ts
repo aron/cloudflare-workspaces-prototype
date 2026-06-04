@@ -6,7 +6,7 @@ import { runScriptedThinkToolSmoke } from "./scripted-turn";
 describe("runScriptedThinkToolSmoke", () => {
   test("drives the Think-facing tools through a deterministic transcript", async () => {
     const files = new Map<string, string>([
-      ["/workspace/repo/src/index.ts", "export const value = 1;\n"],
+      ["/workspace/repo/src/request-policy.ts", "export const value = 1;\n"],
     ]);
     const recorder = new RunEventRecorder({
       runId: "run-abc",
@@ -38,7 +38,11 @@ describe("runScriptedThinkToolSmoke", () => {
       [
         { runtime: "workspace", kind: "agent_message", title: "Scripted Think turn started" },
         { runtime: "workspace", kind: "agent_tool_call", title: "Think requested read" },
-        { runtime: "workspace", kind: "tool_call", title: "read /workspace/repo/src/index.ts" },
+        {
+          runtime: "workspace",
+          kind: "tool_call",
+          title: "read /workspace/repo/src/request-policy.ts",
+        },
         { runtime: "workspace", kind: "tool_result", title: "read complete" },
         { runtime: "workspace", kind: "agent_tool_result", title: "Think read result" },
         { runtime: "workspace", kind: "agent_tool_call", title: "Think requested write" },
