@@ -138,13 +138,19 @@ export class WorkspaceShell {
     } catch {
       // pushed stays 0
     }
-    const { id, events } = await this.#shell.exec({
+    const envelope = await this.#shell.exec({
       command,
       id: options.id,
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
     });
-    return wrapHandle<E>(this.#shell, this.#sync, id, events, options.encoding, pushed);
+    // Dispose the result envelope when the event stream finishes
+    // draining. Without this, capnweb's exports table holds onto
+    // the envelope for the life of the session — one entry per
+    // exec call — because we hand the inner stream off to the
+    // caller and can't `using` the envelope ourselves.
+    const events = disposeOnDone(envelope.events, () => maybeDispose(envelope));
+    return wrapHandle<E>(this.#shell, this.#sync, envelope.id, events, options.encoding, pushed);
   }
 
   get(id: string): Promise<ExecHandle<undefined>>;
@@ -155,7 +161,8 @@ export class WorkspaceShell {
     options: GetExecOptions<E> = {},
   ): Promise<ExecHandle<E>> {
     const after = resumeToAfter(options.resume);
-    const { events } = await this.#shell.getExec({ id, after });
+    const envelope = await this.#shell.getExec({ id, after });
+    const events = disposeOnDone(envelope.events, () => maybeDispose(envelope));
     // Reattach doesn't own the original push frame: pushed = 0.
     // The post-drain pull still fires, scoped to whatever lands
     // between reattach and the next drain.
@@ -337,4 +344,43 @@ function joinParts<E extends ExecEncoding>(
     offset += a.byteLength;
   }
   return out as Chunk<E>;
+}
+
+// Pipe `stream` through an identity TransformStream that fires `onDone`
+// exactly once when the stream finishes — clean end, cancel, or
+// error. Used to release a capnweb result envelope as soon as the
+// event stream it carried is drained, without having to keep the
+// envelope reference alive across wrapHandle().
+function disposeOnDone<T>(stream: ReadableStream<T>, onDone: () => void): ReadableStream<T> {
+  let fired = false;
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    try {
+      onDone();
+    } catch {
+      // ignore — disposer errors are not actionable here
+    }
+  };
+  return stream.pipeThrough(
+    new TransformStream<T, T>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+      },
+      flush() {
+        fire();
+      },
+      cancel() {
+        fire();
+      },
+    }),
+  );
+}
+
+// Best-effort dispose of a capnweb result envelope. Real envelopes
+// expose [Symbol.dispose]; test fakes return plain objects, so the
+// symbol may be absent.
+function maybeDispose(value: unknown): void {
+  const d = (value as { [Symbol.dispose]?: () => void } | null | undefined)?.[Symbol.dispose];
+  if (typeof d === "function") d.call(value);
 }

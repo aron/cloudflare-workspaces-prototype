@@ -29,6 +29,46 @@ function hex(bytes: Uint8Array): string {
   return s;
 }
 
+// Pipe `stream` through an identity TransformStream that fires `onDone`
+// exactly once when the stream finishes — clean end, cancel, or error.
+// Used to release a capnweb result envelope as soon as the stream it
+// carried is drained, without having to keep the envelope reference
+// alive across the consume site. `onDone` errors are swallowed: the
+// stream's content is the load-bearing thing, not the cleanup.
+function disposeOnDone<T>(stream: ReadableStream<T>, onDone: () => void): ReadableStream<T> {
+  let fired = false;
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    try {
+      onDone();
+    } catch {
+      // ignore — disposer errors are not actionable here
+    }
+  };
+  return stream.pipeThrough(
+    new TransformStream<T, T>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+      },
+      flush() {
+        fire();
+      },
+      cancel() {
+        fire();
+      },
+    }),
+  );
+}
+
+// Best-effort dispose of a capnweb result envelope. Real envelopes
+// expose [Symbol.dispose]; the test fakes return plain objects, so
+// the symbol may be absent.
+function maybeDispose(value: unknown): void {
+  const d = (value as { [Symbol.dispose]?: () => void } | null | undefined)?.[Symbol.dispose];
+  if (typeof d === "function") d.call(value);
+}
+
 // Soft cap on entries processed per batch in pullOnce. Each batch
 // runs hasObjects + fetchObjects + applyChanges against the entries
 // it just buffered, then releases them before reading the next.
@@ -57,18 +97,21 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
   // check on the pull path), and the entry stream itself. One
   // round-trip instead of the previous currentRev() + fetchChanges()
   // pair.
-  const {
-    currentRev: remoteRev,
-    appliedPushRev,
-    stream,
-  } = await remote.fetchChanges({
-    sinceRev,
-  });
+  // The fetchChanges return is a capnweb result envelope wrapping a
+  // stream stub; without explicit disposal it sits in the exports
+  // table until the session ends. We can't bind it to `using`
+  // because the stream inside outlives this scope (we hand it off
+  // to the reader loop below), so wrap the stream in a transform
+  // that disposes the envelope when the stream finishes draining.
+  const fetchResult = await remote.fetchChanges({ sinceRev });
+  const { currentRev: remoteRev, appliedPushRev } = fetchResult;
+  // Run the cross-side invariant check before touching the stream.
   // Symmetric to the push response check: the remote must have
   // applied at least everything we claimed to push. A drop here
   // means apply lost state on the receiver; tear down and rebuild
   // rather than corrupt watermarks.
   assertAppliedPushRev(appliedPushRev, localPushRev);
+  const stream = disposeOnDone(fetchResult.stream, () => maybeDispose(fetchResult));
   if (remoteRev <= sinceRev) {
     // Drain the (empty) stream so the remote's iterator is
     // released; cancel is the right surface for that.
@@ -120,6 +163,9 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<number> {
           return row === undefined;
         });
         if (missing.length > 0) {
+          // Bare ReadableStream return — no envelope to dispose,
+          // capnweb releases the stream stub when the stream itself
+          // closes. The reader-loop below drains to completion.
           const bytesStream = await remote.fetchObjects(missing);
           const bytesReader = bytesStream.getReader();
           try {
