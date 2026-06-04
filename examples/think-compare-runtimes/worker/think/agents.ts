@@ -8,7 +8,6 @@ import {
 } from "@cloudflare/workspace";
 import type { ToolSet } from "ai";
 import { getServerByName } from "partyserver";
-import { createWorkersAI } from "workers-ai-provider";
 import type { ComparisonFixture } from "../../shared/fixture";
 import type { CompareRun } from "../index";
 import {
@@ -27,13 +26,12 @@ import {
   createWorkspaceFileStore,
   createWorkspaceFixtureRuntime,
 } from "../runtime/workspace";
+import { createRuntimeThinkModel } from "./model";
 import { runRealThinkTurn } from "./real-turn";
 import { type CompareRunEventSink, createRemoteRunEventRecorder } from "./remote-recorder";
 import { createRuntimeThinkTools, type RuntimeThinkToolRecorder } from "./runtime-tools";
 
 export { WorkspaceProxy };
-
-const MODEL_ID = "@cf/moonshotai/kimi-k2.6";
 
 export interface RuntimeThinkAgentEnv {
   AI: Ai;
@@ -67,7 +65,7 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
   protected abstract seedRuntime(config: RunConfig): Promise<void>;
 
   override getModel() {
-    return createWorkersAI({ binding: this.env.AI })(MODEL_ID);
+    return createRuntimeThinkModel(this.env.AI);
   }
 
   override getSystemPrompt(): string {
