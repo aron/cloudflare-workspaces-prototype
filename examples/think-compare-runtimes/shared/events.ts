@@ -4,6 +4,10 @@ export type EventRuntime = RuntimeId | "both";
 export type RunEventKind =
   | "run_started"
   | "runtime_note"
+  | "agent_message"
+  | "agent_tool_call"
+  | "agent_tool_result"
+  | "agent_tool_error"
   | "tool_call"
   | "tool_result"
   | "tool_error";

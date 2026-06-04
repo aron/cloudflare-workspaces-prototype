@@ -1,6 +1,7 @@
 import type { RunEvent } from "../../shared/events";
 import type { ComparisonFixture } from "../../shared/fixture";
 import { RunEventRecorder } from "../run-events";
+import { runScriptedThinkToolSmoke } from "../think/scripted-turn";
 import { createSandboxRuntimeAdapter, createWorkspaceRuntimeAdapter } from "./adapter";
 import type { RuntimeCommandRunner } from "./exec-tools";
 import type { RuntimeFileStore } from "./file-tools";
@@ -60,7 +61,6 @@ export async function runFixtureComparison({
     workspaceCommandRunner &&
     sandboxCommandRunner
   ) {
-    const sourcePath = `${fixture.root}/src/index.ts`;
     const workspaceAdapter = createWorkspaceRuntimeAdapter({
       recorder,
       store: workspaceAdapterStore,
@@ -72,11 +72,18 @@ export async function runFixtureComparison({
       runner: sandboxCommandRunner,
     });
 
-    const smokeCommand = "node --version";
-    await workspaceAdapter.files.read(sourcePath);
-    await sandboxAdapter.files.read(sourcePath);
-    await workspaceAdapter.exec(smokeCommand);
-    await sandboxAdapter.exec(smokeCommand);
+    await Promise.all([
+      runScriptedThinkToolSmoke({
+        adapter: workspaceAdapter,
+        recorder,
+        root: fixture.root,
+      }),
+      runScriptedThinkToolSmoke({
+        adapter: sandboxAdapter,
+        recorder,
+        root: fixture.root,
+      }),
+    ]);
   }
 
   return recorder.events();

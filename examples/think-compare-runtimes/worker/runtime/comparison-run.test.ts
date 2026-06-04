@@ -74,7 +74,9 @@ describe("runFixtureComparison", () => {
     expect(events.map((event) => event.sequence)).toEqual(
       Array.from({ length: events.length }, (_, sequence) => sequence),
     );
-    expect(events).toHaveLength(35);
+    const fixtureSetupEventCount = 1 + 2 * (comparisonFixture.files.length * 4 + 1);
+    const scriptedTurnEventCount = 2 * (2 + 4 * 4);
+    expect(events).toHaveLength(fixtureSetupEventCount + scriptedTurnEventCount);
     expect(events[0]).toMatchObject({
       runtime: "both",
       kind: "run_started",
@@ -86,11 +88,27 @@ describe("runFixtureComparison", () => {
         "Sandbox fixture seeded",
         "read /workspace/repo/src/index.ts",
         "read complete",
-        "exec node --version",
-        "exec complete",
+        "Scripted Think turn started",
+        "Think requested read",
+        "Think requested write",
+        "Think requested edit",
+        "Think requested exec",
+        "Scripted Think turn complete",
       ]),
     );
-    expect(events.at(-4)).toMatchObject({ runtime: "workspace", kind: "tool_call" });
-    expect(events.at(-2)).toMatchObject({ runtime: "sandbox", kind: "tool_call" });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          runtime: "workspace",
+          kind: "agent_message",
+          title: "Scripted Think turn started",
+        }),
+        expect.objectContaining({
+          runtime: "sandbox",
+          kind: "agent_message",
+          title: "Scripted Think turn complete",
+        }),
+      ]),
+    );
   });
 });
