@@ -60,6 +60,55 @@ describe("runRealThinkTurn", () => {
     ]);
   });
 
+  test("treats empty assistant output as a failed turn", async () => {
+    const recorder = new RunEventRecorder({
+      runId: "run-abc",
+      now: () => "2026-06-04T00:00:00.000Z",
+    });
+    const adapter = createWorkspaceRuntimeAdapter({
+      recorder,
+      store: {
+        async readFile() {
+          return "";
+        },
+        async writeFile() {},
+      },
+      runner: {
+        async exec() {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+    });
+
+    await expect(
+      runRealThinkTurn({
+        adapter,
+        recorder,
+        fixture: comparisonFixture,
+        invoke: async () => ({ text: "  " }),
+      }),
+    ).rejects.toThrow("Think turn completed without assistant text");
+
+    expect(
+      recorder
+        .events()
+        .map(({ runtime, kind, title, detail }) => ({ runtime, kind, title, detail })),
+    ).toEqual([
+      {
+        runtime: "workspace",
+        kind: "agent_message",
+        title: "Think turn started",
+        detail: "Model-backed Think agent is running against the Workspace runtime.",
+      },
+      {
+        runtime: "workspace",
+        kind: "agent_tool_error",
+        title: "Think turn failed",
+        detail: "Think turn completed without assistant text.",
+      },
+    ]);
+  });
+
   test("records model-backed Think turn failures", async () => {
     const recorder = new RunEventRecorder({
       runId: "run-abc",

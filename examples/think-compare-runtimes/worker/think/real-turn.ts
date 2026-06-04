@@ -34,6 +34,9 @@ export async function runRealThinkTurn({
 
   try {
     const result = await invoke({ prompt: createRuntimePrompt(fixture) });
+    if (result.text.trim().length === 0) {
+      throw new Error("Think turn completed without assistant text.");
+    }
     await recorder.record({
       runtime,
       kind: "agent_message",

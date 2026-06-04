@@ -15,14 +15,14 @@ describe("createRuntimeThinkModel", () => {
     createWorkersAI.mockReturnValue(modelFactory);
   });
 
-  test("disables Kimi reasoning", () => {
+  test("uses low Kimi reasoning", () => {
     const binding = {} as Ai;
 
     createRuntimeThinkModel(binding);
 
     expect(createWorkersAI).toHaveBeenCalledWith({ binding });
     expect(modelFactory).toHaveBeenCalledWith("@cf/moonshotai/kimi-k2.6", {
-      reasoning_effort: null,
+      reasoning_effort: "low",
     });
   });
 });
