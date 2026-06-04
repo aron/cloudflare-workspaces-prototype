@@ -9,8 +9,7 @@ describe("createRunSession", () => {
       runId: "abc123",
       socketPath: "/parties/compare-run/abc123",
     });
-    expect(run.events).toHaveLength(5);
-    expect(run.events[0]?.runId).toBe("abc123");
+    expect(run.events).toEqual([]);
   });
 
   test("creates a run ID from the runtime crypto object", () => {

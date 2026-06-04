@@ -1,8 +1,8 @@
-import { createRunSession } from "./runs";
+import type { RunSession } from "./runs";
 
 export async function handleApiRequest(
   request: Request,
-  createId?: () => string,
+  startRun: () => Promise<RunSession>,
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
@@ -17,5 +17,5 @@ export async function handleApiRequest(
     });
   }
 
-  return Response.json(createRunSession(createId), { status: 201 });
+  return Response.json(await startRun(), { status: 201 });
 }

@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "build:wsd": "npm run build:docker --workspace @cloudflare/workspace-wsd",
+    "predev": "npm run build:wsd",
+    "predeploy": "npm run build:wsd",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",

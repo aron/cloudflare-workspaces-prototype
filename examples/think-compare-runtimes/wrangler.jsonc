@@ -11,6 +11,13 @@
   "assets": {
     "not_found_handling": "single-page-application"
   },
+  "containers": [
+    {
+      "class_name": "CompareRun",
+      "image": "./Dockerfile.workspace",
+      "max_instances": 2
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
