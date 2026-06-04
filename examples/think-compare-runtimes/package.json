@@ -1,0 +1,37 @@
+{
+  "name": "@cloudflare/example-think-compare-runtimes",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false",
+    "preview": "npm run build && vite preview",
+    "deploy": "npm run build && wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.11.0",
+    "@cloudflare/think": "^0.8.2",
+    "@cloudflare/workspace": "file:../../packages/workspace",
+    "@cloudflare/workspace-rpc": "file:../../packages/rpc",
+    "@cloudflare/workspace-wsd": "file:../../packages/wsd",
+    "partyserver": "^0.5.6",
+    "partysocket": "^1.1.19",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.2",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7",
+    "wrangler": "^4.95.0"
+  }
+}
