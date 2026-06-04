@@ -27,7 +27,6 @@ export type {
   MountBase,
   MountContext,
   MountFactory,
-  MountOptions,
   MountWriteAPI,
 } from "./mounts/types.js";
 export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";

@@ -11,44 +11,40 @@
 
 import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 
-// Mount-level options shared by every provider. Individual providers
-// extend this with their own config.
-export interface MountOptions {
-  // "read-only" rejects writes anywhere under the mount root with
-  // EROFS. "read-write" mirrors DO-side writes through to the mount
-  // provider (M6).
-  mode?: "read-only" | "read-write";
-  // Hard cap on total bytes indexed from this mount. Exceeding throws
-  // at index time before any data lands in vfs_nodes.
-  maxBytes?: number;
-  // Hard cap on entry count. Same enforcement timing as maxBytes.
-  maxEntries?: number;
-}
-
 // Common base for every concrete mount. The `kind` string is for
 // diagnostics and the _vfs_mounts table; it is not interpreted.
 export interface MountBase {
   readonly kind: string;
-  readonly writable: boolean;
-  // Hard cap on total bytes the mount may land in vfs_nodes. The
-  // indexer aborts and rolls back if exceeded. Undefined means no
-  // cap.
+  // "read-only" rejects writes anywhere under the mount root with
+  // EROFS. "read-write" lets writes pass through to the underlying
+  // store; the write-back mirror to the provider lands in a later
+  // milestone.
+  readonly mode: "read-only" | "read-write";
+  // Hard cap on total bytes the mount may land in vfs_nodes.
+  // Exceeding aborts materialize() and the indexer rolls back the
+  // subtree under the mount root via fs.rm. Stream-staged blob
+  // rows may briefly linger and are reaped by gc(). Undefined
+  // means no cap.
   readonly maxBytes?: number;
   // Hard cap on entry count (files + directories) the mount may
-  // create. Same enforcement timing as maxBytes.
+  // create. Same enforcement timing and rollback semantics as
+  // maxBytes.
   readonly maxEntries?: number;
 }
 
 // Eager mounts populate everything in one shot through MountWriteAPI.
 // This is the only strategy supported in the initial cut; the lazy
 // branch is reserved for a later milestone.
+//
+// Indexed exactly once per workspace store. After materialize()
+// returns successfully — even if it produced zero entries —
+// _vfs_mounts.indexed=1 is set and subsequent workspace boots over
+// the same store skip this mount. Upstream changes (new R2 objects,
+// new commits) are not picked up automatically; the workspace must
+// be torn down and rebuilt over a fresh store.
 export interface EagerMount extends MountBase {
   readonly strategy: "eager";
   materialize(api: MountWriteAPI): Promise<void>;
-  // Optional refresh hook. Defaults to no-op when omitted. The
-  // workspace calls this from refreshMount() to re-materialize the
-  // subtree without a DO restart.
-  refresh?(api: MountWriteAPI): Promise<void>;
 }
 
 // Union of every supported mount strategy. Today only "eager"; the

@@ -1,5 +1,5 @@
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { Workspace } from "../workspace.js";
 import type { EagerMount, MountWriteAPI } from "./types.js";
@@ -44,7 +44,7 @@ function fakeMount(opts: {
 }): EagerMount & { calls: number } {
   return {
     kind: opts.kind ?? "fake",
-    writable: false,
+    mode: "read-only",
     strategy: "eager",
     calls: 0,
     async materialize(api: MountWriteAPI) {
@@ -176,7 +176,7 @@ describe("mount indexer", () => {
       });
     const mount: EagerMount = {
       kind: "big",
-      writable: false,
+      mode: "read-only",
       strategy: "eager",
       async materialize(api) {
         await api.writeFile("/workspace/big/blob.bin", source());
@@ -255,7 +255,7 @@ describe("mount indexer", () => {
   it("throws when materialize exceeds maxBytes and leaves vfs_nodes empty", async () => {
     const mount: EagerMount = {
       kind: "huge",
-      writable: false,
+      mode: "read-only",
       strategy: "eager",
       maxBytes: 100,
       async materialize(api) {
@@ -280,7 +280,7 @@ describe("mount indexer", () => {
     });
     const mount: EagerMount = {
       kind: "slow",
-      writable: false,
+      mode: "read-only",
       strategy: "eager",
       async materialize(api) {
         entered += 1;

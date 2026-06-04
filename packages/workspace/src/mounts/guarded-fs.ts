@@ -42,7 +42,7 @@ export class GuardedWorkspaceFilesystem extends WorkspaceFilesystem {
 
   #checkWrite(path: string): void {
     for (const [root, mount] of this.#mounts) {
-      if (isUnderRoot(path, root) && !mount.writable) {
+      if (isUnderRoot(path, root) && mount.mode === "read-only") {
         throw createWorkspaceError("EROFS", `read-only mount at ${root}: cannot modify`, path);
       }
     }

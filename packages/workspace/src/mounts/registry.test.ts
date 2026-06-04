@@ -21,7 +21,7 @@ const backends = [
 function eager(kind = "fake"): Mount {
   return {
     kind,
-    writable: false,
+    mode: "read-only",
     strategy: "eager",
     async materialize() {},
   };

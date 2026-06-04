@@ -7,6 +7,13 @@
 //
 // Read-only in this milestone. put / delete proxies join later when
 // the write-back path lands.
+//
+// Indexed exactly once per workspace store. After the first
+// successful materialize() — even on an empty bucket — the mount is
+// marked indexed=1 in _vfs_mounts and subsequent workspace boots
+// over the same store skip it. New R2 objects landing after the
+// first index are not picked up automatically; the workspace must
+// be torn down and rebuilt over a fresh store.
 
 import type { EagerMount, MountWriteAPI } from "../types.js";
 
@@ -102,13 +109,13 @@ async function runBounded<T>(tasks: Array<() => Promise<T>>, concurrency: number
 
 export function R2Bucket(bucket: R2BucketBinding, options: R2BucketOptions = {}): EagerMount {
   const prefix = normalisePrefix(options.prefix);
-  const writable = options.mode === "read-write";
+  const mode = options.mode ?? "read-only";
   const listLimit = options.listLimit ?? 1000;
   const concurrency = options.concurrency ?? 8;
 
   return {
     kind: "r2",
-    writable,
+    mode,
     strategy: "eager",
     maxBytes: options.maxBytes,
     maxEntries: options.maxEntries,
