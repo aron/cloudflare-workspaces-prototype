@@ -22,10 +22,10 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
-  localContainerHost,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
+  withWorkspaceContainer,
 } from "@cloudflare/workspace";
 
 // Re-export so the runtime can build a loopback binding for the
@@ -39,17 +39,15 @@ export { WorkspaceProxy };
 // ---------------------------------------------------------------
 // Durable Object: owns one Workspace backed by one container.
 // ---------------------------------------------------------------
-export class ContainerExample extends DurableObject<Env> {
+export class ContainerExample extends withWorkspaceContainer(class extends DurableObject<Env> {}) {
   readonly #backend: CloudflareContainerBackend;
   readonly #workspace: Workspace;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#backend = new CloudflareContainerBackend({
-      container: () => localContainerHost(ctx),
-      workspace: ctx.exports.WorkspaceProxy({
-        props: { binding: "ContainerExample", id: ctx.id.toString() },
-      }),
+      container: () => this.ws,
+      workspace: { binding: "ContainerExample", id: ctx.id.toString() },
     });
     this.#workspace = new Workspace({
       // ctx.storage.sql.exec returns a narrower row type than

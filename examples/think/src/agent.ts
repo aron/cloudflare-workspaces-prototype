@@ -29,10 +29,10 @@ import { Think } from "@cloudflare/think";
 import {
   CloudflareContainerBackend,
   type DurableObjectStorageLike,
-  localContainerHost,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
+  withWorkspaceContainer,
 } from "@cloudflare/workspace";
 import { type ToolSet, tool } from "ai";
 import { createPatch } from "diff";
@@ -107,7 +107,11 @@ const PHASE_KEY = "triage-phase";
 const REPO_ROOT = "/workspace/repo";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.6";
 
-export class TriageAgent extends Think<Env> {
+// Anchor Think's generic before the mixin so withWorkspaceContainer
+// sees a concrete constructor.
+class TriageBase extends Think<Env> {}
+
+export class TriageAgent extends withWorkspaceContainer(TriageBase) {
   /**
    * Off. The workflow is the durable layer here — `step.do` and
    * `step.prompt` replay deterministically through any DO eviction,
@@ -153,10 +157,8 @@ export class TriageAgent extends Think<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#backend = new CloudflareContainerBackend({
-      container: () => localContainerHost(ctx),
-      workspace: ctx.exports.WorkspaceProxy({
-        props: { binding: "TriageAgent", id: ctx.id.toString() },
-      }),
+      container: () => this.ws,
+      workspace: { binding: "TriageAgent", id: ctx.id.toString() },
     });
     this.#containerWs = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
