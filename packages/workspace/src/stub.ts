@@ -250,7 +250,15 @@ export class WorkspaceStub extends RpcTarget {
     trackStub(this);
   }
 
+  // Cascade disposal to the sub-stubs. Workers-RPC exposes them as
+  // getters off this object, so the caller can't reach them as
+  // independent stubs; their lifetime is bounded by ours. Without
+  // this, the per-iteration leak observed in the DO↔Worker stub
+  // soak (WorkspaceFilesystemStub +1, WorkspaceShellStub +1 every
+  // getWorkspace() call) never collapses.
   [Symbol.dispose](): void {
+    this.#fs[Symbol.dispose]();
+    this.#shell[Symbol.dispose]();
     untrackStub(this);
   }
 

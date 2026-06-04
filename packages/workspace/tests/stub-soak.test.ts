@@ -70,33 +70,33 @@ describe("WorkspaceStub disposal soak (DO ↔ Worker)", () => {
   // forward. Use distinct DO names per case and reason about
   // *deltas* (afterClose - baseline) rather than absolute values.
 
-  it("discovery: 20 iterations with explicit caller-side disposal", async () => {
-    // Documented behaviour, not enforced: calling [Symbol.dispose]
-    // on the *caller-side* WorkspaceStub proxy after each iteration
-    // does NOT currently fire dispose on the DO-side targets.
-    // Until that's fixed (PLAN.md task 5), each iteration adds one
-    // WorkspaceFilesystemStub + one WorkspaceShellStub on the DO
-    // side. Pin that observation here so a regression — either
-    // direction — shows up loudly.
+  it("steady state: 20 iterations with explicit caller-side disposal", async () => {
+    // The expected contract: when the caller disposes every
+    // returned stub, the DO-side counters return to baseline.
+    // Disposing WorkspaceStub cascades to its #fs / #shell
+    // children; disposing WorkspaceExecHandleStub releases the
+    // exec handle. Anything non-zero here is a leak.
     const result = await runSoak(20, { disposeStubs: true, disposeExecHandles: true });
     const growth = diff(result.baseline, result.afterClose);
     console.log("[stub-soak][with-dispose]", JSON.stringify(result, null, 2));
-    expect(growth, JSON.stringify(result, null, 2)).toMatchObject({
-      WorkspaceFilesystemStub: 20,
-      WorkspaceShellStub: 20,
-    });
+    for (const [k, v] of Object.entries(growth)) {
+      expect(v, `${k} leaked ${v}; full snapshot:\n${JSON.stringify(result, null, 2)}`).toBe(0);
+    }
   });
 
-  it("discovery: 10 iterations with no caller-side disposal", async () => {
-    // Same delta as the dispose case above — confirms that
-    // disposing the proxy on the Worker side is a no-op for the
-    // DO-side targets, given the current implementation.
+  it("documents the leak shape when the caller disposes nothing", async () => {
+    // Without explicit caller-side disposal, every iteration adds
+    // one of each stub class on the DO side. Pin the shape so a
+    // regression in either direction (smaller — capnweb learned to
+    // auto-dispose; larger — we leaked something new) is visible.
     const result = await runSoak(10, { disposeStubs: false, disposeExecHandles: false });
     const growth = diff(result.baseline, result.afterClose);
     console.log("[stub-soak][no-dispose]", JSON.stringify(result, null, 2));
     expect(growth, JSON.stringify(result, null, 2)).toMatchObject({
+      WorkspaceStub: 10,
       WorkspaceFilesystemStub: 10,
       WorkspaceShellStub: 10,
+      WorkspaceExecHandleStub: 10,
     });
   });
 
