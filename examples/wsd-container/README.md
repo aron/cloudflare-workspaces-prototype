@@ -55,10 +55,6 @@ in `CloudflareContainerBackend` — the DO is a thin host.
 The container mounts wsd's VFS at `MOUNT_POINT` via FUSE, so
 `exec`'d commands see the same tree the RPC surface reads and
 writes. Cloudflare Containers expose `/dev/fuse` to the workload.
-`wrangler dev` does not, so local runs need the Dockerfile patched
-to set `FUSE_SHIM=1` first; wsd then materialises the VFS at
-`MOUNT_POINT` via the userspace polling shim, and `exec` sees the
-same tree the RPC surface reads and writes.
 
 ## R2 mount
 
@@ -140,18 +136,13 @@ examples/wsd-container/
 
 ## Known limitations / next steps
 
-- **Local `wrangler dev` won't run this image with real FUSE.**
-  The container mounts FUSE on boot, which needs `/dev/fuse` plus
-  CAP_SYS_ADMIN. Cloudflare Containers grant both to deployed
-  workloads; the local container runtime `wrangler dev` shells out
-  to does not, and there's no flag to opt in. wsd exits with a
-  mount-permission error before `/health` ever comes up. To
-  exercise the example end-to-end you have to either `wrangler
-  deploy` it, or flip the Dockerfile to `FUSE_SHIM=1` by hand —
-  wsd then materialises the VFS at `MOUNT_POINT` via a userspace
-  polling shim (no kernel FUSE required), `exec` runs against that
-  tree, and file IO still rides the RPC surface. The shim is
-  dev-only; see `packages/wsd/README.md` for the caveats.
+- **Local `wrangler dev` won't run this image.** The container
+  mounts FUSE on boot, which needs `/dev/fuse` plus CAP_SYS_ADMIN.
+  Cloudflare Containers grant both to deployed workloads; the
+  local container runtime `wrangler dev` shells out to does not,
+  and there's no flag to opt in. wsd exits with a mount-permission
+  error before `/health` ever comes up. To exercise the example
+  end-to-end you have to `wrangler deploy` it.
 - **Exec is run-and-collect, not streamed.** The handler awaits
   `handle.result()` and emits one JSON response. Live streaming needs
   the DO to expose an async-iterable RPC; v1 keeps the surface flat.
