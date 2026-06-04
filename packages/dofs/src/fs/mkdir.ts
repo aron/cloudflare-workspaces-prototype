@@ -3,6 +3,7 @@ import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
+import { assertNotReadOnly } from "./mount-guard.js";
 
 export interface MkdirOptions {
   recursive?: boolean;
@@ -76,6 +77,7 @@ export function mkdir(db: Database, path: string, options: MkdirOptions, now: ()
     // undefined, but our docs treat mkdir("/") as nonsensical).
     throw createWorkspaceError("EEXIST", `path exists: ${canonical}`, canonical);
   }
+  assertNotReadOnly(db, canonical);
 
   db.transactionSync(() => {
     const rev = incrementRev(db);

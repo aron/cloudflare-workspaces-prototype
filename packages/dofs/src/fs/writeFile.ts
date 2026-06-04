@@ -6,6 +6,7 @@ import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
 import { stageBlob } from "../sync/blobs.js";
 import { buildManifest } from "../sync/manifests.js";
+import { assertNotReadOnly } from "./mount-guard.js";
 
 // Fixed chunk size. Exported so tests can size inputs precisely
 // without hard-coding the magic number twice.
@@ -123,6 +124,9 @@ async function writeFileStreaming(
   if (parts.length === 0) {
     throw createWorkspaceError("EISDIR", "cannot write to the root directory", canonical);
   }
+  // Reject before we stage any blob bytes so a read-only mount
+  // doesn't grow orphan vfs_blobs rows that gc() then has to reap.
+  assertNotReadOnly(db, canonical);
   const mode = (options.mode ?? 0o644) & 0o7777;
   const mtime = now();
 
@@ -250,6 +254,7 @@ export function writeFileSync(
   if (parts.length === 0) {
     throw createWorkspaceError("EISDIR", "cannot write to the root directory", canonical);
   }
+  assertNotReadOnly(db, canonical);
   const mode = (options.mode ?? 0o644) & 0o7777;
   const chunks = chunksOf(bytes);
   const mtime = now();

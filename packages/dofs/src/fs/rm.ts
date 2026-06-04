@@ -3,6 +3,7 @@ import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
 import type { Database } from "../storage.js";
 import { recordDelete } from "../sync/changes.js";
+import { assertNotReadOnly } from "./mount-guard.js";
 import { resolveInode } from "./resolve.js";
 
 export interface RmOptions {
@@ -65,6 +66,11 @@ export function rm(db: Database, path: string, options: RmOptions): void {
     // recursive+force. Matches the doc's example.
     throw createWorkspaceError("EPERM", `cannot remove the root directory`, canonical);
   }
+
+  // assertNotReadOnly uses the symmetric overlap predicate, so a
+  // recursive rm of an ancestor whose subtree contains a read-only
+  // mount root is caught here without walking the tree.
+  assertNotReadOnly(db, canonical);
 
   const force = options.force === true;
   const recursive = options.recursive === true;

@@ -7,6 +7,17 @@ export {
 export type { WorkspaceFoundEntry } from "./fs/find.js";
 export type { GrepOptions, WorkspaceGrepMatch } from "./fs/grep.js";
 export type { MkdirOptions } from "./fs/mkdir.js";
+// Read-only mount enforcement. The workspace-side indexer writes
+// _vfs_mounts; the helpers here let it invalidate the in-Database
+// cache after a write, and let dofs callers (and tests) inspect or
+// assert against the registered roots without re-implementing the
+// overlap check.
+export {
+  assertNotReadOnly,
+  getReadOnlyMountRoots,
+  invalidateReadOnlyMountCache,
+  readOnlyRootFor,
+} from "./fs/mount-guard.js";
 export type { WorkspaceDirentResult } from "./fs/readdir.js";
 export type { ReadFileOptions } from "./fs/readFile.js";
 export type { RmOptions } from "./fs/rm.js";
