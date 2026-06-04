@@ -1,10 +1,13 @@
 // Read-only mount enforcement layer.
 //
-// Wraps a WorkspaceFilesystem and rejects writes whose path falls
-// under a read-only mount root with EROFS. The check is a simple
-// prefix match against the registered roots; nested mount roots
-// are rejected at registration so a path has at most one owning
-// mount.
+// Wraps a WorkspaceFilesystem and rejects writes whose path either
+// falls under a read-only mount root or, for destructive ops like
+// rm, is itself an ancestor of one. Both directions matter: a
+// read-only mount at /workspace/r2 must protect against direct
+// writes to /workspace/r2/* AND against rm('/workspace', {
+// recursive, force }) silently wiping the materialised subtree.
+// Nested mount roots are rejected at registration so a path has
+// at most one owning mount per chain.
 //
 // Reads are forwarded unchanged. Writes under writable mount roots
 // also pass through; the write-back mirror is wired in a later
@@ -26,8 +29,12 @@ import { createWorkspaceError, WorkspaceFilesystem } from "@cloudflare/dofs";
 
 import type { Mount } from "./types.js";
 
-function isUnderRoot(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+function blocksRoot(path: string, root: string): boolean {
+  // Symmetric check: either `path` is at or below `root` (a direct
+  // write or rm under the mount root), OR `root` is below `path`
+  // (an ancestor rm that would recurse through the mount). Both
+  // shapes are guarded so a read-only mount survives both vectors.
+  return path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`);
 }
 
 export class GuardedWorkspaceFilesystem extends WorkspaceFilesystem {
@@ -42,7 +49,7 @@ export class GuardedWorkspaceFilesystem extends WorkspaceFilesystem {
 
   #checkWrite(path: string): void {
     for (const [root, mount] of this.#mounts) {
-      if (isUnderRoot(path, root) && mount.mode === "read-only") {
+      if (blocksRoot(path, root) && mount.mode === "read-only") {
         throw createWorkspaceError("EROFS", `read-only mount at ${root}: cannot modify`, path);
       }
     }
