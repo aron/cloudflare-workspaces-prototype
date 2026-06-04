@@ -58,14 +58,14 @@ writes. Cloudflare Containers expose `/dev/fuse` to the workload.
 
 ## R2 mount
 
-The DO mounts the `R2_HELLO` R2 bucket at `/workspace/r2` via
-`R2Bucket(env.R2_HELLO)`. On the first call into the workspace the
+The DO mounts the `Bucket` R2 binding at `/workspace/r2` via
+`R2Bucket(env.Bucket)`. On the first call into the workspace the
 mount indexer pages through the bucket, streams each object into
 `vfs_nodes`, and from then on `/workspace/r2/<key>` reads like any
 other file. The mount is read-only; writes under `/workspace/r2`
 reject with `EROFS`.
 
-Seed the bucket once with the bundled fixture (`./seed/r2-hello/hello.txt`,
+Seed the bucket once with the bundled fixture (`./seed/data/hello.txt`,
 which contains the bytes `hello world`):
 
 ```sh
