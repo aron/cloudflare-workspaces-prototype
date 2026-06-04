@@ -22,8 +22,17 @@ import { dts } from "rolldown-plugin-dts";
 const here = resolve(fileURLToPath(import.meta.url), "..");
 
 export default defineConfig({
-  input: "src/index.ts",
-  external: ["cloudflare:workers", "capnweb", "@platformatic/vfs"],
+  input: {
+    index: "src/index.ts",
+    git: "src/git/index.ts",
+  },
+  external: [
+    "cloudflare:workers",
+    "capnweb",
+    "@platformatic/vfs",
+    "isomorphic-git",
+    /^isomorphic-git\//,
+  ],
   resolve: {
     alias: {
       "@cloudflare/dofs": resolve(here, "../dofs/src/index.ts"),
