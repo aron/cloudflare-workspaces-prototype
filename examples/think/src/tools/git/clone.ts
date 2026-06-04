@@ -1,30 +1,22 @@
 /**
  * `git_clone` — shallow-clone a public GitHub repository into the
- * agent's workspace via isomorphic-git. No Cloudflare Artifacts, no
- * fork registry, no commit/push.
- *
- * Storage:
- *   The clone is written through a `@platformatic/vfs`
- *   `VirtualFileSystem` over `Workspace.provider()` — the same
- *   `node:fs`-shaped surface wsd uses internally for its FUSE mount.
- *   isomorphic-git accepts that VFS directly as its `fs` argument
- *   because `vfs.promises` already implements the `PromiseFsClient`
- *   contract (including `symlink` / `readlink`, which the dofs
- *   provider implements for real). No bespoke adapter required.
+ * agent's workspace via `@cloudflare/workspace/git`, which wraps
+ * isomorphic-git over a Workspace-backed `node:fs`-shaped FsClient.
  *
  * Limits:
- *   `git.clone` runs entirely inside the Worker isolate; the packfile
+ *   The clone runs entirely inside the Worker isolate; the packfile
  *   has to fit in workerd's heap, which is fine for small/medium
  *   repos at `depth: 1` (the default) but not for huge monorepos.
- *   Same trade-off the hackspace `@cloudflare/git-tools` documents.
  */
 
 import type { SQLiteWorkspaceProvider } from "@cloudflare/workspace";
+import {
+  clone,
+  type IsomorphicGitFSClient,
+  workspaceIsomorphicGitClient,
+} from "@cloudflare/workspace/git";
 import { tool } from "ai";
-import git from "isomorphic-git";
-import http from "isomorphic-git/http/web";
 import { z } from "zod";
-import { createWorkspaceVfs } from "./vfs.js";
 
 const DEFAULT_DEPTH = 1;
 
@@ -56,10 +48,11 @@ const inputSchema = z.object({
 
 export function createGitCloneTool(opts: GitCloneToolOptions) {
   const depthDefault = opts.defaultDepth ?? DEFAULT_DEPTH;
-  // Build the VFS once per tool instance and reuse it across clone
-  // calls — the provider is stable, and `@platformatic/vfs.create` is
-  // cheap but not free (it registers handlers on construction).
-  const vfs = createWorkspaceVfs(opts.provider);
+  // Build the FsClient once per tool instance and reuse it across
+  // clone calls — the provider is stable, and the adapter's
+  // `@platformatic/vfs.create` step is cheap but not free (it
+  // registers handlers on construction).
+  const fsPromise = workspaceIsomorphicGitClient(opts.provider);
   return tool({
     description:
       "Shallow-clone a public GitHub repository into the workspace " +
@@ -69,40 +62,52 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
     inputSchema,
     execute: async ({ repo, dest, ref, depth }) => {
       const url = `https://github.com/${repo}`;
+      const fs = await fsPromise;
       // Wipe any prior clone at the target. Stale `.git` directories
       // from a previous failed call cause isomorphic-git to error
       // out with "commit ... not available locally" — the second
       // clone refuses to overwrite the orphaned refs.
       try {
-        await vfs.promises.rmdir(dest);
+        await fs.promises.rmdir(dest);
       } catch {
         // Best-effort. The dir may not exist yet, or `rmdir` may
         // ENOTEMPTY — both are fine for the next mkdir.
       }
-      await vfs.promises.mkdir(dest, { recursive: true });
-      await git.clone({
-        fs: vfs,
-        http,
-        dir: dest,
+      await fs.promises.mkdir(dest, { recursive: true });
+      await clone({
+        fs,
         url,
+        dir: dest,
         ref,
-        singleBranch: true,
         depth: depth ?? depthDefault,
         cache: opts.cache,
       });
-      let head: string | undefined;
-      try {
-        head = await git.resolveRef({ fs: vfs, dir: dest, ref: "HEAD" });
-      } catch {
-        head = undefined;
-      }
       return {
         ok: true,
         repo,
         ref: ref ?? "default",
         dest,
-        head,
+        head: await resolveHead(fs, dest),
       };
     },
   });
+}
+
+/**
+ * Best-effort `git rev-parse HEAD` against the freshly cloned
+ * repo. Reads `.git/HEAD` and follows one level of symbolic-ref
+ * indirection. Returns undefined on any I/O failure — the tool's
+ * caller treats `head` as informational, not load-bearing.
+ */
+async function resolveHead(fs: IsomorphicGitFSClient, dir: string): Promise<string | undefined> {
+  try {
+    const head = await fs.promises.readFile(`${dir}/.git/HEAD`);
+    const raw = (typeof head === "string" ? head : new TextDecoder().decode(head)).trim();
+    if (!raw.startsWith("ref: ")) return raw;
+    const refPath = raw.slice("ref: ".length).trim();
+    const oid = await fs.promises.readFile(`${dir}/.git/${refPath}`);
+    return (typeof oid === "string" ? oid : new TextDecoder().decode(oid)).trim();
+  } catch {
+    return undefined;
+  }
 }

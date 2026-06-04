@@ -34,9 +34,8 @@ import {
   type WorkspaceStub,
   withWorkspaceContainer,
 } from "@cloudflare/workspace";
+import { diff as gitDiff } from "@cloudflare/workspace/git";
 import { type ToolSet, tool } from "ai";
-import { createPatch } from "diff";
-import git from "isomorphic-git";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { createExecTool } from "./tools/exec.js";
@@ -48,7 +47,6 @@ import {
   WorkspaceFileStore,
 } from "./tools/fs/index.js";
 import { createGitCloneTool } from "./tools/git/clone.js";
-import { createWorkspaceVfs } from "./tools/git/vfs.js";
 import { createReportUpdateTool } from "./tools/report-update.js";
 
 // Re-export so the runtime can build a loopback binding for the
@@ -242,71 +240,20 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
   }
 
   /**
-   * Compute a unified diff between HEAD and the working tree, the same
-   * way `git diff HEAD` would, but in pure JS via isomorphic-git +
-   * the `diff` package. Empty string means the agent didn't change
-   * anything; we also return empty (rather than throwing) if HEAD
-   * can't be resolved (e.g. the agent never cloned).
+   * Compute a unified diff between HEAD and the working tree, the
+   * same way `git diff HEAD` would. Empty string means the agent
+   * didn't change anything or HEAD can't be resolved (e.g. the agent
+   * never cloned).
    *
-   * We use isomorphic-git here for consistency with `git_clone` and
-   * to keep the example portable: any environment that can run a
-   * Worker can run this, regardless of whether `shell.exec` has the
-   * right binaries available.
+   * Delegates to `@cloudflare/workspace/git.diff`, which runs
+   * isomorphic-git + the `diff` package over the workspace VFS.
+   * Keeping it as a thin method here (rather than calling the helper
+   * directly from `Triage`) means the workflow code never has to
+   * know about the VFS shape.
    */
   async gitDiff(): Promise<string> {
     await this.#containerWs.ready();
-    const dir = REPO_ROOT;
-    const vfs = createWorkspaceVfs(this.#containerWs.provider());
-    let head: string;
-    try {
-      head = await git.resolveRef({ fs: vfs, dir, ref: "HEAD" });
-    } catch {
-      return "";
-    }
-    // Single tree walk — compare HEAD tree to the working tree in
-    // one pass. The earlier shape was `statusMatrix` + a per-file
-    // `readBlob`, which is O(files × packfile-parse) because
-    // isomorphic-git's readBlob defaults to `cache: {}` per call:
-    // every lookup re-parses the entire pack from the SQLite-backed
-    // VFS. On a 950-entry / ~20 MB-pack repo that hangs for many
-    // minutes. `git.walk` reuses one cache across the whole
-    // traversal, and we pass our own #gitCache so subsequent calls
-    // (and the clone) don't re-pay the parse either.
-    const chunks: string[] = [];
-    try {
-      await git.walk({
-        fs: vfs,
-        dir,
-        cache: this.#gitCache,
-        trees: [git.TREE({ ref: head }), git.WORKDIR()],
-        map: async (filepath, [headEntry, workEntry]) => {
-          if (filepath === "." || filepath.startsWith(".git")) return;
-          const headType = headEntry ? await headEntry.type() : null;
-          const workType = workEntry ? await workEntry.type() : null;
-          // Only diff blobs. Pure directories on either side carry
-          // no bytes to compare.
-          const isHeadFile = headType === "blob";
-          const isWorkFile = workType === "blob";
-          if (!isHeadFile && !isWorkFile) return;
-          const headText =
-            isHeadFile && headEntry
-              ? bufferToText((await headEntry.content()) as Uint8Array | undefined)
-              : "";
-          const workText =
-            isWorkFile && workEntry
-              ? bufferToText((await workEntry.content()) as Uint8Array | undefined)
-              : "";
-          if (headText === workText) return;
-          const patch = createPatch(filepath, headText, workText, "", "");
-          if (patch.trim().length > 0) chunks.push(patch);
-        },
-      });
-    } catch {
-      // Walk can fail if HEAD points at an object we don't have
-      // (a partial / interrupted clone). Treat as "no diff".
-      return "";
-    }
-    return chunks.join("\n");
+    return gitDiff({ workspace: this.#containerWs, dir: REPO_ROOT });
   }
 
   /**
@@ -835,16 +782,4 @@ function redact(value: unknown): unknown {
     }
   }
   return value;
-}
-
-/**
- * Best-effort UTF-8 decode for a WalkerEntry.content() buffer. The
- * isomorphic-git walker hands back a Uint8Array for blobs and null
- * for non-blob entries (the caller filters those out before calling
- * us). Binary content is decoded with replacement chars rather than
- * thrown — a noisy diff still ships a patch the user can read.
- */
-function bufferToText(buf: Uint8Array | null | undefined): string {
-  if (!buf) return "";
-  return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(buf);
 }
