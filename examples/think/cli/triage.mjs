@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * triage <issue_url> [--worker URL] [--host HOST]
+ * triage <issue_url> [--worker URL] [--host HOST] [--webhook URL]
  *
  * Starts a tiny webhook server on 0.0.0.0:<random>, POSTs the issue
  * + the resolved webhook URL to the worker, and prints every
@@ -12,7 +12,10 @@
  * — or any other sandbox container on the same machine — can reach
  * back to the host. The advertised host name is the first
  * non-loopback IPv4 from os.networkInterfaces(); override with
- * --host or TRIAGE_HOST when that picks the wrong NIC.
+ * --host or TRIAGE_HOST when that picks the wrong NIC. Pass
+ * --webhook (or set TRIAGE_WEBHOOK) to advertise an externally
+ * reachable URL — e.g. a cloudflared tunnel pointing at the local
+ * server — when calling a production worker.
  */
 
 import http from "node:http";
@@ -21,9 +24,11 @@ import { argv, env, exit } from "node:process";
 
 // ── Args ───────────────────────────────────────────────────────────
 
-const { issueUrl, workerUrl, advertiseHost, debug } = parseArgs(argv.slice(2));
+const { issueUrl, workerUrl, advertiseHost, webhookOverride, debug } = parseArgs(argv.slice(2));
 if (!issueUrl) {
-  process.stderr.write("usage: triage <issue_url> [--worker URL] [--host HOST] [--debug]\n");
+  process.stderr.write(
+    "usage: triage <issue_url> [--worker URL] [--host HOST] [--webhook URL] [--debug]\n",
+  );
   exit(2);
 }
 
@@ -64,11 +69,11 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(0, "0.0.0.0", async () => {
+server.listen(process.env.PORT && Number.parseInt(process.env.PORT, 10) || 0, "0.0.0.0", async () => {
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
   const host = advertiseHost || pickHost();
-  const webhookUrl = `http://${host}:${port}/webhook`;
+  const webhookUrl = webhookOverride || `http://${host}:${port}/webhook`;
   process.stderr.write(`webhook listening on http://0.0.0.0:${port}/webhook\n`);
   process.stderr.write(`advertising as ${webhookUrl}\n`);
   bumpWatchdog();
@@ -222,6 +227,7 @@ function parseArgs(args) {
   let issueUrl;
   let workerUrl = env.TRIAGE_WORKER ?? "http://127.0.0.1:8787";
   let advertiseHost = env.TRIAGE_HOST ?? "";
+  let webhookOverride = env.TRIAGE_WEBHOOK ?? "";
   let debug = env.TRIAGE_DEBUG === "1" || env.TRIAGE_DEBUG === "true";
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -233,13 +239,23 @@ function parseArgs(args) {
       advertiseHost = args[++i] ?? advertiseHost;
       continue;
     }
+    if (a === "--webhook") {
+      webhookOverride = args[++i] ?? webhookOverride;
+      continue;
+    }
     if (a === "--debug") {
       debug = true;
       continue;
     }
     if (!issueUrl) issueUrl = a;
   }
-  return { issueUrl, workerUrl: workerUrl.replace(/\/+$/, ""), advertiseHost, debug };
+  return {
+    issueUrl,
+    workerUrl: workerUrl.replace(/\/+$/, ""),
+    advertiseHost,
+    webhookOverride: webhookOverride.replace(/\/+$/, ""),
+    debug,
+  };
 }
 
 function pickHost() {
