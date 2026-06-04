@@ -1,39 +1,23 @@
-import { getSandbox, type Sandbox as SandboxDO } from "@cloudflare/sandbox";
-import {
-  CloudflareContainerBackend,
-  type DurableObjectStorageLike,
-  Workspace,
-  WorkspaceProxy,
-} from "@cloudflare/workspace";
+import type { Sandbox as SandboxDO } from "@cloudflare/sandbox";
+import { getAgentByName } from "agents";
 import { getServerByName, routePartykitRequest, Server } from "partyserver";
 import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { handleApiRequest } from "./http";
-import { runFixtureComparison } from "./runtime/comparison-run";
-import {
-  createSandboxCommandRunner,
-  createSandboxFileStore,
-  createSandboxFixtureRuntime,
-} from "./runtime/sandbox";
-import {
-  createWorkspaceCommandRunner,
-  createWorkspaceFileStore,
-  createWorkspaceFixtureRuntime,
-} from "./runtime/workspace";
+import type { RunEventInput } from "./run-events";
 import { startComparisonRun } from "./start-run";
+import { type RuntimeThinkAgentHandle, startRuntimeThinkAgents } from "./think/agent-starter";
+import { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent } from "./think/agents";
 
 export { Sandbox } from "@cloudflare/sandbox";
-export { WorkspaceProxy };
+export { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent };
 
 export interface Env {
+  AI: Ai;
   CompareRun: DurableObjectNamespace<CompareRun>;
   Sandbox: DurableObjectNamespace<SandboxDO>;
-}
-
-interface DurableObjectStateWithExports extends DurableObjectState {
-  exports: {
-    WorkspaceProxy(options: { props: { binding: string; id: string } }): Fetcher;
-  };
+  WorkspaceThinkAgent: DurableObjectNamespace<WorkspaceThinkAgent>;
+  SandboxThinkAgent: DurableObjectNamespace<SandboxThinkAgent>;
 }
 
 const EVENTS_KEY = "events";
@@ -41,32 +25,18 @@ const EVENTS_KEY = "events";
 export class CompareRun extends Server<Env> {
   static override options = { hibernate: true };
 
-  readonly #workspace: Workspace;
-  readonly #backend: CloudflareContainerBackend;
   #events: RunEvent[] = [];
+  #appendQueue: Promise<unknown> = Promise.resolve();
+  readonly #started: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-
-    const container = ctx.container;
-    if (!container) {
-      throw new Error("CompareRun DO is not container-enabled (check wrangler.jsonc)");
-    }
-
-    this.#backend = new CloudflareContainerBackend({
-      container: () => container,
-      egress: (ctx as DurableObjectStateWithExports).exports.WorkspaceProxy({
-        props: { binding: "CompareRun", id: ctx.id.toString() },
-      }),
-    });
-    this.#workspace = new Workspace({
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#backend],
-    });
+    this.#started = this.#loadEvents();
+    ctx.blockConcurrencyWhile(() => this.#started);
   }
 
   override async onStart(): Promise<void> {
-    this.#events = (await this.ctx.storage.get<RunEvent[]>(EVENTS_KEY)) ?? [];
+    await this.#started;
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -78,10 +48,6 @@ export class CompareRun extends Server<Env> {
       });
     }
 
-    if (url.pathname === "/ws") {
-      return this.#backend.handleFetch(request);
-    }
-
     return super.fetch(request);
   }
 
@@ -89,25 +55,89 @@ export class CompareRun extends Server<Env> {
     connection.send(JSON.stringify({ type: "history", events: this.#events }));
   }
 
+  async appendEvent(input: RunEventInput): Promise<RunEvent> {
+    await this.#started;
+    const appended = this.#appendQueue.then(() => this.#appendEventNow(input));
+    this.#appendQueue = appended.catch(() => {});
+    return appended;
+  }
+
   async startComparison(): Promise<RunEvent[]> {
+    await this.#started;
     const runId = this.name;
-    const sandbox = getSandbox(this.env.Sandbox, `${runId}-sandbox`);
-
-    this.#events = await runFixtureComparison({
-      runId,
-      fixture: comparisonFixture,
-      workspaceRuntime: createWorkspaceFixtureRuntime(this.#workspace),
-      sandboxRuntime: createSandboxFixtureRuntime(sandbox),
-      workspaceAdapterStore: createWorkspaceFileStore(this.#workspace),
-      sandboxAdapterStore: createSandboxFileStore(sandbox),
-      workspaceCommandRunner: createWorkspaceCommandRunner(this.#workspace),
-      sandboxCommandRunner: createSandboxCommandRunner(sandbox),
-    });
+    this.#events = [];
     await this.ctx.storage.put(EVENTS_KEY, this.#events);
-    this.broadcast(JSON.stringify({ type: "history", events: this.#events }));
+    await this.appendEvent({
+      runtime: "both",
+      kind: "run_started",
+      title: "Comparison run started",
+      detail: "Workspace and Sandbox Think agents are running from the same fixture.",
+    });
 
+    this.ctx.waitUntil(this.#startAgents(runId));
     return this.#events;
   }
+
+  async #startAgents(runId: string): Promise<void> {
+    try {
+      const workspaceAgent = await getAgentHandle(
+        this.env.WorkspaceThinkAgent,
+        `${runId}-workspace`,
+      );
+      const sandboxAgent = await getAgentHandle(this.env.SandboxThinkAgent, `${runId}-sandbox`);
+      await startRuntimeThinkAgents({
+        runId,
+        fixture: comparisonFixture,
+        workspaceAgent,
+        sandboxAgent,
+        onAgentError: async (runtime, error) => {
+          await this.appendEvent({
+            runtime,
+            kind: "agent_tool_error",
+            title: "Think agent failed",
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        },
+      });
+    } catch (error) {
+      await this.appendEvent({
+        runtime: "both",
+        kind: "agent_tool_error",
+        title: "Comparison run failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async #loadEvents(): Promise<void> {
+    this.#events = (await this.ctx.storage.get<RunEvent[]>(EVENTS_KEY)) ?? [];
+  }
+
+  async #appendEventNow(input: RunEventInput): Promise<RunEvent> {
+    const sequence = this.#events.length;
+    const event: RunEvent = {
+      ...input,
+      id: `${this.name}:${sequence}`,
+      runId: this.name,
+      sequence,
+      timestamp: new Date().toISOString(),
+    };
+    this.#events = [...this.#events, event];
+    await this.ctx.storage.put(EVENTS_KEY, this.#events);
+    this.broadcast(JSON.stringify({ type: "event", event }));
+    return event;
+  }
+}
+
+async function getAgentHandle(
+  namespace: DurableObjectNamespace,
+  name: string,
+): Promise<RuntimeThinkAgentHandle> {
+  const getAgent = getAgentByName as unknown as (
+    namespace: DurableObjectNamespace,
+    name: string,
+  ) => Promise<unknown>;
+  return (await getAgent(namespace, name)) as RuntimeThinkAgentHandle;
 }
 
 export default {

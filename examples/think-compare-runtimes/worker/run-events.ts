@@ -7,6 +7,10 @@ export interface RunEventInput {
   detail: string;
 }
 
+export interface RunEventRecorderLike {
+  record(input: RunEventInput): RunEvent | Promise<RunEvent>;
+}
+
 export interface RunEventRecorderOptions {
   runId: string;
   now?: () => string;

@@ -1,5 +1,5 @@
 import type { RuntimeId } from "../../shared/events";
-import type { RunEventRecorder } from "../run-events";
+import type { RunEventRecorderLike } from "../run-events";
 
 export interface RuntimeExecOptions {
   cwd?: string;
@@ -24,7 +24,7 @@ export type RuntimeExecTool = (
 export interface RuntimeExecToolOptions {
   runtime: RuntimeId;
   runner: RuntimeCommandRunner;
-  recorder: RunEventRecorder;
+  recorder: RunEventRecorderLike;
 }
 
 export function createRuntimeExecTool({
@@ -33,7 +33,7 @@ export function createRuntimeExecTool({
   recorder,
 }: RuntimeExecToolOptions): RuntimeExecTool {
   return async (command, options) => {
-    recorder.record({
+    await recorder.record({
       runtime,
       kind: "tool_call",
       title: `exec ${command}`,
@@ -42,7 +42,7 @@ export function createRuntimeExecTool({
 
     try {
       const result = await runner.exec(command, options);
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "tool_result",
         title: "exec complete",
@@ -50,7 +50,7 @@ export function createRuntimeExecTool({
       });
       return result;
     } catch (error) {
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "tool_error",
         title: "exec failed",

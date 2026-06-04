@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { RuntimeId } from "../../shared/events";
-import type { RunEventRecorder } from "../run-events";
+import type { RunEvent, RuntimeId } from "../../shared/events";
+import type { RunEventInput } from "../run-events";
 import type { RuntimeAdapter } from "../runtime/adapter";
 
 type RuntimeThinkToolName = "read" | "write" | "edit" | "exec";
@@ -41,9 +41,13 @@ const execInputSchema = z.object({
   timeoutMs: z.number().int().positive().optional().describe("Command timeout in milliseconds."),
 });
 
+export interface RuntimeThinkToolRecorder {
+  record(input: RunEventInput): RunEvent | Promise<RunEvent>;
+}
+
 export interface RuntimeThinkToolsOptions {
   adapter: RuntimeAdapter;
-  recorder: RunEventRecorder;
+  recorder: RuntimeThinkToolRecorder;
 }
 
 export function createRuntimeThinkTools({
@@ -113,7 +117,7 @@ export async function executeRuntimeThinkTool(
 
 interface CreateRuntimeThinkToolOptions {
   runtime: RuntimeId;
-  recorder: RunEventRecorder;
+  recorder: RuntimeThinkToolRecorder;
   name: RuntimeThinkToolName;
   description: string;
   inputSchema: z.ZodType;
@@ -132,7 +136,7 @@ function createRuntimeThinkTool({
     description,
     inputSchema,
     async execute(input) {
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "agent_tool_call",
         title: `Think requested ${name}`,
@@ -141,7 +145,7 @@ function createRuntimeThinkTool({
 
       try {
         const result = await execute(input);
-        recorder.record({
+        await recorder.record({
           runtime,
           kind: "agent_tool_result",
           title: `Think ${name} result`,
@@ -150,7 +154,7 @@ function createRuntimeThinkTool({
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        recorder.record({
+        await recorder.record({
           runtime,
           kind: "agent_tool_error",
           title: `Think ${name} error`,

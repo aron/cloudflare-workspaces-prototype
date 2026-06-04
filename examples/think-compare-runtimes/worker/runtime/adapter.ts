@@ -1,5 +1,5 @@
 import type { RuntimeId } from "../../shared/events";
-import type { RunEventRecorder } from "../run-events";
+import type { RunEventRecorderLike } from "../run-events";
 import {
   createRuntimeExecTool,
   type RuntimeCommandRunner,
@@ -16,7 +16,7 @@ export interface RuntimeAdapter {
 }
 
 type WorkspaceRuntimeAdapterOptions = {
-  recorder: RunEventRecorder;
+  recorder: RunEventRecorderLike;
 } & (
   | {
       workspace: Parameters<typeof createWorkspaceFileStore>[0] &
@@ -28,7 +28,7 @@ type WorkspaceRuntimeAdapterOptions = {
 );
 
 type SandboxRuntimeAdapterOptions = {
-  recorder: RunEventRecorder;
+  recorder: RunEventRecorderLike;
 } & (
   | {
       sandbox: Parameters<typeof createSandboxFileStore>[0] &

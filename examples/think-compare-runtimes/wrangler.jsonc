@@ -11,9 +11,10 @@
   "assets": {
     "not_found_handling": "single-page-application"
   },
+  "ai": { "binding": "AI" },
   "containers": [
     {
-      "class_name": "CompareRun",
+      "class_name": "WorkspaceThinkAgent",
       "image": "./Dockerfile.workspace",
       "max_instances": 2
     },
@@ -33,6 +34,14 @@
       {
         "name": "Sandbox",
         "class_name": "Sandbox"
+      },
+      {
+        "name": "WorkspaceThinkAgent",
+        "class_name": "WorkspaceThinkAgent"
+      },
+      {
+        "name": "SandboxThinkAgent",
+        "class_name": "SandboxThinkAgent"
       }
     ]
   },
@@ -44,6 +53,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["Sandbox"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["WorkspaceThinkAgent", "SandboxThinkAgent"]
     }
   ],
   "observability": {

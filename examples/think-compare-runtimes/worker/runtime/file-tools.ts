@@ -1,5 +1,5 @@
 import type { RuntimeId } from "../../shared/events";
-import type { RunEventRecorder } from "../run-events";
+import type { RunEventRecorderLike } from "../run-events";
 
 export interface RuntimeFileStore {
   readFile(path: string): Promise<string>;
@@ -20,7 +20,7 @@ export interface RuntimeFileTools {
 export interface RuntimeFileToolsOptions {
   runtime: RuntimeId;
   store: RuntimeFileStore;
-  recorder: RunEventRecorder;
+  recorder: RunEventRecorderLike;
 }
 
 export function createRuntimeFileTools({
@@ -30,7 +30,7 @@ export function createRuntimeFileTools({
 }: RuntimeFileToolsOptions): RuntimeFileTools {
   return {
     async read(path) {
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "tool_call",
         title: `read ${path}`,
@@ -38,7 +38,7 @@ export function createRuntimeFileTools({
       });
       try {
         const contents = await store.readFile(path);
-        recorder.record({
+        await recorder.record({
           runtime,
           kind: "tool_result",
           title: "read complete",
@@ -46,13 +46,13 @@ export function createRuntimeFileTools({
         });
         return contents;
       } catch (error) {
-        recordToolError(recorder, runtime, "read failed", error);
+        await recordToolError(recorder, runtime, "read failed", error);
         throw error;
       }
     },
 
     async write(path, contents) {
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "tool_call",
         title: `write ${path}`,
@@ -60,20 +60,20 @@ export function createRuntimeFileTools({
       });
       try {
         await store.writeFile(path, contents);
-        recorder.record({
+        await recorder.record({
           runtime,
           kind: "tool_result",
           title: "write complete",
           detail: `Wrote ${path}.`,
         });
       } catch (error) {
-        recordToolError(recorder, runtime, "write failed", error);
+        await recordToolError(recorder, runtime, "write failed", error);
         throw error;
       }
     },
 
     async edit(path, edits) {
-      recorder.record({
+      await recorder.record({
         runtime,
         kind: "tool_call",
         title: `edit ${path}`,
@@ -83,14 +83,14 @@ export function createRuntimeFileTools({
         const contents = await store.readFile(path);
         const updated = applyExactEdits(contents, edits);
         await store.writeFile(path, updated);
-        recorder.record({
+        await recorder.record({
           runtime,
           kind: "tool_result",
           title: "edit complete",
           detail: `Applied ${edits.length} replacement(s) to ${path}.`,
         });
       } catch (error) {
-        recordToolError(recorder, runtime, "edit failed", error);
+        await recordToolError(recorder, runtime, "edit failed", error);
         throw error;
       }
     },
@@ -114,13 +114,13 @@ function applyExactEdits(contents: string, edits: ExactEdit[]): string {
   return updated;
 }
 
-function recordToolError(
-  recorder: RunEventRecorder,
+async function recordToolError(
+  recorder: RunEventRecorderLike,
   runtime: RuntimeId,
   title: string,
   error: unknown,
-): void {
-  recorder.record({
+): Promise<void> {
+  await recorder.record({
     runtime,
     kind: "tool_error",
     title,
