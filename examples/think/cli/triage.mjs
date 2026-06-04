@@ -125,9 +125,9 @@ function printDebug(payload) {
         `${dim(`[${stamp} step${phase}]`)} ${italic("assistant")}: ${text.slice(0, 800)}\n`,
       );
     }
-    // Reasoning is verbose and provider-dependent; gate it on an
-    // env knob so the default debug stream stays readable.
-    if (reasoning && (env.TRIAGE_REASONING === "1" || env.TRIAGE_REASONING === "true")) {
+    // Reasoning is verbose and provider-dependent; on by default,
+    // disable with TRIAGE_REASONING=0 if it floods the terminal.
+    if (reasoning && env.TRIAGE_REASONING !== "0" && env.TRIAGE_REASONING !== "false") {
       process.stdout.write(
         `${dim(`[${stamp} reasoning${phase}]`)} ${dim(reasoning.slice(0, 1200))}\n`,
       );
