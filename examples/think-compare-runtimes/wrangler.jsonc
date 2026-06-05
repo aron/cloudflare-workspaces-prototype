@@ -8,6 +8,17 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-06-04",
   "compatibility_flags": ["nodejs_compat"],
+  // The Worker is reachable only through this custom domain, gated by
+  // Cloudflare Access. workers_dev and preview_urls are disabled so the
+  // unprotected *.workers.dev URL isn't a back door around Access.
+  "routes": [
+    {
+      "pattern": "think-compare.4g3nts.com",
+      "custom_domain": true
+    }
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
   "assets": {
     "not_found_handling": "single-page-application"
   },

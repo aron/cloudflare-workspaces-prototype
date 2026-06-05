@@ -39,6 +39,11 @@ export interface RuntimeThinkAgentEnv {
   AI: Ai;
   CompareRun: DurableObjectNamespace<CompareRun>;
   Sandbox: DurableObjectNamespace<SandboxDO>;
+  // Optional Worker-side env that, when set, is forwarded into the
+  // Workspace container so wsd can pick it up at startup. Used to
+  // toggle FUSE_SHIM=1 in local dev where /dev/fuse is unavailable;
+  // unset in production so wsd uses kernel FUSE.
+  FUSE_SHIM?: string;
 }
 
 interface DurableObjectStateWithExports extends DurableObjectState {
@@ -149,6 +154,10 @@ export class WorkspaceThinkAgent extends RuntimeThinkAgent {
       egress: (ctx as DurableObjectStateWithExports).exports.WorkspaceProxy({
         props: { binding: "WorkspaceThinkAgent", id: ctx.id.toString() },
       }),
+      // Forward FUSE_SHIM when the Worker has it set (local dev via
+      // .dev.vars). In production this is unset, so the container
+      // boots wsd against real /dev/fuse.
+      containerEnv: env.FUSE_SHIM ? { FUSE_SHIM: env.FUSE_SHIM } : undefined,
     });
     this.#workspace = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
