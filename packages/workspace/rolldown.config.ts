@@ -50,6 +50,10 @@ export default defineConfig({
     dir: "dist",
     format: "esm",
     sourcemap: true,
+    // Rolldown hoists code shared between `index` and `git` into a
+    // separate chunk. Default name is `libesm-<hash>.js`; rename to
+    // something self-explanatory in the published tarball.
+    chunkFileNames: "shared-[hash].js",
   },
   plugins: [
     dts({
