@@ -68,6 +68,16 @@ jobs:
         with:
           registry-url: "https://registry.npmjs.org"
 
+      # wsd's tests spawn the binary, which dynamically links
+      # libfuse2 (fuse-native) and uses fuse3 helpers for the
+      # FUSE_SHIM userspace mount path. Without these the wsd test
+      # suite fails with `libfuse.so.2: cannot open shared object
+      # file`. Mirrors the install in pull-request.yml.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2t64 fuse3
+
       - name: Build all workspaces
         run: npm run build --workspaces --if-present
 
