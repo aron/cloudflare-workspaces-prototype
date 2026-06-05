@@ -22,6 +22,7 @@ describe("App", () => {
     expect(screen.getByText("THINK · RUNTIME COMPARE")).toBeTruthy();
     expect(screen.getByText("TASK")).toBeTruthy();
     expect(screen.getByRole("button", { name: "START RUN" })).toBeTruthy();
+    expect(screen.getByText(/Add documentation for Smart Request Policies/)).toBeTruthy();
 
     const workspace = screen.getByLabelText("Workspace runtime wing");
     const sandbox = screen.getByLabelText("Sandbox runtime wing");
@@ -31,17 +32,18 @@ describe("App", () => {
     expect(within(workspace).getByText("Durable filesystem")).toBeTruthy();
     expect(
       within(workspace).getByText(
-        "Files live in DOFS. Container is asleep until the agent calls exec.",
+        "Same fixture is seeded into durable workspace storage. Container sleeps until exec.",
       ),
     ).toBeTruthy();
     expect(within(workspace).getByText("asleep")).toBeTruthy();
+    expect(within(workspace).getByText("◇ planned · seeds into DOFS on run start")).toBeTruthy();
 
     expect(within(sandbox).getByText("R · SANDBOX")).toBeTruthy();
     expect(within(sandbox).getByText("@cloudflare/sandbox")).toBeTruthy();
     expect(within(sandbox).getByText("Container filesystem")).toBeTruthy();
     expect(
       within(sandbox).getByText(
-        "Files live in a running container. Every tool call crosses the container boundary.",
+        "Same fixture is seeded into the Sandbox filesystem. File tools and exec run there.",
       ),
     ).toBeTruthy();
     expect(within(sandbox).getByText("off")).toBeTruthy();

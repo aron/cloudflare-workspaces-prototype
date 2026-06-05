@@ -10,7 +10,7 @@ import {
 import type { ToolSet } from "ai";
 import { getServerByName } from "partyserver";
 import type { RuntimeId } from "../../shared/events";
-import type { ComparisonFixture } from "../../shared/fixture";
+import type { ComparisonFixture, FixtureFile } from "../../shared/fixture";
 import {
   type ContainerWarmPoolHandle,
   type ContainerWarmPoolNamespace,
@@ -67,6 +67,11 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
 
   abstract readonly runtime: RuntimeId;
   abstract readonly runtimeLabel: "Workspace" | "Sandbox";
+
+  constructor(ctx: DurableObjectState, env: RuntimeThinkAgentEnv) {
+    super(ctx, env);
+    this.maxSteps = Number.POSITIVE_INFINITY;
+  }
 
   protected abstract runWithRuntime(
     config: RunConfig,
@@ -126,9 +131,11 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
       const inspection = await this.inspectSubmission(submissionId);
       if (!inspection) throw new Error(`Submission ${submissionId} vanished`);
       if (inspection.status === "completed") {
-        return (
-          collectAssistantText(this.messages) || "Think turn completed without assistant text."
-        );
+        const text = collectAssistantText(this.messages);
+        if (text.length === 0) {
+          throw new Error("Think turn completed without assistant text.");
+        }
+        return text;
       }
       if (
         inspection.status === "error" ||
@@ -225,27 +232,33 @@ export class SandboxThinkAgent extends RuntimeThinkAgent {
     config: RunConfig,
     recorder: RuntimeThinkToolRecorder,
   ): Promise<void> {
-    const sandbox = await this.getSandbox(config.runId);
+    const { sandbox, session } = await this.createSandboxSession(config.runId);
     try {
-      await seedFixture(createSandboxFixtureRuntime(sandbox), config.fixture);
+      await seedFixture(createSandboxFixtureRuntime(session), config.fixture);
+      await assertSandboxFixtureVisible(session, config.fixture);
       const adapter = createSandboxRuntimeAdapter({
         recorder,
-        store: createSandboxFileStore(sandbox),
-        runner: createSandboxCommandRunner(sandbox),
+        store: createSandboxFileStore(session),
+        runner: createSandboxCommandRunner(session),
       });
       await this.runThinkTurn(adapter, recorder, config.fixture);
     } finally {
+      await bestEffortCleanup("Sandbox session delete", async () => {
+        await sandbox.deleteSession(session.id);
+      });
       await bestEffortCleanup("Sandbox warm-pool release", () =>
         this.getWarmPool().releaseContainer(config.runId),
       );
     }
   }
 
-  private async getSandbox(runId: string) {
+  private async createSandboxSession(runId: string): Promise<SandboxRunSession> {
     const containerId = await this.getWarmPool().getContainer(runId);
-    return getSandbox(this.env.Sandbox, containerId, {
+    const sandbox = getSandbox(this.env.Sandbox, containerId, {
       sleepAfter: containerSleepAfter(this.env),
-    });
+    }) as unknown as SandboxSessionOwner;
+    const session = await sandbox.createSession({ id: sandboxSessionId(runId), cwd: "/" });
+    return { sandbox, session };
   }
 
   private getWarmPool(): ContainerWarmPoolHandle {
@@ -257,6 +270,64 @@ interface WorkspaceRunSession {
   backend: CloudflareContainerBackend;
   workspace: Workspace;
   close(): Promise<void>;
+}
+
+interface SandboxRunSession {
+  sandbox: SandboxSessionOwner;
+  session: SandboxRuntimeSession;
+}
+
+interface SandboxSessionOwner {
+  createSession(options: { id: string; cwd: string }): Promise<SandboxRuntimeSession>;
+  deleteSession(sessionId: string): Promise<unknown>;
+}
+
+interface SandboxRuntimeSession {
+  id: string;
+  mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
+  writeFile(path: string, contents: string): Promise<unknown>;
+  readFile(path: string): Promise<{ content: string | Uint8Array }>;
+  exec(
+    command: string,
+    options?: { cwd?: string; timeout?: number },
+  ): Promise<{
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  }>;
+}
+
+async function assertSandboxFixtureVisible(
+  session: SandboxRuntimeSession,
+  fixture: ComparisonFixture,
+): Promise<void> {
+  for (const file of fixture.files) {
+    await session.readFile(fixturePath(fixture.root, file));
+  }
+
+  const command = [
+    `test -d ${shellQuote(fixture.root)}`,
+    ...fixture.files.map((file) => `test -f ${shellQuote(fixturePath(fixture.root, file))}`),
+  ].join(" && ");
+  const result = await session.exec(command);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Sandbox fixture seed is not visible to exec: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`,
+    );
+  }
+}
+
+function fixturePath(root: string, file: FixtureFile): string {
+  return `${root.replace(/\/+$/, "")}/${file.path.replace(/^\/+/, "")}`;
+}
+
+function sandboxSessionId(runId: string): string {
+  return `${runId.replace(/[^a-zA-Z0-9_-]/g, "-")}-sandbox-agent`;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 async function bestEffortCleanup(label: string, cleanup: () => Promise<void>): Promise<void> {

@@ -14,7 +14,7 @@ export function createRuntimeSystemPrompt(runtime: RuntimeId): string {
 
 export function createTaskPrompt(fixture: ComparisonFixture): string {
   return [
-    `You are working in a small TypeScript project at ${fixture.root}.`,
+    `You are working in a small docs project at ${fixture.root}.`,
     "",
     "Task:",
     fixture.task,
@@ -22,7 +22,8 @@ export function createTaskPrompt(fixture: ComparisonFixture): string {
     "Known project files:",
     ...fixture.files.map((file) => `- ${file.path}`),
     "",
-    "Start by reading the relevant files from the list above. Make the minimal change needed. When you are done, summarize what changed and how you verified it.",
+    "Start by reading the feature brief, style guide, navigation file, and relevant existing docs from the list above.",
+    "Write the docs changes before running validation. When you are done, summarize what changed and how you verified it.",
   ].join("\n");
 }
 
@@ -33,7 +34,7 @@ export function createRuntimeToolDescriptions(runtime: RuntimeId): RuntimeToolDe
       write:
         "Create or overwrite a text file with Workspace file tools. Use this for new files or full-file rewrites.",
       edit: "Apply exact text replacements with Workspace file tools. Each oldText must match exactly one current region in the file.",
-      exec: "Run a shell command through the Workspace environment. Use this for package scripts, tests, and runtime verification. Set cwd to /workspace/repo for project commands.",
+      exec: "Run a shell command through the Workspace environment. Use this for docs validation or preview after content changes. Set cwd to /workspace/repo for project commands.",
     };
   }
 
@@ -54,7 +55,7 @@ function workspaceSystemPrompt(): string {
     "- The project root is /workspace/repo.",
     "- Use whichever tool is fastest and most reliable for the job.",
     "- Use read, edit, and write for exact file access and precise changes.",
-    "- Use exec for package scripts, tests, and runtime verification.",
+    "- Use exec for docs validation or preview after content changes are in place.",
     "- Set cwd to /workspace/repo for project commands.",
     "",
     "Workflow:",

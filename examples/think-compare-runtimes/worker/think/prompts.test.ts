@@ -16,7 +16,7 @@ describe("runtime Think prompts", () => {
     expect(prompt).toContain(
       "Use read, edit, and write for exact file access and precise changes.",
     );
-    expect(prompt).toContain("Use exec for package scripts, tests, and runtime verification.");
+    expect(prompt).toContain("Use exec for docs validation or preview after content changes");
   });
 
   test("gives Sandbox practical guidance for a normal container workflow", () => {
@@ -31,15 +31,17 @@ describe("runtime Think prompts", () => {
     expect(prompt).toContain("exec runs commands inside the sandbox container");
   });
 
-  test("builds the same task prompt for each runtime", () => {
+  test("builds a docs-oriented task prompt for each runtime", () => {
     const prompt = createTaskPrompt(comparisonFixture);
 
-    expect(prompt).toContain("You are working in a small TypeScript project at /workspace/repo.");
+    expect(prompt).toContain("You are working in a small docs project at /workspace/repo.");
     expect(prompt).toContain(comparisonFixture.task);
     expect(prompt).toContain("Known project files:");
-    expect(prompt).toContain("- package.json");
-    expect(prompt).toContain("- src/request-policy.ts");
-    expect(prompt).toContain("Start by reading the relevant files from the list above.");
+    expect(prompt).toContain("- feature-briefs/smart-request-policies.md");
+    expect(prompt).toContain("- style-guide.md");
+    expect(prompt).toContain("- docs-nav.json");
+    expect(prompt).toContain("Start by reading the feature brief, style guide, navigation file");
+    expect(prompt).toContain("Write the docs changes before running validation");
     expect(prompt).toContain("summarize what changed and how you verified it");
   });
 
@@ -48,7 +50,7 @@ describe("runtime Think prompts", () => {
     const sandbox = createRuntimeToolDescriptions("sandbox");
 
     expect(workspace.read).toContain("Workspace file tools");
-    expect(workspace.exec).toContain("package scripts, tests, and runtime verification");
+    expect(workspace.exec).toContain("docs validation or preview after content changes");
     expect(sandbox.read).toContain("Sandbox filesystem");
     expect(sandbox.exec).toContain(
       "Use this freely for project inspection, search, package scripts, tests",

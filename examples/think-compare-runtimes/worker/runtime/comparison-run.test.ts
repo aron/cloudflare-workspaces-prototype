@@ -82,7 +82,7 @@ describe("runFixtureComparison", () => {
       expect.arrayContaining([
         "Workspace fixture seeded",
         "Sandbox fixture seeded",
-        "read /workspace/repo/src/request-policy.ts",
+        "read /workspace/repo/feature-briefs/smart-request-policies.md",
         "read complete",
         "Scripted Think turn started",
         "Think requested read",

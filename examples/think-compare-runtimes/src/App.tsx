@@ -40,7 +40,7 @@ const runtimeCopy: Record<
     label: "WORKSPACE",
     packageName: "@cloudflare/workspace",
     title: "Durable filesystem",
-    subtitle: "Files live in DOFS. Container is asleep until the agent calls exec.",
+    subtitle: "Same fixture is seeded into durable workspace storage. Container sleeps until exec.",
     accent: "text-[#F2A93B]",
     dot: "bg-[#F2A93B]",
   },
@@ -49,7 +49,7 @@ const runtimeCopy: Record<
     label: "SANDBOX",
     packageName: "@cloudflare/sandbox",
     title: "Container filesystem",
-    subtitle: "Files live in a running container. Every tool call crosses the container boundary.",
+    subtitle: "Same fixture is seeded into the Sandbox filesystem. File tools and exec run there.",
     accent: "text-[#5BC8A7]",
     dot: "bg-[#5BC8A7]",
   },
@@ -315,13 +315,13 @@ function IdlePanel({ runtime }: { runtime: RuntimeId }) {
       <section className="grid gap-4 px-7 py-5">
         <PanelHeader
           left="SEED · /workspace/repo"
-          right="● ready · files in DOFS"
-          tone="text-[#5BC8A7]"
+          right="◇ planned · seeds into DOFS on run start"
+          tone="text-[#8A9099]"
         />
         <CodeBlock>{fixtureTree()}</CodeBlock>
         <p className="text-sm text-[#8A9099]">
-          Already durable. Reads, writes, and edits run directly against this filesystem with no
-          container in the loop.
+          On run start, this fixture is written to durable workspace storage before the agent's
+          first tool call. Reads, writes, and edits then run with no container in the loop.
         </p>
       </section>
     );

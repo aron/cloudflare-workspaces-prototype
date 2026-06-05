@@ -33,6 +33,7 @@ export abstract class ContainerWarmPool<Env extends ContainerPoolConfigEnv>
     });
     this.#refreshIntervalMs = warmPoolRefreshIntervalMs(env);
     ctx.blockConcurrencyWhile(async () => {
+      await this.#applyConfiguredReset();
       await this.#scheduleRefresh();
     });
   }
