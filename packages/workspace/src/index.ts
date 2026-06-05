@@ -17,13 +17,10 @@ export type { BackendHandle, WorkspaceBackend } from "./backend.js";
 export {
   CloudflareContainerBackend,
   type CloudflareContainerBackendOptions,
+  type ContainerHostHolder,
 } from "./backends/cloudflare-container.js";
-export {
-  type IWorkspaceContainerAPI,
-  WorkspaceContainerAPI,
-  type WorkspaceRef,
-  withWorkspaceContainer,
-} from "./backends/container-host.js";
+export type { IWorkspaceContainerAPI, WorkspaceRef } from "./backends/container-host.js";
+export { WorkspaceContainerAPI, withWorkspaceContainer } from "./backends/container-host.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
 export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2.js";
 export type {

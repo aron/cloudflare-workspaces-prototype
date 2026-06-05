@@ -2,6 +2,7 @@ import { getSandbox, type Sandbox as SandboxDO } from "@cloudflare/sandbox";
 import { Think } from "@cloudflare/think";
 import {
   CloudflareContainerBackend,
+  type ContainerHostHolder,
   type DurableObjectStorageLike,
   Workspace,
   WorkspaceProxy,
@@ -10,6 +11,13 @@ import type { ToolSet } from "ai";
 import { getServerByName } from "partyserver";
 import type { RuntimeId } from "../../shared/events";
 import type { ComparisonFixture } from "../../shared/fixture";
+import {
+  type ContainerWarmPoolHandle,
+  type ContainerWarmPoolNamespace,
+  containerSleepAfter,
+  getWarmPoolHandle,
+  type WorkspaceContainerHost,
+} from "../container-pools";
 import type { CompareRun } from "../index";
 import {
   createSandboxRuntimeAdapter,
@@ -39,17 +47,12 @@ export interface RuntimeThinkAgentEnv {
   AI: Ai;
   CompareRun: DurableObjectNamespace<CompareRun>;
   Sandbox: DurableObjectNamespace<SandboxDO>;
-  // Optional Worker-side env that, when set, is forwarded into the
-  // Workspace container so wsd can pick it up at startup. Used to
-  // toggle FUSE_SHIM=1 in local dev where /dev/fuse is unavailable;
-  // unset in production so wsd uses kernel FUSE.
+  SandboxWarmPool: ContainerWarmPoolNamespace;
+  WorkspaceContainerHost: DurableObjectNamespace<WorkspaceContainerHost>;
+  WorkspaceWarmPool: ContainerWarmPoolNamespace;
+  CONTAINER_SLEEP_AFTER?: string;
   FUSE_SHIM?: string;
-}
-
-interface DurableObjectStateWithExports extends DurableObjectState {
-  exports: {
-    WorkspaceProxy(options: { props: { binding: string; id: string } }): Fetcher;
-  };
+  WARM_POOL_RESET_KEY?: string;
 }
 
 interface RunConfig {
@@ -65,12 +68,10 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
   abstract readonly runtime: RuntimeId;
   abstract readonly runtimeLabel: "Workspace" | "Sandbox";
 
-  protected abstract createAdapter(
+  protected abstract runWithRuntime(
     config: RunConfig,
     recorder: RuntimeThinkToolRecorder,
-  ): Promise<RuntimeAdapter>;
-
-  protected abstract seedRuntime(config: RunConfig): Promise<void>;
+  ): Promise<void>;
 
   override getModel() {
     return createRuntimeThinkModel(this.env.AI);
@@ -86,14 +87,20 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
       config.runId,
     )) as unknown as CompareRunEventSink;
     const recorder = createRemoteRunEventRecorder(compareRun);
-    await this.seedRuntime(config);
-    const adapter = await this.createAdapter(config, recorder);
+    await this.runWithRuntime(config, recorder);
+  }
+
+  protected async runThinkTurn(
+    adapter: RuntimeAdapter,
+    recorder: RuntimeThinkToolRecorder,
+    fixture: ComparisonFixture,
+  ): Promise<void> {
     this.#preparedTools = createRuntimeThinkTools({ adapter, recorder }) as unknown as ToolSet;
 
     await runRealThinkTurn({
       adapter,
       recorder,
-      fixture: config.fixture,
+      fixture,
       invoke: ({ prompt }) => this.invokeThink(prompt),
     });
   }
@@ -140,49 +147,73 @@ abstract class RuntimeThinkAgent extends Think<RuntimeThinkAgentEnv> {
 export class WorkspaceThinkAgent extends RuntimeThinkAgent {
   readonly runtime = "workspace";
   readonly runtimeLabel = "Workspace";
-  readonly #backend: CloudflareContainerBackend;
-  readonly #workspace: Workspace;
+  readonly #ctx: DurableObjectState;
+  #activeBackend: CloudflareContainerBackend | null = null;
 
   constructor(ctx: DurableObjectState, env: RuntimeThinkAgentEnv) {
     super(ctx, env);
-    const container = ctx.container;
-    if (!container) {
-      throw new Error("WorkspaceThinkAgent DO is not container-enabled (check wrangler.jsonc)");
-    }
-    this.#backend = new CloudflareContainerBackend({
-      container: () => container,
-      egress: (ctx as DurableObjectStateWithExports).exports.WorkspaceProxy({
-        props: { binding: "WorkspaceThinkAgent", id: ctx.id.toString() },
-      }),
-      // Forward FUSE_SHIM when the Worker has it set (local dev via
-      // .dev.vars). In production this is unset, so the container
-      // boots wsd against real /dev/fuse.
-      containerEnv: env.FUSE_SHIM ? { FUSE_SHIM: env.FUSE_SHIM } : undefined,
-    });
-    this.#workspace = new Workspace({
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#backend],
-    });
+    this.#ctx = ctx;
   }
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/ws") {
-      return this.#backend.handleFetch(request);
+    if (url.pathname === "/ws" && this.#activeBackend) {
+      return this.#activeBackend.handleFetch(request);
     }
     return super.fetch(request);
   }
 
-  protected async seedRuntime(config: RunConfig): Promise<void> {
-    await seedFixture(createWorkspaceFixtureRuntime(this.#workspace), config.fixture);
+  protected async runWithRuntime(
+    config: RunConfig,
+    recorder: RuntimeThinkToolRecorder,
+  ): Promise<void> {
+    const session = this.createWorkspaceSession(config);
+    this.#activeBackend = session.backend;
+    try {
+      await seedFixture(createWorkspaceFixtureRuntime(session.workspace), config.fixture);
+      const adapter = createWorkspaceRuntimeAdapter({
+        recorder,
+        store: createWorkspaceFileStore(session.workspace),
+        runner: createWorkspaceCommandRunner(session.workspace),
+      });
+      await this.runThinkTurn(adapter, recorder, config.fixture);
+    } finally {
+      if (this.#activeBackend === session.backend) {
+        this.#activeBackend = null;
+      }
+      await session.close();
+    }
   }
 
-  protected async createAdapter(_config: RunConfig, recorder: RuntimeThinkToolRecorder) {
-    return createWorkspaceRuntimeAdapter({
-      recorder,
-      store: createWorkspaceFileStore(this.#workspace),
-      runner: createWorkspaceCommandRunner(this.#workspace),
+  private createWorkspaceSession(config: RunConfig): WorkspaceRunSession {
+    const backend = new CloudflareContainerBackend({
+      container: () => this.getWorkspaceContainerHost(config.runId),
+      workspace: { binding: "WorkspaceThinkAgent", id: this.#ctx.id.toString() },
+      containerEnv: this.env.FUSE_SHIM ? { FUSE_SHIM: this.env.FUSE_SHIM } : undefined,
     });
+    const workspace = new Workspace({
+      storage: this.#ctx.storage as unknown as DurableObjectStorageLike,
+      backends: [backend],
+    });
+    return {
+      backend,
+      workspace,
+      close: () => this.closeWorkspaceSession(config.runId, workspace),
+    };
+  }
+
+  private async closeWorkspaceSession(runId: string, workspace: Workspace): Promise<void> {
+    await bestEffortCleanup("Workspace session close", () => workspace.close());
+    await bestEffortCleanup("Workspace warm-pool release", () =>
+      getWarmPoolHandle(this.env.WorkspaceWarmPool).releaseContainer(runId),
+    );
+  }
+
+  private async getWorkspaceContainerHost(runId: string): Promise<ContainerHostHolder> {
+    const containerId = await getWarmPoolHandle(this.env.WorkspaceWarmPool).getContainer(runId);
+    return this.env.WorkspaceContainerHost.get(
+      this.env.WorkspaceContainerHost.idFromName(containerId),
+    );
   }
 }
 
@@ -190,22 +221,49 @@ export class SandboxThinkAgent extends RuntimeThinkAgent {
   readonly runtime = "sandbox";
   readonly runtimeLabel = "Sandbox";
 
-  protected async seedRuntime(config: RunConfig): Promise<void> {
-    const sandbox = this.getSandbox(config);
-    await seedFixture(createSandboxFixtureRuntime(sandbox), config.fixture);
+  protected async runWithRuntime(
+    config: RunConfig,
+    recorder: RuntimeThinkToolRecorder,
+  ): Promise<void> {
+    const sandbox = await this.getSandbox(config.runId);
+    try {
+      await seedFixture(createSandboxFixtureRuntime(sandbox), config.fixture);
+      const adapter = createSandboxRuntimeAdapter({
+        recorder,
+        store: createSandboxFileStore(sandbox),
+        runner: createSandboxCommandRunner(sandbox),
+      });
+      await this.runThinkTurn(adapter, recorder, config.fixture);
+    } finally {
+      await bestEffortCleanup("Sandbox warm-pool release", () =>
+        this.getWarmPool().releaseContainer(config.runId),
+      );
+    }
   }
 
-  protected async createAdapter(config: RunConfig, recorder: RuntimeThinkToolRecorder) {
-    const sandbox = this.getSandbox(config);
-    return createSandboxRuntimeAdapter({
-      recorder,
-      store: createSandboxFileStore(sandbox),
-      runner: createSandboxCommandRunner(sandbox),
+  private async getSandbox(runId: string) {
+    const containerId = await this.getWarmPool().getContainer(runId);
+    return getSandbox(this.env.Sandbox, containerId, {
+      sleepAfter: containerSleepAfter(this.env),
     });
   }
 
-  private getSandbox(config: RunConfig) {
-    return getSandbox(this.env.Sandbox, `${config.runId}-sandbox-think`);
+  private getWarmPool(): ContainerWarmPoolHandle {
+    return getWarmPoolHandle(this.env.SandboxWarmPool);
+  }
+}
+
+interface WorkspaceRunSession {
+  backend: CloudflareContainerBackend;
+  workspace: Workspace;
+  close(): Promise<void>;
+}
+
+async function bestEffortCleanup(label: string, cleanup: () => Promise<void>): Promise<void> {
+  try {
+    await cleanup();
+  } catch (error) {
+    console.warn(`${label} failed`, { error });
   }
 }
 

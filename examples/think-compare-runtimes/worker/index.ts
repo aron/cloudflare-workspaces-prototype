@@ -3,6 +3,13 @@ import { getServerByName, routePartykitRequest, Server } from "partyserver";
 import type { RunEvent } from "../shared/events";
 import { comparisonFixture } from "../shared/fixture";
 import { runComparisonAgents } from "./comparison-agents";
+import {
+  type ContainerWarmPoolNamespace,
+  getWarmPoolHandle,
+  SandboxWarmPool,
+  WorkspaceContainerHost,
+  WorkspaceWarmPool,
+} from "./container-pools";
 import { handleApiRequest } from "./http";
 import type { RunEventInput } from "./run-events";
 import { getRuntimeAgentHandles } from "./runtime-agent-handles";
@@ -10,13 +17,28 @@ import { startComparisonRun } from "./start-run";
 import { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent } from "./think/agents";
 
 export { Sandbox } from "@cloudflare/sandbox";
-export { SandboxThinkAgent, WorkspaceProxy, WorkspaceThinkAgent };
+export {
+  SandboxThinkAgent,
+  SandboxWarmPool,
+  WorkspaceContainerHost,
+  WorkspaceProxy,
+  WorkspaceThinkAgent,
+  WorkspaceWarmPool,
+};
 
 export interface Env {
   AI: Ai;
   CompareRun: DurableObjectNamespace<CompareRun>;
   SANDBOX_TRANSPORT: "rpc";
+  CONTAINER_SLEEP_AFTER?: string;
+  WARM_POOL_REFRESH_INTERVAL?: string;
+  WARM_POOL_RESET_KEY?: string;
+  WARM_POOL_TARGET?: string;
+  FUSE_SHIM?: string;
   Sandbox: DurableObjectNamespace<SandboxDO>;
+  SandboxWarmPool: ContainerWarmPoolNamespace;
+  WorkspaceContainerHost: DurableObjectNamespace<WorkspaceContainerHost>;
+  WorkspaceWarmPool: ContainerWarmPoolNamespace;
   WorkspaceThinkAgent: DurableObjectNamespace<WorkspaceThinkAgent>;
   SandboxThinkAgent: DurableObjectNamespace<SandboxThinkAgent>;
 }
@@ -138,5 +160,10 @@ export default {
     }
 
     return (await routePartykitRequest(request, env)) ?? new Response(null, { status: 404 });
+  },
+
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(getWarmPoolHandle(env.WorkspaceWarmPool).refresh());
+    ctx.waitUntil(getWarmPoolHandle(env.SandboxWarmPool).refresh());
   },
 } satisfies ExportedHandler<Env>;

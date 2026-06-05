@@ -24,19 +24,27 @@
   },
   "ai": { "binding": "AI" },
   "vars": {
-    "SANDBOX_TRANSPORT": "rpc"
+    "CONTAINER_SLEEP_AFTER": "2m",
+    "SANDBOX_TRANSPORT": "rpc",
+    "WARM_POOL_REFRESH_INTERVAL": "10000",
+    "WARM_POOL_RESET_KEY": "2026-06-05-container-cleanup-v3",
+    "WARM_POOL_TARGET": "2"
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
   },
   "containers": [
     {
-      "class_name": "WorkspaceThinkAgent",
+      "class_name": "WorkspaceContainerHost",
       "image": "./Dockerfile.workspace",
-      "max_instances": 2
+      "instance_type": "standard-1",
+      "max_instances": 10
     },
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile.sandbox",
-      "instance_type": "lite",
-      "max_instances": 2
+      "instance_type": "standard-1",
+      "max_instances": 10
     }
   ],
   "durable_objects": {
@@ -48,6 +56,18 @@
       {
         "name": "Sandbox",
         "class_name": "Sandbox"
+      },
+      {
+        "name": "SandboxWarmPool",
+        "class_name": "SandboxWarmPool"
+      },
+      {
+        "name": "WorkspaceContainerHost",
+        "class_name": "WorkspaceContainerHost"
+      },
+      {
+        "name": "WorkspaceWarmPool",
+        "class_name": "WorkspaceWarmPool"
       },
       {
         "name": "WorkspaceThinkAgent",
@@ -71,6 +91,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["WorkspaceThinkAgent", "SandboxThinkAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["WorkspaceContainerHost", "WorkspaceWarmPool", "SandboxWarmPool"]
     }
   ],
   "observability": {
