@@ -32,6 +32,8 @@ export default defineConfig({
     "@platformatic/vfs",
     "isomorphic-git",
     /^isomorphic-git\//,
+    "node:crypto",
+    "node:events",
   ],
   resolve: {
     alias: {
