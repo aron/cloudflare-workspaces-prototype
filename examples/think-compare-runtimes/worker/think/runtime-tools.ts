@@ -15,20 +15,22 @@ type RuntimeThinkTool = {
 type RuntimeThinkToolSet = Record<RuntimeThinkToolName, RuntimeThinkTool>;
 
 const readInputSchema = z.object({
-  path: z.string().describe("Absolute path to read from the runtime workspace."),
+  path: z.string().describe("Absolute path under /workspace/repo to read."),
 });
 
 const writeInputSchema = z.object({
-  path: z.string().describe("Absolute path to write in the runtime workspace."),
-  contents: z.string().describe("Complete file contents to write."),
+  path: z.string().describe("Absolute path under /workspace/repo to create or overwrite."),
+  contents: z.string().describe("Complete file contents to write. This replaces the whole file."),
 });
 
 const editInputSchema = z.object({
-  path: z.string().describe("Absolute path to edit in the runtime workspace."),
+  path: z.string().describe("Absolute path under /workspace/repo to edit."),
   edits: z
     .array(
       z.object({
-        oldText: z.string().describe("Exact text that appears once in the current file."),
+        oldText: z
+          .string()
+          .describe("Exact text that appears once in the current file, including whitespace."),
         newText: z.string().describe("Replacement text."),
       }),
     )
@@ -38,7 +40,10 @@ const editInputSchema = z.object({
 
 const execInputSchema = z.object({
   command: z.string().describe("Shell command to run."),
-  cwd: z.string().optional().describe("Working directory for the command."),
+  cwd: z
+    .string()
+    .optional()
+    .describe("Working directory for the command. Use /workspace/repo for project commands."),
   timeoutMs: z.number().int().positive().optional().describe("Command timeout in milliseconds."),
 });
 

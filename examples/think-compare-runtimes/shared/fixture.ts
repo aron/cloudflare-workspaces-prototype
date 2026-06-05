@@ -98,7 +98,69 @@ export const comparisonFixture: ComparisonFixture = {
     },
     {
       path: "scripts/check-docs.mjs",
-      contents: `import { readFileSync } from "node:fs";\n\nfunction read(path) {\n  return readFileSync(path, "utf8");\n}\n\nfunction assert(condition, message) {\n  if (!condition) {\n    throw new Error(message);\n  }\n}\n\nconst pagePath = "docs/workers/smart-request-policies.md";\nconst page = read(pagePath);\nconst nav = JSON.parse(read("docs-nav.json"));\nconst readme = read("README.md");\n\nassert(page.startsWith("---\\n"), pagePath + " must start with YAML frontmatter");\nassert(page.includes("title:"), pagePath + " must include a title");\nassert(page.includes("description:"), pagePath + " must include a description");\nassert(page.includes("lastUpdated:"), pagePath + " must include lastUpdated");\nassert(page.includes("Smart Request Policies"), pagePath + " must describe Smart Request Policies");\nassert(page.includes("x-bypass-token"), pagePath + " must include the bypass token header");\nassert(page.includes("Enterprise report exports"), pagePath + " must mention Enterprise report exports");\nassert(page.includes("~~~ts") || page.includes("\`\`\`ts"), pagePath + " must include a TypeScript Worker example");\nassert(!page.includes("TODO"), pagePath + " must not contain TODO placeholders");\n\nconst workers = nav.sections.find((section) => section.title === "Workers");\nassert(workers, "docs-nav.json must contain the Workers section");\nassert(\n  workers.items.some((item) => item.path === "/workers/smart-request-policies/"),\n  "docs-nav.json must include the Smart Request Policies page",\n);\nassert(\n  readme.includes("smart-request-policies"),\n  "README.md must point maintainers to the Smart Request Policies page",\n);\n\nconsole.log("docs check passed");\n`,
+      contents: `import { readFileSync } from "node:fs";
+
+const failures = [];
+
+function readRequired(path, purpose) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    failures.push(path + " is required for " + purpose + ". Create or repair this file, then rerun npm run check.");
+    return "";
+  }
+}
+
+function parseJson(path, source) {
+  try {
+    return JSON.parse(source);
+  } catch (error) {
+    failures.push(path + " must contain valid JSON. Repair the JSON syntax, then rerun npm run check.");
+    return {};
+  }
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    failures.push(message);
+  }
+}
+
+const pagePath = "docs/workers/smart-request-policies.md";
+const page = readRequired(pagePath, "the Smart Request Policies docs page");
+const nav = parseJson("docs-nav.json", readRequired("docs-nav.json", "the Workers navigation entry"));
+const readme = readRequired("README.md", "the maintainer-facing page link");
+
+assert(page.startsWith("---\\n"), pagePath + " must start with YAML frontmatter containing title, description, and lastUpdated.");
+assert(page.includes("title:"), pagePath + " frontmatter must include title.");
+assert(page.includes("description:"), pagePath + " frontmatter must include description.");
+assert(page.includes("lastUpdated:"), pagePath + " frontmatter must include lastUpdated.");
+assert(page.includes("Smart Request Policies"), pagePath + " must describe Smart Request Policies by name.");
+assert(page.includes("x-bypass-token"), pagePath + ' must include the exact header name "x-bypass-token". Add it to the Worker example or policy explanation.');
+assert(page.includes("Enterprise report exports"), pagePath + ' must include the exact phrase "Enterprise report exports". Explain how scheduled Enterprise report exports can use a route-specific bypass token.');
+assert(page.includes("~~~ts") || page.includes("\`\`\`ts"), pagePath + ' must include a fenced TypeScript Worker example using ~~~ts or "three-backtick ts".');
+assert(!page.includes("TODO"), pagePath + " must not contain TODO placeholders. Replace placeholders with final docs content.");
+
+const sections = Array.isArray(nav.sections) ? nav.sections : [];
+const workers = sections.find((section) => section && section.title === "Workers");
+assert(workers, "docs-nav.json must contain the Workers section.");
+const workerItems = Array.isArray(workers?.items) ? workers.items : [];
+assert(
+  workerItems.some((item) => item && item.path === "/workers/smart-request-policies/"),
+  'docs-nav.json must include a Workers item with path "/workers/smart-request-policies/".',
+);
+assert(
+  readme.includes("smart-request-policies"),
+  'README.md must include "smart-request-policies" so maintainers can find the new page.',
+);
+
+if (failures.length > 0) {
+  console.error(["docs validation failed:", "", ...failures.map((failure, index) => String(index + 1) + ". " + failure)].join("\\n"));
+  process.exit(1);
+}
+
+console.log("docs check passed");
+`,
     },
   ],
 };
