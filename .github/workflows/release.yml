@@ -72,7 +72,7 @@ jobs:
       # libfuse2 (fuse-native) and uses fuse3 helpers for the
       # FUSE_SHIM userspace mount path. Without these the wsd test
       # suite fails with `libfuse.so.2: cannot open shared object
-      # file`. Mirrors the install in pull-request.yml.
+      # file`. Mirrors the install in ci.yml.
       - name: Install system dependencies
         run: |
           sudo apt-get update
