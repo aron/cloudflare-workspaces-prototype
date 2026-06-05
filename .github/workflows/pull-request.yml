@@ -4,9 +4,9 @@
 # build siblings whose dist/ this package's typecheck depends on,
 # then run biome + typecheck + tests scoped to that package.
 #
-# Runs on every PR and on every push to main, so a merge that
-# slipped through (admin override, branch protection off, etc.)
-# still gets the same lint/build/typecheck/test signal.
+# Runs on every PR and on every push to main or next, so a merge
+# that slipped through (admin override, branch protection off,
+# etc.) still gets the same lint/build/typecheck/test signal.
 #
 # Path filter skips pure documentation changes — they have no
 # influence on any package's lint, typecheck, or test surface.
@@ -20,7 +20,7 @@ on:
       - "docs/**"
       - ".github/**/*.md"
   push:
-    branches: [main]
+    branches: [main, next]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
