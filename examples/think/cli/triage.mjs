@@ -69,22 +69,26 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(process.env.PORT && Number.parseInt(process.env.PORT, 10) || 0, "0.0.0.0", async () => {
-  const addr = server.address();
-  const port = typeof addr === "object" && addr ? addr.port : 0;
-  const host = advertiseHost || pickHost();
-  const webhookUrl = webhookOverride || `http://${host}:${port}/webhook`;
-  process.stderr.write(`webhook listening on http://0.0.0.0:${port}/webhook\n`);
-  process.stderr.write(`advertising as ${webhookUrl}\n`);
-  bumpWatchdog();
-  try {
-    await postIssue(workerUrl, issueUrl, webhookUrl, debug);
-    process.stderr.write(`posted to ${workerUrl}/issue\n\n`);
-  } catch (err) {
-    process.stderr.write(`POST /issue failed: ${err?.message ?? err}\n`);
-    exit(4);
-  }
-});
+server.listen(
+  (process.env.PORT && Number.parseInt(process.env.PORT, 10)) || 0,
+  "0.0.0.0",
+  async () => {
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const host = advertiseHost || pickHost();
+    const webhookUrl = webhookOverride || `http://${host}:${port}/webhook`;
+    process.stderr.write(`webhook listening on http://0.0.0.0:${port}/webhook\n`);
+    process.stderr.write(`advertising as ${webhookUrl}\n`);
+    bumpWatchdog();
+    try {
+      await postIssue(workerUrl, issueUrl, webhookUrl, debug);
+      process.stderr.write(`posted to ${workerUrl}/issue\n\n`);
+    } catch (err) {
+      process.stderr.write(`POST /issue failed: ${err?.message ?? err}\n`);
+      exit(4);
+    }
+  },
+);
 
 // ── Webhook handler ────────────────────────────────────────────────
 
