@@ -45,11 +45,13 @@ export interface IWorkspaceContainerAPI {
   // because Fetchers can't survive a Workers RPC hop.
   interceptOutboundHttp(host: string, workspace: WorkspaceRef): Promise<void>;
 
+  // Fetch a URL through a TCP port inside the container. The host
+  // performs the fetch where ctx.container is local, so same-DO and
+  // cross-DO callers use the same runtime boundary.
+  fetchPort(port: number, input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+
   // Return a Fetcher bound to the named TCP port inside the
-  // container. The backend uses this for the /health poll and the
-  // POST /connect handshake — call `.fetch(request)` on the result.
-  // Across RPC, the Workers runtime auto-stubs the Fetcher so a
-  // chained `.fetch(...)` pipelines into one round-trip.
+  // container for callers that run in the container-owning DO.
   port(port: number): Fetcher;
 }
 
@@ -86,6 +88,10 @@ export class WorkspaceContainerAPI extends RpcTarget implements IWorkspaceContai
       WorkspaceProxy: (opts: { props: WorkspaceRef }) => Fetcher;
     };
     await this.#container.interceptOutboundHttp(host, exports.WorkspaceProxy({ props: ref }));
+  }
+
+  fetchPort(port: number, input: RequestInfo | URL, init?: RequestInit) {
+    return this.#container.getTcpPort(port).fetch(input, init);
   }
 
   port(port: number) {

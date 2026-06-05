@@ -1,0 +1,32 @@
+# Workspace runtime image for the comparison example. It runs the
+# wsd daemon so shell commands can see the same /workspace tree that
+# Workspace.fs stores in Durable Object storage.
+#
+# Base image is node:22-trixie-slim so the agent has node + npm
+# available out of the box for in-container verification (e.g. npm
+# install / npm test). It's also Debian-glibc, which is what the wsd
+# SEA binary is built against.
+#
+# FUSE: this image ships kernel-FUSE userspace (fuse3 + libfuse2t64)
+# so wsd uses real /dev/fuse in production. Local dev (wrangler dev
+# under colima) has no /dev/fuse, so the Worker passes FUSE_SHIM=1
+# into the container's env at startup, which makes wsd fall back to
+# the userspace polling shim. See examples/think-compare-runtimes/
+# .dev.vars and worker/think/agents.ts.
+
+FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
+
+FROM --platform=linux/amd64 node:22-trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates git fuse3 libfuse2t64 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
+
+ENV PORT=8080
+ENV MOUNT_POINT=/workspace
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/wsd"]

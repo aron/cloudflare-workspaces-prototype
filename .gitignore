@@ -3,6 +3,10 @@ dist/
 PLAN.md
 artifacts/
 
+# Cache for the Node binaries used by packages/wsd/scripts/build-bin.mjs
+# when producing the wsd SEA bundles. Regenerated on demand.
+.devbox/
+
 # SEA binary destinations populated at publish time from
 # artifacts/wsd/ via the build-bin step. The @cloudflare/workspace
 # copy lives under dist/bin/, which is already covered by the

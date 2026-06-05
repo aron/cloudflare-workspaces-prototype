@@ -43,24 +43,25 @@ function makeFakeHost(opts: FakeHostOptions = {}): FakeHost {
       state.interceptedHost = host;
       state.interceptedWorkspace = ref;
     },
+    async fetchPort(port, input, init) {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      calls.push({ name: "fetchPort", args: [port, url.pathname, request.method] });
+      if (url.pathname === "/health") {
+        if (!healthy) throw new Error("connection refused");
+        return new Response(null, { status: 200 });
+      }
+      if (url.pathname === "/connect") {
+        if (connectStatus !== 200) {
+          return new Response(`/connect ${connectStatus}`, { status: connectStatus });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`unexpected port path: ${url.pathname}`);
+    },
     port(port) {
       return {
-        async fetch(input, init) {
-          const request = input instanceof Request ? input : new Request(input, init);
-          const url = new URL(request.url);
-          calls.push({ name: "port", args: [port, url.pathname, request.method] });
-          if (url.pathname === "/health") {
-            if (!healthy) throw new Error("connection refused");
-            return new Response(null, { status: 200 });
-          }
-          if (url.pathname === "/connect") {
-            if (connectStatus !== 200) {
-              return new Response(`/connect ${connectStatus}`, { status: connectStatus });
-            }
-            return new Response(JSON.stringify({ ok: true }), { status: 200 });
-          }
-          throw new Error(`unexpected port path: ${url.pathname}`);
-        },
+        fetch: (input, init) => state.host.fetchPort(port, input, init),
       } as unknown as Fetcher;
     },
   };
@@ -153,6 +154,34 @@ describe("CloudflareContainerBackend", () => {
     });
 
     await expect(backend.connect()).rejects.toThrow(/POST \/connect returned 502/);
+  });
+
+  test("connect() fetches container URLs through the host API", async () => {
+    const calls: { name: string; args: unknown[] }[] = [];
+    const host: IWorkspaceContainerAPI = {
+      async start() {},
+      async interceptOutboundHttp() {},
+      port() {
+        throw new Error("returned Fetcher is not usable across this boundary");
+      },
+      async fetchPort(port, input, init) {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(request.url);
+        calls.push({ name: "fetchPort", args: [port, url.pathname, request.method] });
+        return new Response(null, { status: 200 });
+      },
+    };
+    const backend = new CloudflareContainerBackend({
+      container: () => ({ getWorkspaceContainer: () => host }),
+      workspace: fakeWorkspace,
+      connectTimeoutMs: 600,
+    });
+
+    await expect(backend.connect()).rejects.toThrow(/\/ws upgrade did not arrive/);
+    expect(calls).toEqual([
+      { name: "fetchPort", args: [8080, "/health", "HEAD"] },
+      { name: "fetchPort", args: [8080, "/connect", "POST"] },
+    ]);
   });
 
   test("connect() throws when the /ws upgrade never arrives", async () => {
