@@ -49,7 +49,7 @@ jobs:
       # Trusted publishing on npm requires the OIDC id-token.
       id-token: write
       contents: read
-    if: ${{ github.repository_owner == 'cloudflare' }}
+    if: ${{ github.repository_owner == 'cloudflare' || github.repository_owner == 'aron' }}
     env:
       # Used everywhere a version string is needed below. The push
       # path takes it from the tag; the manual path takes it from
