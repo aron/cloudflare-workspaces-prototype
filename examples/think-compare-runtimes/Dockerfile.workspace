@@ -15,7 +15,6 @@ COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
-ENV VFS_ROOT=/workspace
 ENV FUSE_SHIM=1
 EXPOSE 8080
 
