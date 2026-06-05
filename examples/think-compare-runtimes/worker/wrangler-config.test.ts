@@ -42,6 +42,7 @@ describe("wrangler config", () => {
 
     expect(config.vars).toMatchObject({
       CONTAINER_SLEEP_AFTER: "2m",
+      FUSE_SHIM: "1",
       WARM_POOL_REFRESH_INTERVAL: "10000",
       WARM_POOL_RESET_KEY: "2026-06-05-container-cleanup-v3",
       WARM_POOL_TARGET: "4",
