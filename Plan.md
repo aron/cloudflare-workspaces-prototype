@@ -6,13 +6,16 @@ Phase 1: ✅ Done.
 Phase 2: 🟡 Build-green. Runtime-untested. Known regressions listed.
 Phase 3 (revised): ✅ Done — vendor tree deleted, agent on
 published `@cloudflare/workspace@0.0.0-alpha.3` + GHCR wsd image.
-Phase 4: 🟢 In progress. Agent-suite green (13/13), unit tests green
+Phase 4: ✅ Done. Agent-suite green (13/13), unit tests green
 (223/223). Regressions #3 (`/tar` route), #4 (skills R2 mount),
 #7 (decorator transform) closed. End-to-end `wrangler dev` smoke
 passes: container builds (WARP CA threaded through), three
 Sandbox containers start from the warm pool, `/tar` round-trips
 the live `WorkspaceStub` through capnweb and returns a `vfs/`
-block. Remaining: regression #1 (streaming exec); README updates.
+block. READMEs rewritten for the published package + GHCR image
+wiring. Only known regression still open is #1 (streaming exec),
+blocked on upstream `WorkspaceShellStub` getting a framed event
+transport.
 
 Work landed in branch `port-workspace-next` (off `hackspace`).
 
@@ -364,6 +367,16 @@ vendored snapshot in two places that bit us:
   /workspace` on the first `find` call against a fresh VFS — the
   /tar route already catches it and falls through to an empty
   index.
+- **READMEs.** Root, `apps/agent`, and `packages/git-tools`
+  rewritten end-to-end for the published `@cloudflare/workspace`
+  shape: dropped references to the vendored package paths, the
+  `predeploy` workspace-build / sandbox CA-sync steps, and the
+  retired `gitCommit`/`gitPush`/`worker_deploy` families.
+  Documented the new `apps/agent/ca/` opt-in for WARP / corporate
+  TLS proxies, the GHCR pin, and the lockstep upgrade workflow.
+  `apps/agent/README.md` got an updated architecture diagram
+  (Agent DO + Sandbox DO + wsd container) and a 'Known gaps'
+  section for regressions #1 / inflight-exec-recovery.
 - **Regression #3 — `/tar` debug export.** Ported `debug-tar.ts`
   to the new `WorkspaceStub.fs` surface (`find` + `stat` +
   `readFile`). One round-trip per file instead of the old
@@ -415,15 +428,9 @@ vendored snapshot in two places that bit us:
 
 ### Remaining
 
-- **Container-path smoke test — closed.** The Dockerfile now
-  conditionally trusts host CA bundles at `apps/agent/ca/*.crt`,
-  see the Done section below. With `apps/agent/ca/warp-ca.crt`
-  populated from the host's `/usr/local/share/ca-certificates/extra-ca.crt`,
-  the image builds cleanly, three Sandbox containers boot from the
-  warm pool, and `GET /api/threads/<id>/tar` round-trips a live
-  `WorkspaceStub` (returns a `vfs/` block instead of the cold-DO
-  fallback). Driving `read`/`write`/`exec` end-to-end still needs
-  an LLM-backed turn, which is out of scope for a local smoke.
+- Regression #1 (streaming exec). Still needs a framed transport
+  on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
+  Track in a separate issue.
 - Regression #1 (streaming exec). Still needs a framed transport
   on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
   Track in a separate issue.

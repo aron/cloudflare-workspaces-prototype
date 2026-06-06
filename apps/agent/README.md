@@ -1,17 +1,14 @@
 # @app/agent
 
-LLM-driven chat agent that writes small CLI tools, compiles them to
-WebAssembly inside a Cloudflare Sandbox container, and runs them in
-isolated Cloudflare Dynamic Workers.
+LLM-driven chat agent that owns one Slack-style conversation per
+thread, with file tools and a shell that operate on a shared
+DO-backed virtual filesystem.
 
-Today the container ships with the **Zig** toolchain. Rust, Go and
-JavaScript runtimes are on the roadmap — add them to the Dockerfile to
-extend the agent.
-
-This is a reference consumer of [`@cloudflare/workspace`](../../packages/workspace).
-The workspace primitive does all the heavy lifting (DO-side VFS, container
-sync, WASM execution); this app does only chat-shaped things: defining
-tools, picking a model, streaming the response, and rendering the chat.
+This is a reference consumer of
+[`@cloudflare/workspace`](https://github.com/cloudflare/workspace).
+The published package owns the SQLite VFS, the FUSE mount, and the
+capnweb sync. This app does only chat-shaped things: defining tools,
+picking a model, streaming the response, and rendering the chat.
 
 ## Architecture
 
@@ -21,15 +18,22 @@ tools, picking a model, streaming the response, and rendering the chat.
 └────────────────────────────────────┘
                  │ WebSocket
                  ▼
-┌────────────────────────────────────┐
-│  Agent (Durable Object)            │
-│    AIChatAgent + tools             │
-│    └── Workspace                   │
-│          ├── DoVfs (SQLite)        │
-│          ├── capnweb client ───────┼──► Sandbox container
-│          └── Worker Loader ────────┼──► Dynamic Worker (WASI)
-└────────────────────────────────────┘
+┌────────────────────────────────────┐         ┌───────────────────────────┐
+│  Agent DO  (one per thread)        │         │  Sandbox DO (1:1 w/ a     │
+│    Think + tools                   │── RPC ──┤  warm pool slot)          │
+│    ├── WorkspaceStub ──────────────┼────────►│    Workspace              │
+│    │     (fs.* / shell.exec)       │         │      ├── SQLite VFS       │
+│    └── R2: SKILLS                  │         │      ├── R2 mounts        │
+└────────────────────────────────────┘         │      └── capnweb session ──► wsd container
+                                               │            (FUSE mount    │
+                                               │             at /workspace)│
+                                               └───────────────────────────┘
 ```
+
+Same-DO constraint of `CloudflareContainerBackend`: the Workspace
+lives inside the Sandbox DO because `ctx.container` can't cross
+isolates. The Agent DO holds only a `WorkspaceStub` — a thin RPC
+target that proxies `fs.*` / `shell.exec` back into the Sandbox.
 
 ## Setup
 
@@ -39,14 +43,18 @@ cp .dev.vars.example .dev.vars
 ```
 
 Behind a TLS-intercepting corporate proxy? Drop your root CA into
-`sandbox/your-ca.crt` — see [`sandbox/README.md`](./sandbox/README.md).
+`ca/warp-ca.crt` (gitignored). See the root [README](../../README.md#behind-cloudflare-warp-or-a-corporate-tls-proxy).
 
 ### Skills bucket
 
-The agent enumerates skills from an R2 bucket bound as `SKILLS` and
-mounts them at `/workspace/.agents/skills/`. Each skill is a directory
-containing a `SKILL.md` (Agent-Skills front-matter with `name` and
-`description`) plus any sibling files it references.
+The agent enumerates skills from an R2 bucket bound as `SKILLS`. Each
+skill is a directory containing a `SKILL.md` (Agent-Skills front-matter
+with `name` and `description`) plus any sibling files it references.
+
+Discovery walks R2 directly — `discoverSkills()` lists the bucket on
+the first `beforeTurn` of a cold DO and caches the result on the
+instance. There's no Workspace mount step; the system prompt's
+`<available_skills>` block is populated from the cached array.
 
 Source-of-truth skills live in `apps/agent/skills/`. Sync them to R2
 with:
@@ -73,8 +81,11 @@ npm run dev
 npm run deploy
 ```
 
-The `predeploy` script builds `@cloudflare/workspace`'s `dist/` (so the
-container Dockerfile can `COPY` the pre-built server) and the UI bundle.
+The `predeploy` step builds the frontend bundle. The Sandbox container
+image is built by wrangler from `apps/agent/Dockerfile` on `npm run
+deploy`; it pulls the `wsd` SEA binary out of
+`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3` and layers
+the project toolchain on top (Zig, Go, esbuild, wrangler).
 
 ## Debug endpoints
 
@@ -82,12 +93,29 @@ When deployed, useful for inspecting state:
 
 | Endpoint | Method | Returns |
 |---|---|---|
-| `/debug/<sessionId>/messages` | GET | Raw chat history (system/user/assistant/tool/reasoning parts) |
-| `/debug/<sessionId>/vfs`      | GET | Workspace file tree with sizes |
-| `/debug/<sessionId>/reset`    | POST | Clear chat history (keeps VFS) |
-| `/debug/<sessionId>/exec`     | POST `{command, cwd?}` | Run a raw command in the container |
-| `/debug/<sessionId>/env`      | GET | Container info (toolchain versions, uname, mounts) |
-| `/debug/<sessionId>/logs`     | GET | The container server log |
+| `/api/threads/<id>/messages` | GET | Raw chat history (system/user/assistant/tool/reasoning parts) |
+| `/api/threads/<id>/vfs`      | GET | Workspace file tree with sizes |
+| `/api/threads/<id>/tar`      | GET | Uncompressed POSIX ustar with metadata, messages, and the `/workspace` subtree — handy for bug reports |
+| `/api/threads/<id>/reset`    | POST | Clear chat history and release the assigned Sandbox |
+| `/debug/<sessionId>/exec`    | POST `{command, cwd?}` | Run a raw command in the container |
+| `/debug/<sessionId>/env`     | GET | Container info (toolchain versions, uname, mounts) |
+| `/debug/<sessionId>/logs`    | GET | The container server log |
+| `/debug/<sessionId>/pool`    | GET | Warm pool snapshot |
 
 > **Note:** `/debug/*` endpoints have no auth. For a public deployment,
 > gate them behind a secret token or restrict to dev environments.
+
+## Known gaps
+
+- **Streaming exec.** `WorkspaceShellStub.exec` returns a fully-buffered
+  `{ stdout, stderr, exitCode }` shape; the chat UI no longer shows
+  live stdout/stderr from long-running commands. The underlying
+  `WorkspaceShell.exec` does emit a `ReadableStream<WorkspaceExecEvent>`,
+  but the stub can't carry that across the DO RPC boundary without a
+  framed transport. Tracked upstream against
+  `@cloudflare/workspace`.
+- **Exec inflight recovery.** A DO eviction mid-exec leaves the tool
+  part in `input-streaming`. The new workspace API has no
+  `getProcess` / `streamProcessLogs` reattach, so we lean on
+  `resolveOrphanToolCalls` in `beforeTurn` to mark the call cancelled
+  on the next turn.

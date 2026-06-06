@@ -1,18 +1,27 @@
 # Hackspace monorepo
 
-Multiplayer chat workspace built on Cloudflare. Pairs a `Workspace`
-primitive — DO-backed virtual filesystem with two-way sync to a Sandbox
-container plus WASM execution via Dynamic Workers — with an LLM agent
-that runs inside rooms and threads, addressable by `@mention`.
+Multiplayer chat workspace built on Cloudflare. An LLM agent runs
+inside rooms and threads (addressable by `@mention`) with access to a
+DO-backed virtual filesystem that's mirrored into a Sandbox container
+over FUSE — the agent's file tools and the container's `exec` see the
+same bytes without an explicit sync.
+
+The workspace primitive itself lives upstream now:
+[`@cloudflare/workspace`](https://github.com/cloudflare/workspace),
+pinned to `0.0.0-alpha.3`. The Sandbox container runs the matching
+prebuilt `wsd` daemon from
+[`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3`](https://github.com/cloudflare/workspace/pkgs/container/workspace-wsd-linux-x64).
+Both pins move together — see [Upgrading the workspace
+package](#upgrading-the-workspace-package) below.
 
 ## Layout
 
 | Path | Package | Description |
 |---|---|---|
-| [packages/workspace](./packages/workspace) | `@cloudflare/workspace` | DO-backed VFS + Sandbox sync + WASM runner. |
 | [packages/fs-tools](./packages/fs-tools)   | `@cloudflare/fs-tools`  | `read` / `write` / `edit` tools over a pluggable file store. |
-| [packages/web-tools](./packages/web-tools) | `@cloudflare/web-tools` | `webFetch` / `webSearch` (Brave) tools. |
-| [packages/shared](./packages/shared)       | `@app/shared`           | Wire types shared between agent + frontend. |
+| [packages/git-tools](./packages/git-tools) | `@cloudflare/git-tools` | `git_clone` tool — thin AI-SDK shim over `@cloudflare/workspace/git`. |
+| [packages/web-tools](./packages/web-tools) | `@cloudflare/web-tools` | `webfetch` / `websearch` (Brave) tools. |
+| [packages/shared](./packages/shared)       | `@app/shared`           | Wire types shared between agent and frontend. |
 | [apps/agent](./apps/agent)                 | `@app/agent`            | The Worker: Agent / SubAgent / App / Room / Sandbox / WarmPool DOs. |
 | [apps/frontend](./apps/frontend)           | `@app/frontend`         | Vite-built React UI served as static assets from the agent worker. |
 
@@ -40,7 +49,7 @@ cd apps/agent
 cp .dev.vars.example .dev.vars
 # Edit .dev.vars:
 #   OPENAI_API_KEY=…           (omit to use the Workers AI fallback)
-#   BRAVE_API_KEY=…            (omit to disable the webSearch tool)
+#   BRAVE_API_KEY=…            (omit to disable the websearch tool)
 #   ACCESS_DEV_USER={…}        (optional dev identity when Access is off)
 npm run dev
 ```
@@ -51,6 +60,22 @@ npm run dev
 > wrangler config in `tests/wrangler.test.jsonc` plus the agent-suite
 > config under `tests/agent-suite/`.
 
+### Behind Cloudflare WARP or a corporate TLS proxy
+
+WARP MITM-decrypts external TLS, so the Sandbox image's `curl`/`npm`
+steps fail with "unable to get local issuer certificate" unless the
+build context trusts the WARP root. Drop your host bundle at
+`apps/agent/ca/warp-ca.crt` (gitignored, host-specific):
+
+```sh
+cp /usr/local/share/ca-certificates/extra-ca.crt apps/agent/ca/warp-ca.crt
+# (or wherever your WARP / corporate root lives on the host)
+```
+
+The Dockerfile picks up any `.crt` under `apps/agent/ca/` and trusts
+it via `update-ca-certificates` before any network step. Hosts without
+WARP just leave the directory empty and the build behaves identically.
+
 ## Deploying
 
 ```sh
@@ -58,21 +83,9 @@ cd apps/agent
 npm run deploy
 ```
 
-`predeploy` runs three steps automatically:
-
-1. **`sandbox/sync-host-ca.sh`** — stages your host CA bundle
-   (`$SSL_CERT_FILE` → `$NODE_EXTRA_CA_CERTS` → `$REQUESTS_CA_BUNDLE`)
-   into `apps/agent/sandbox/host-ca.crt` so the Sandbox container build
-   trusts the same roots as your host. Required when you're behind
-   Cloudflare WARP or a corporate TLS-intercepting proxy. No-op if none
-   of those env vars are set. The staged cert is gitignored.
-2. **`npm run build --workspace=@cloudflare/workspace`** — builds the
-   workspace primitive that the agent and the Sandbox container both
-   consume.
-3. **`npm run build --workspace=@app/frontend`** — Vite-builds the React
-   UI into `apps/frontend/dist/`, which the worker serves as static
-   assets (configured in `apps/agent/wrangler.jsonc` via
-   `assets.directory`).
+`predeploy` builds the React UI into `apps/frontend/dist/`, which the
+worker serves as static assets (configured in
+`apps/agent/wrangler.jsonc` via `assets.directory`).
 
 ### Prerequisites on the deploying machine
 
@@ -93,9 +106,14 @@ npm run deploy
   - `App` — singleton; rooms list, identity echo (`/api/app/*`).
   - `Room` — one per chat room; WS fanout, thread minting on
     `@mention` (`/api/rooms/:id/*`).
-  - `Sandbox`, `WarmPool` — pre-warmed container fleet for `exec`/`run`.
+  - `Sandbox`, `WarmPool` — pre-warmed container fleet for `exec` and
+    `git_clone`. Each `Sandbox` DO owns a `Workspace` + a wsd container;
+    the Agent DO pulls a `WorkspaceStub` across DO RPC.
 - Container image `hackspace-prototype-sandbox` (pushed to
   `registry.cloudflare.com/<account>/hackspace-prototype-sandbox`).
+  Layers a Debian-slim base + the `wsd` SEA binary out of
+  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3` + the
+  project toolchain (Zig, Go, esbuild, wrangler).
 - Cron `* * * * *` — primes the warm pool every minute. Drop the
   `triggers.crons` block in `wrangler.jsonc` if you want manual priming.
 
@@ -126,13 +144,40 @@ Per-persona smoke tests:
   program. Confirms the Sandbox container started and wsd is serving
   the FUSE-mounted workspace.
 - Any persona — file ops (`read`/`write`/`edit`) and, if `BRAVE_API_KEY`
-  is set, `webSearch`.
+  is set, `websearch`.
 
 ### Common failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `curl: (60) SSL certificate problem` during Zig/Go download in Docker build | WARP MITMs TLS, container doesn't trust the cert | Ensure `$SSL_CERT_FILE` (or `$NODE_EXTRA_CA_CERTS` / `$REQUESTS_CA_BUNDLE`) points at your host CA bundle; predeploy stages it. |
+| `curl: (60) SSL certificate problem` during Zig/Go download in Docker build | WARP MITMs TLS, container doesn't trust the cert | Drop your host CA bundle at `apps/agent/ca/warp-ca.crt`. The Dockerfile installs it before the first network step. |
 | `failed commit on ref … EOF` mid-push to `registry.cloudflare.com` | WARP throttling large uploads | `warp-cli disconnect`, retry, reconnect. Layer cache resumes. |
 | `failed commit on ref … manifest … EOF` at the very end | Same as above on the final manifest PUT | Single retry usually completes — all blobs already uploaded. |
-| `webSearch` missing from a persona | `BRAVE_API_KEY` unset in prod | `wrangler secret put BRAVE_API_KEY`. |
+| `websearch` missing from a persona | `BRAVE_API_KEY` unset in prod | `wrangler secret put BRAVE_API_KEY`. |
+
+## Upgrading the workspace package
+
+The agent depends on three artefacts that all need to move in lockstep:
+
+1. **npm:** `@cloudflare/workspace` (pinned in
+   `apps/agent/package.json` and `packages/git-tools/package.json`).
+2. **GHCR:** `ghcr.io/cloudflare/workspace-wsd-linux-x64:<version>`
+   (the `FROM` line in `apps/agent/Dockerfile`).
+3. **Optional:** the `wsd` examples in the upstream
+   [cloudflare/workspace](https://github.com/cloudflare/workspace)
+   repo are the source-of-truth for the Sandbox DO wiring
+   (`withWorkspaceContainer` + `CloudflareContainerBackend`).
+
+To bump:
+
+```sh
+# 1. pin the npm package
+npm install --workspace=@app/agent      @cloudflare/workspace@<version>
+npm install --workspace=@cloudflare/git-tools @cloudflare/workspace@<version>
+
+# 2. update the GHCR tag in apps/agent/Dockerfile to match.
+#    Look for the `FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:` line.
+
+# 3. typecheck + tests + smoke
+cd apps/agent && npx tsc --noEmit && npx vitest run
+```
