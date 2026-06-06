@@ -1,36 +1,59 @@
 /**
  * `git_clone` — shallow-clone a public GitHub repository into the
- * agent's workspace via isomorphic-git. No Cloudflare Artifacts, no
- * fork registry, no commit/push.
+ * agent's workspace.
  *
- * Storage:
- *   The clone is written through a `@platformatic/vfs`
- *   `VirtualFileSystem` over `Workspace.provider()` — the same
- *   `node:fs`-shaped surface wsd uses internally for its FUSE mount.
- *   isomorphic-git accepts that VFS directly as its `fs` argument
- *   because `vfs.promises` already implements the `PromiseFsClient`
- *   contract (including `symlink` / `readlink`, which the dofs
- *   provider implements for real). No bespoke adapter required.
+ * The clone itself runs inside the Sandbox DO (where the live
+ * `Workspace` lives, exposing `.provider()` for the
+ * `@cloudflare/workspace/git` client). This tool is a thin AI-SDK
+ * wrapper that calls a `cloneOnSandbox` callback the caller wires
+ * up to a Sandbox RPC method (e.g. `Sandbox.gitClone(opts)`).
  *
- * Limits:
- *   `git.clone` runs entirely inside the Worker isolate; the packfile
- *   has to fit in workerd's heap, which is fine for small/medium
- *   repos at `depth: 1` (the default) but not for huge monorepos.
- *   Same trade-off the hackspace `@cloudflare/git-tools` documents.
+ * Why the indirection: `createGitClient({ ws })` reads
+ * `ws.provider()` (a `SQLiteWorkspaceProvider`), which only exists
+ * on the in-DO `Workspace` instance. The `WorkspaceStub` the agent
+ * holds across DO RPC does not expose a provider. Keeping the
+ * client construction on the Sandbox side avoids round-tripping
+ * every `node:fs` syscall isomorphic-git makes through capnweb.
+ *
+ * Limits inherit from upstream: the packfile must fit in the
+ * Sandbox DO's heap, fine for small/medium repos at `depth: 1`
+ * (the default) but not for huge monorepos.
  */
 
-import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 import { tool } from "ai";
-import git from "isomorphic-git";
-import http from "isomorphic-git/http/web";
 import { z } from "zod";
-import { createWorkspaceVfs } from "./vfs.js";
 
 const DEFAULT_DEPTH = 1;
 
+/**
+ * Result returned by the Sandbox-side handler. Matches what the
+ * old tool reported so the model's downstream behaviour doesn't
+ * change.
+ */
+export interface GitCloneResult {
+  ok: true;
+  repo: string;
+  ref: string;
+  dest: string;
+  head?: string;
+}
+
+/** Options the tool hands the Sandbox callback. */
+export interface GitCloneInvocation {
+  repo: string;
+  dest: string;
+  ref?: string;
+  depth: number;
+}
+
 export interface GitCloneToolOptions {
-  /** dofs provider over the workspace's local store. */
-  provider: SQLiteWorkspaceProvider;
+  /**
+   * Run the clone against a live `Workspace`. The caller is
+   * expected to forward to `Sandbox.gitClone(invocation)` (or
+   * equivalent) — the Sandbox DO is where `createGitClient`
+   * can actually reach `.provider()`.
+   */
+  cloneOnSandbox: (invocation: GitCloneInvocation) => Promise<GitCloneResult>;
   /** Default clone depth. Default 1 (shallow). */
   defaultDepth?: number;
 }
@@ -47,52 +70,20 @@ const inputSchema = z.object({
 
 export function createGitCloneTool(opts: GitCloneToolOptions) {
   const depthDefault = opts.defaultDepth ?? DEFAULT_DEPTH;
-  // Build the VFS once per tool instance and reuse it across clone
-  // calls — the provider is stable, and `@platformatic/vfs.create` is
-  // cheap but not free (it registers handlers on construction).
-  const vfs = createWorkspaceVfs(opts.provider);
   return tool({
     description:
       "Shallow-clone a public GitHub repository into the workspace " +
       "filesystem using isomorphic-git. Returns the resolved HEAD " +
-      "commit and total bytes written. Run this once at the start " +
-      "of triage so the rest of the tools have files to read.",
+      "commit. Run this once at the start of triage so the rest of " +
+      "the tools have files to read.",
     inputSchema,
     execute: async ({ repo, dest, ref, depth }) => {
-      const url = `https://github.com/${repo}`;
-      // Wipe any prior clone at the target. Stale `.git` directories
-      // from a previous failed call cause isomorphic-git to error
-      // out with "commit ... not available locally" — the second
-      // clone refuses to overwrite the orphaned refs.
-      try {
-        await vfs.promises.rmdir(dest);
-      } catch {
-        // Best-effort. The dir may not exist yet, or `rmdir` may
-        // ENOTEMPTY — both are fine for the next mkdir.
-      }
-      await vfs.promises.mkdir(dest, { recursive: true });
-      await git.clone({
-        fs: vfs,
-        http,
-        dir: dest,
-        url,
+      return await opts.cloneOnSandbox({
+        repo,
+        dest,
         ref,
-        singleBranch: true,
         depth: depth ?? depthDefault,
       });
-      let head: string | undefined;
-      try {
-        head = await git.resolveRef({ fs: vfs, dir: dest, ref: "HEAD" });
-      } catch {
-        head = undefined;
-      }
-      return {
-        ok: true,
-        repo,
-        ref: ref ?? "default",
-        dest,
-        head,
-      };
     },
   });
 }

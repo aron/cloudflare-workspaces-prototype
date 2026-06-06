@@ -1,21 +1,16 @@
 # Sandbox container image for the agent.
 #
-# Replaces the prior `cloudflare/sandbox`-based image with the
-# next-branch wsd daemon. The image bundles:
+# Pulls the prebuilt wsd SEA binary out of the public GHCR image
+# published by github.com/cloudflare/workspace, pinned in lockstep
+# with the `@cloudflare/workspace` npm dependency (see
+# package.json). wsd runs as PID 1 and serves the workspace RPC +
+# FUSE mount.
 #
-#   1. The prebuilt wsd SEA binary, pulled in from the
-#      cloudflare/workspace-wsd-linux-x64 image (built locally by the
-#      predeploy hook). wsd runs as PID 1 and serves the workspace
-#      RPC + FUSE mount.
-#   2. Project-specific build tools (zig, go, esbuild, wrangler)
-#      under the FUSE-mounted /workspace, so `exec` calls from the
-#      agent see them on PATH.
-#
-# Build context is the repo root (see wrangler.jsonc
-# `image_build_context: "../.."`) so the COPY paths resolve against
-# apps/agent/... — same as the old setup.
+# Layered on top: project-specific build tools (zig, go, esbuild,
+# wrangler) so `exec` calls from the agent find them on PATH inside
+# the FUSE-mounted /workspace.
 
-FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.1 AS wsd
+FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 
@@ -58,13 +53,13 @@ RUN GO_VERSION=1.23.4 && \
     /usr/local/go/bin/go version
 
 # wsd configuration. PORT and MOUNT_POINT are the defaults the
-# CloudflareContainerBackend expects. FUSE_SHIM=1 lets wsd run when
-# /dev/fuse isn't passed through (wrangler dev on macOS, CI without
-# CAP_SYS_ADMIN). Production Cloudflare Containers expose real FUSE
-# and ignore the flag.
+# CloudflareContainerBackend expects. FUSE_MOUNT=auto probes
+# /dev/fuse at startup: real FUSE under Cloudflare Containers,
+# userspace shim when /dev/fuse isn't passed through (wrangler dev
+# on macOS, CI without CAP_SYS_ADMIN). Same image works in both.
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
-ENV FUSE_SHIM=1
+ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/wsd"]

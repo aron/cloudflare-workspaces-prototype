@@ -2,7 +2,10 @@
   "name": "cloudflare-workspaces",
   "private": true,
   "workspaces": [
-    "packages/*",
+    "packages/fs-tools",
+    "packages/git-tools",
+    "packages/shared",
+    "packages/web-tools",
     "apps/*"
   ],
   "scripts": {
@@ -14,6 +17,9 @@
   },
   "optionalDependencies": {
     "@rolldown/binding-linux-arm64-gnu": "^1.0.0"
+  },
+  "overrides": {
+    "rolldown": "1.0.2"
   },
   "devDependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.0",

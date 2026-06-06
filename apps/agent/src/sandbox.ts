@@ -29,8 +29,29 @@ import {
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
+  withWorkspaceContainer,
 } from "@cloudflare/workspace";
+import { createGitClient } from "@cloudflare/workspace/git";
 import { DurableObject } from "cloudflare:workers";
+
+/**
+ * Options accepted by `Sandbox.gitClone()`. Mirrors the input
+ * schema in `@cloudflare/git-tools`'s clone tool.
+ */
+export interface GitCloneRequest {
+  repo: string;
+  dest: string;
+  ref?: string;
+  depth: number;
+}
+
+export interface GitCloneResponse {
+  ok: true;
+  repo: string;
+  ref: string;
+  dest: string;
+  head?: string;
+}
 
 export { WorkspaceProxy };
 
@@ -53,7 +74,17 @@ export interface SandboxState {
   exitCode?: number;
 }
 
-export class Sandbox extends DurableObject<SandboxEnv> {
+/**
+ * Base class for the Sandbox DO. `withWorkspaceContainer` wraps a
+ * `DurableObject` subclass with the loopback wiring the
+ * `CloudflareContainerBackend` egress needs (the runtime spawns a
+ * sibling `WorkspaceProxy` bound to this DO's id). Without the
+ * mixin, `CloudflareContainerBackend.handleFetch` doesn't know how
+ * to route the wsd-initiated `/ws` upgrade back into the backend.
+ */
+class SandboxBase extends DurableObject<SandboxEnv> {}
+
+export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   readonly #backend: CloudflareContainerBackend;
   readonly #workspace: Workspace;
   /**
@@ -66,26 +97,19 @@ export class Sandbox extends DurableObject<SandboxEnv> {
 
   constructor(ctx: DurableObjectState, env: SandboxEnv) {
     super(ctx, env);
-    const container = ctx.container;
-    if (!container) {
+    if (!ctx.container) {
       throw new Error(
         "Sandbox DO is not container-enabled. Check wrangler.jsonc " +
           "for a `containers` entry whose class_name is `Sandbox`.",
       );
     }
-    // `ctx.exports` carries loopback bindings for every top-level
-    // class exported from the Worker entrypoint. The runtime is
-    // newer than the @cloudflare/workers-types we pin, so cast
-    // through `any` here. Drop the cast when types catch up.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const exports = (ctx as any).exports as {
-      WorkspaceProxy: (init: { props: Record<string, unknown> }) => Fetcher;
-    };
     this.#backend = new CloudflareContainerBackend({
-      container: () => container,
-      egress: exports.WorkspaceProxy({
-        props: { binding: "Sandbox", id: ctx.id.toString() },
-      }),
+      // `withWorkspaceContainer` makes this DO a `ContainerHostHolder`
+      // (it implements `getWorkspaceContainer()` against
+      // `ctx.container`). Passing `() => this` is the documented
+      // pattern from examples/wsd-container.
+      container: () => this,
+      workspace: { binding: "Sandbox", id: ctx.id.toString() },
     });
     this.#workspace = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
@@ -93,23 +117,67 @@ export class Sandbox extends DurableObject<SandboxEnv> {
     });
   }
 
+  /**
+   * Forward every container-routed request to the backend. wsd's
+   * outbound `/ws` upgrade lands here via the loopback fetcher
+   * `withWorkspaceContainer` wires up; the backend's own handler
+   * knows how to dispatch.
+   */
   override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/ws") {
-      return this.#backend.handleFetch(request);
-    }
-    return new Response("not found", { status: 404 });
+    return this.#backend.handleFetch(request);
   }
 
   /**
    * Connect (if necessary) and hand out a Workspace stub the caller
-   * can drive over RPC. The stub is a lazy RpcTarget that proxies
+   * can drive out across RPC. The stub is a lazy RpcTarget that proxies
    * every call back into this DO; it owns no resources itself.
    */
   async getWorkspace(): Promise<WorkspaceStub> {
     await this.#workspace.ready();
     this.#lastChange = Date.now();
     return this.#workspace.stub();
+  }
+
+  /**
+   * Shallow-clone a public GitHub repo into the workspace. Runs
+   * here (not on the Agent DO) because `@cloudflare/workspace/git`
+   * needs `Workspace.provider()`, which only exists on the in-DO
+   * `Workspace` instance — the `WorkspaceStub` we hand the agent
+   * doesn't expose a provider.
+   *
+   * The git client is built per-call. It's cheap enough
+   * (`@platformatic/vfs.create()` + an isogit cache object) that
+   * caching adds more code than it saves; revisit if we add other
+   * git tools (`diff`, `status`) that should share a packfile cache
+   * with `clone`.
+   */
+  async gitClone(opts: GitCloneRequest): Promise<GitCloneResponse> {
+    await this.#workspace.ready();
+    this.#lastChange = Date.now();
+    const git = createGitClient({ ws: this.#workspace });
+    const url = `https://github.com/${opts.repo}`;
+    // Wipe any prior clone at the target. Stale `.git` directories
+    // from a previous failed call cause isomorphic-git to error out
+    // with "commit ... not available locally" — the second clone
+    // refuses to overwrite the orphaned refs.
+    await this.#workspace.fs.rm(opts.dest, { recursive: true, force: true });
+    await this.#workspace.fs.mkdir(opts.dest, { recursive: true });
+    await git.clone({
+      url,
+      dir: opts.dest,
+      ref: opts.ref,
+      depth: opts.depth,
+      singleBranch: true,
+    });
+    // `createGitClient` doesn't expose `resolveRef`; the upstream
+    // tool returns no `head` either when it isn't available, so we
+    // mirror that behaviour rather than reaching past the client.
+    return {
+      ok: true,
+      repo: opts.repo,
+      ref: opts.ref ?? "default",
+      dest: opts.dest,
+    };
   }
 
   // ── Warm-pool surface ────────────────────────────────────────────

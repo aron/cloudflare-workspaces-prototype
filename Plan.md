@@ -4,10 +4,51 @@
 
 Phase 1: ✅ Done.
 Phase 2: 🟡 Build-green. Runtime-untested. Known regressions listed.
-Phase 3+: ⏳ Pending.
+Phase 3 (revised): ✅ Done — vendor tree deleted, agent on
+published `@cloudflare/workspace@0.0.0-alpha.3` + GHCR wsd image.
+Phase 4: ⏳ Pending. Regression #7 (agent-suite
+vitest-pool-workers `SyntaxError: Invalid or unexpected token`)
+*did not* self-heal with the swap; still six files failing at
+module evaluation.
 
-Work landed in branch `port-workspace-next` (off `hackspace`). Five
-commits so far, each rebaseable on its own.
+Work landed in branch `port-workspace-next` (off `hackspace`).
+
+## Curveball: the upstream package is now published
+
+The `next` branch was promoted to https://github.com/cloudflare/workspace
+and published to npm as `@cloudflare/workspace`, current tag
+`0.0.0-alpha.3`. A matching wsd container image is on GHCR at
+`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3`.
+
+Notable facts that change the plan:
+
+1. **Only `@cloudflare/workspace` is on npm.** `dofs`,
+   `workspace-rpc`, and `workspace-wsd` are **not** published as
+   separate packages — they're bundled into the single
+   `@cloudflare/workspace` tarball at build time (rolldown bundle
+   in `dist/index.js` plus a re-exported `dist/git.js`).
+2. **The wsd SEA binary ships in the tarball** as
+   `dist/bin/wsd-linux-x64` (~120 MB unpacked), but for container
+   use you don't need it locally: pull the GHCR image instead.
+3. **`SQLiteWorkspaceProvider` is exported directly from
+   `@cloudflare/workspace`.** Consumers no longer import from
+   `@cloudflare/dofs` at all.
+4. **There is a `@cloudflare/workspace/git` subpath export.**
+   `createGitClient({ ws })` wraps `@platformatic/vfs` +
+   isomorphic-git and exposes `clone()` / `diff()`. This collapses
+   `packages/git-tools/src/tools/vfs.ts` to zero lines and unblocks
+   the disabled `git_clone` tool (regression #5).
+5. **wsd accepts `FUSE_MOUNT=auto`** (replaces the older
+   `FUSE_SHIM=1`). Same image works under wrangler dev (userspace
+   shim, no `/dev/fuse`) and Cloudflare Containers (real FUSE).
+6. **Peer deps on the published package** are optional and only
+   needed if you use the git subexport: `@platformatic/vfs`,
+   `diff`, `isomorphic-git`. We already pin all three (transitively
+   through the vendored workspace + git-tools).
+
+Net effect: Phase 3 becomes a deletion exercise. The five vendored
+packages disappear; the agent depends on one published npm module
+and one GHCR image, both pinned at `0.0.0-alpha.3`.
 
 ## Decisions (resolved earlier)
 
@@ -169,41 +210,165 @@ Four commits:
    logs) and probably a `deps.optimizer` or `external` entry for
    one of the new packages.
 
-## Phase 3 — Container / wsd plumbing
+## Phase 3 (revised) — Drop the vendor tree, consume the published package
 
-Pending. Wsd binary builds locally via `npm run build:bin
---workspace @cloudflare/workspace-wsd` once
-`@cloudflare/workspace-wsd-linux-x64`'s `bin/wsd` is staged. The
-`predeploy` hook on `@app/agent` calls `npm run
-build --workspace=@cloudflare/workspace-wsd` (not `build:bin`); for
-a real deploy we'd want `npm run build:docker --workspace
-@cloudflare/workspace-wsd` so the
-`cloudflare/workspace-wsd-linux-x64` image referenced from the
-agent Dockerfile actually exists locally. **Action item:** update
-`apps/agent/package.json`'s `predeploy` to run
-`build:docker --workspace @cloudflare/workspace-wsd` once we're
-confident the build pipeline works on the deploy machine.
+Single commit, mechanical. No new runtime behaviour; we're just
+swapping the source of the same code.
 
-`TestBackend` path for local dev (run wsd as a host process,
-point the agent at it) not yet wired.
+### 3a — Add the npm dependency
+
+- `apps/agent/package.json`:
+  - `dependencies["@cloudflare/workspace"]`: `*` → `^0.0.0-alpha.3`.
+  - Add `@platformatic/vfs`, `diff`, `isomorphic-git` to
+    `dependencies` (currently transitive through the vendored
+    git-tools; once that package retargets they need to be direct
+    or git-tools needs to keep them as peers — see 3c).
+  - Drop the `predeploy` script entirely. No more local wsd image
+    build, no more `@cloudflare/workspace` build step — both come
+    from npm / GHCR. `predeploy` becomes
+    `npm run build --workspace=@app/frontend` (or move that into
+    `deploy` and delete the hook).
+- `packages/git-tools/package.json`:
+  - Drop `@cloudflare/dofs` from `peerDependencies` and
+    `devDependencies`.
+  - Keep `@cloudflare/workspace` (it's now where
+    `SQLiteWorkspaceProvider` lives).
+  - Keep `@platformatic/vfs` only if we don't move clone over to
+    the new `/git` subexport. Plan is to move it, so drop it.
+- Root `package.json`:
+  - Remove `packages/dofs`, `packages/workspace-rpc`,
+    `packages/workspace`, `packages/wsd`, `packages/wsd-linux-x64`
+    from `workspaces`.
+  - Optionally pin the alpha tag in `overrides` so transitive
+    consumers can't drift:
+    `"overrides": { "@cloudflare/workspace": "0.0.0-alpha.3" }`.
+
+### 3b — Delete the vendored sources
+
+```bash
+git rm -r packages/dofs packages/workspace-rpc packages/workspace \
+          packages/wsd packages/wsd-linux-x64
+```
+
+Also clear out the uncommitted leftovers in the working tree:
+`packages/wsd-linux-x64/Dockerfile.build`,
+`packages/wsd-linux-x64/warp-ca.crt`, the modified
+`packages/wsd/package.json` (`fuse-native` optional patch — no
+longer needed; the published binary doesn't dlopen libfuse on
+non-FUSE hosts when `FUSE_MOUNT=auto` picks the shim).
+
+### 3c — Retarget `packages/git-tools`
+
+- `src/tools/vfs.ts`: delete. The `/git` subexport on the published
+  package owns this glue.
+- `src/tools/clone.ts`: rewrite against
+  `@cloudflare/workspace/git`. Mirror
+  `examples/think/src/tools/git/clone.ts` from the upstream repo:
+  takes a `Workspace` (not a `SQLiteWorkspaceProvider`), builds the
+  client once via `createGitClient({ ws, cache })`, calls
+  `git.clone({ url, dir, ref, depth, singleBranch: true })`.
+  - The shared isogit cache (`cache?: Record<string, unknown>`)
+    matters for any future `diff` / `walk` tool; thread it through
+    even though `clone` is the only consumer today.
+- `src/index.ts`: update the exported `createGitCloneTool`
+  signature — `{ ws: Workspace }` instead of
+  `{ provider: SQLiteWorkspaceProvider }`.
+- `apps/agent/src/agent.ts`: re-enable `git_clone` in `buildTools`,
+  passing the cached `WorkspaceStub` from `getWorkspace()`. The
+  upstream `WorkspaceLike` is duck-typed on `.provider()`, but the
+  stub *does not* implement `.provider()` directly — only the
+  Workspace in the Sandbox DO does. **Open question:** does
+  `createGitClient` accept a `WorkspaceStub`, or do we need a
+  passthrough RPC method on `Sandbox` (e.g.
+  `Sandbox.gitClone(opts)`) that builds the client on the DO side?
+  Inspect `createGitClient`'s use of `ws.provider()` to confirm.
+  Likely answer: git has to run on the Sandbox DO, so add
+  `Sandbox.gitClone(opts)` and let the agent invoke it by RPC.
+
+### 3d — Container image
+
+- `apps/agent/Dockerfile`:
+  - `FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3 AS wsd`
+    (replaces the local `cloudflare/workspace-wsd-linux-x64:0.1.1`).
+  - `ENV FUSE_MOUNT=auto` (replaces `ENV FUSE_SHIM=1`).
+  - Keep the project toolchain layers (zig, go, esbuild,
+    wrangler) — that's hackspace-specific.
+- `apps/agent/wrangler.jsonc`: no schema change. `image_build_context`
+  can drop to `.` (or be removed; the FROM is now an external image
+  pull and the build only needs the toolchain layer context).
+
+### 3e — Verify (actual results)
+
+- `npm install`: ✅ (after cleaning the npm metadata cache; the
+  proxy had a stale view of `tinyglobby` / `@oxc-project/types`).
+- Root `overrides.rolldown = "1.0.2"` added because 1.0.3 pins
+  `@oxc-project/types@=0.133.0` which isn't published yet.
+- `apps/agent` typecheck: ✅
+- `apps/agent` agent-suite tsconfig typecheck: ✅
+- `packages/git-tools` typecheck: ✅
+- `apps/agent` unit tests (`npx vitest run`): ✅ 227/227 pass
+- `apps/agent` agent-suite (`vitest-pool-workers`): ❌ still 6 files
+  fail with `SyntaxError: Invalid or unexpected token`. Identical
+  symptom to pre-swap state; regression #7 below stays open.
+
+### 3f — API surface notes for future readers
+
+While porting, the published alpha.3 surface differed from the
+vendored snapshot in two places that bit us:
+
+1. **`CloudflareContainerBackend` constructor.** No longer takes
+   `{ container, egress }`. New shape is
+   `{ container: () => ContainerHostHolder, workspace: WorkspaceRef }`.
+   `ContainerHostHolder` is satisfied by the DO itself when it's
+   wrapped in `withWorkspaceContainer(...)`; the egress fetcher is
+   wired up by that mixin via `ctx.exports.WorkspaceProxy` so
+   `WorkspaceProxy` must still be re-exported from the worker
+   entrypoint. Pattern lifted verbatim from
+   `examples/wsd-container/src/index.ts`.
+2. **`GitClient.clone` returns `void`.** No `head` field. Upstream's
+   `examples/think` tool drops `head` from the tool result, so we
+   match that — the model never used the field meaningfully
+   anyway, but it's worth knowing if a caller did.
 
 ## Phase 4 — Tests, docs, cleanup
 
-- Diagnose and fix the agent-suite vitest-pool-workers regression.
+- **Regression #7 survived Phase 3.** All six agent-suite test
+  files still fail with `SyntaxError: Invalid or unexpected token`
+  at `node:vm.runInThisContext`. So it isn't a node:sqlite / dofs
+  bundling quirk — the published rolldown bundle has the same
+  effect. Next diagnostic step: run with `--no-isolate` plus
+  `VITE_DEBUG=1`, or strip imports one at a time from a single
+  agent-suite test until the error goes away, to identify which
+  module's evaluated output trips workerd's parser. Likely culprit
+  is something in `@cloudflare/workspace`'s `dist/index.js`
+  (capnweb? a top-level await?) that vitest-pool-workers can't
+  ingest as-is. Add a `deps.optimizer` / `external` entry once the
+  offender is identified.
 - End-to-end smoke test: `wrangler dev`, create an agent, run a
-  read/write/exec sequence against the container.
-- Update `apps/agent/README.md` and the root README for the wsd-
-  based design.
-- Delete `apps/agent/sandbox/` references in docs/markdown.
+  read/write/exec sequence against the container, confirm `wsd`
+  starts under both `FUSE_MOUNT=auto` paths (shim under dev, real
+  FUSE in Containers).
+- Re-evaluate the remaining regressions now that the vendor tree
+  is gone:
+  - #1 streaming exec — still needs a framed transport on
+    `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3;
+    track in a separate issue.
+  - #3 `/tar` — reimplement via `Workspace.fs.find` + `readFile`,
+    or drop the route.
+  - #4 skills R2 mount — rebuild via direct R2 reads, materialised
+    into the workspace before the first turn.
+  - #5 `git_clone` — closed by Phase 3c.
+  - #6 `worker_deploy` / `worker_fetch` — separate design.
+- Update `apps/agent/README.md` and the root README:
+  - Drop references to the vendored packages.
+  - Document the alpha.3 pin (npm + GHCR) and how to bump them in
+    lockstep.
+  - Note `FUSE_MOUNT=auto` semantics for local dev vs production.
 
-## Reproduce / verify
+## Reproduce / verify (post-Phase 3)
 
 ```bash
 git checkout port-workspace-next
 npm install
-npm run build --workspace=@cloudflare/dofs \
-              --workspace=@cloudflare/workspace-rpc \
-              --workspace=@cloudflare/workspace \
-              --workspace=@cloudflare/workspace-wsd
 cd apps/agent && npx tsc --noEmit && npx vitest run
 ```

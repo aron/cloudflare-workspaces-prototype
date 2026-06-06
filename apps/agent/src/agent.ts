@@ -37,6 +37,7 @@ import type { WorkspaceStub } from "@cloudflare/workspace";
 import { resolveContainerId, releaseContainer } from "./pool.js";
 import type { Sandbox } from "./sandbox.js";
 import { adaptForFsTools } from "./workspace-adapter.js";
+import { createGitCloneTool } from "@cloudflare/git-tools";
 
 import {
   createEditTool,
@@ -847,6 +848,8 @@ export class Agent extends Think<Env> {
     // this._workspaceStub so the underlying RPC handshake only runs
     // on first contact.
     const getWs = () => this.getWorkspace();
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
       ({ [name]: def });
 
@@ -945,10 +948,23 @@ export class Agent extends Think<Env> {
         execute: this._execTool(),
       })),
 
-      // git_clone is temporarily disabled. The clone tool wants the
-      // dofs SQLiteWorkspaceProvider, which lives inside the Sandbox
-      // DO and isn't reachable across DO RPC today. Re-enabled when
-      // we add a streaming/provider passthrough on Sandbox.
+      ...pick("git_clone", createGitCloneTool({
+        // Forward the clone to the Sandbox DO, which is where the
+        // live Workspace (and therefore `Workspace.provider()`) is
+        // reachable. The agent only holds a WorkspaceStub, which
+        // doesn't expose a provider.
+        cloneOnSandbox: async (invocation) => {
+          // Force the sandbox stub to be resolved + cached. The
+          // gitClone RPC method is defined on Sandbox itself, not
+          // on the WorkspaceStub we hand to the rest of the tools.
+          await self.getWorkspace();
+          const sandbox = self._sandboxStub;
+          if (!sandbox) {
+            throw new Error("git_clone: sandbox stub not resolved");
+          }
+          return await sandbox.gitClone(invocation);
+        },
+      })),
     };
   }
 
