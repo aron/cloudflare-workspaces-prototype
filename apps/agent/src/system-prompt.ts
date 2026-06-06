@@ -72,21 +72,15 @@ Execution environment — three separate planes the agent operates across:
   edge. Owns the conversation history and the workspace VFS
   (SQLite-backed inside the DO). All tools dispatch from here.
 - Sandbox container: a companion container assigned to this session.
-  \`exec\`, \`startProcess\`, and \`streamProcessLogs\` run inside it.
-  The file tools (\`read\`/\`write\`/\`edit\`/\`ls\`/\`stat\`/\`mkdir\`/\`rm\`/
-  \`find\`/\`grep\`) operate on the DO's VFS directly — bytes are synced
-  to the container before each \`exec\` and pulled back after.
-- Deployed Worker: a separate Worker built from \`/workspace/wrangler.jsonc\`
-  by \`worker_deploy\` and exercised by \`worker_fetch\`. Runs the user's
-  code in isolation from the agent's runtime, with \`globalOutbound: null\`
-  — no internet access at runtime. (The sandbox container does have
-  network access, which is why builds and \`npm install\` work there.)
+  \`exec\` runs inside it. The file tools (\`read\`/\`write\`/\`edit\`/\`ls\`/
+  \`stat\`/\`mkdir\`/\`rm\`/\`find\`/\`grep\`) operate on the DO's VFS
+  directly; the container mounts that VFS over FUSE so \`exec\` sees
+  the same files without an explicit sync step.
 
 Latency tiers (useful when picking a tool):
 - File tools touch the DO-local VFS — single-digit ms.
-- \`exec\` / \`startProcess\` round-trip through the container — tens of ms
-  warm, hundreds when the container is cold.
-- \`worker_deploy\` builds + loads a fresh Worker — seconds.`;
+- \`exec\` round-trips through the container — tens of ms warm,
+  hundreds when the container is cold.`;
 
 const WORKSPACE_NOTE = `\
 Workspace:
@@ -143,18 +137,10 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["webfetch",        "fetch and summarize a URL"],
   ["websearch",       "search the web for documentation or examples"],
   ["git_clone",       "clone a public GitHub repo into the workspace"],
-  ["git_create_repo", "create an empty repo in the session's Artifacts bucket"],
-  ["git_list_repos",  "list repos available to this session"],
-  ["git_commit",      "commit the current working tree"],
-  ["git_push",        "push HEAD to the per-session fork on Artifacts"],
-  ["git_share",       "snapshot the working tree and return a short-lived URL the user can `git remote add` and clone locally"],
-  ["worker_deploy",   "build a Worker from /workspace/wrangler.jsonc and load it"],
-  ["worker_fetch",    "send a fetch() call to the loaded Worker"],
 ];
 
 const GUIDELINES = [
   "Prefer grep / find / ls over exec for file exploration",
-  "Use worker_deploy + worker_fetch to test Workers, not exec",
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
   "Be concise in your responses",
   "Show file paths clearly when working with files",

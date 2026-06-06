@@ -1,9 +1,17 @@
 {
   "$schema": "../../../../node_modules/wrangler/config-schema.json",
   "name": "agent-tests",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-06",
   "compatibility_flags": [
     "nodejs_compat",
+    // vitest-pool-workers loads SSR-transformed modules via require(), and
+    // the wrapper bodies contain `await __vite_ssr_import__(...)` calls
+    // (top-level await inside require). The `disable_top_level_await_in_require`
+    // flag is on by default for any compat date >= 2024-12-02, which makes
+    // workerd reject those modules with an opaque
+    // `SyntaxError: Invalid or unexpected token`. Re-enable the legacy
+    // behaviour explicitly so the test suite can load the agent.
+    "enable_top_level_await_in_require",
     "enable_nodejs_tty_module",
     "enable_nodejs_fs_module",
     "enable_nodejs_http_modules",

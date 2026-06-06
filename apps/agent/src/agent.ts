@@ -131,7 +131,7 @@ export class Agent extends Think<Env> {
   /** Tools that read state but never mutate it — free in the budget. */
   private static readonly READ_ONLY_TOOLS = new Set<string>([
     "read", "ls", "stat", "find", "grep",
-    "webfetch", "websearch", "git_list_repos",
+    "webfetch", "websearch",
   ]);
 
   /**
@@ -249,6 +249,21 @@ export class Agent extends Think<Env> {
     // evictions, so the old _recoverInflightExecs path is gone; a
     // wedged exec is now the user's Stop button to clear.
     this.ctx.waitUntil(this.warmupWorkspace().catch(() => {}));
+    // Skills discovery runs directly against the R2 bucket. Before
+    // the workspace-next port this rode the R2Mount in the Workspace;
+    // the new package doesn't expose that surface, so we hit R2
+    // directly and let the system prompt render the result. Failures
+    // are swallowed — an empty skill list is preferable to a turn that
+    // never starts.
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          this._skills = await discoverSkills(this.env.SKILLS);
+        } catch {
+          this._skills = [];
+        }
+      })(),
+    );
   }
 
   /* Removed: exec inflight recovery.
@@ -332,6 +347,20 @@ export class Agent extends Think<Env> {
     }, async (span) => {
       span.set("hackspace.messages", () => this.messages.length);
       this.ctx.waitUntil(this.warmupWorkspace().catch(() => {}));
+
+      // Materialise the skill list before the prompt builder runs. The
+      // discovery itself is kicked off in `onStart`, but `beforeTurn`
+      // can fire before that finishes (or in tests, where `onStart`
+      // hasn't been called yet on the fresh DO). Awaiting here adds at
+      // most one R2 `list` round-trip on a cold turn; subsequent turns
+      // reuse the cached array.
+      if (this._skills.length === 0) {
+        try {
+          this._skills = await discoverSkills(this.env.SKILLS);
+        } catch {
+          // Leave _skills empty so the system prompt still renders.
+        }
+      }
 
       // Patch dangling tool calls before the model sees them. A tool
       // result that never lands (exec timeout, container loss, DO eviction
@@ -1260,8 +1289,8 @@ export class SubAgent extends Think<Env> {
 
 /**
  * Race a tool's work against the turn's abort signal. The container/sandbox
- * APIs we call from `exec`/`worker_deploy`/`worker_fetch` don't all accept
- * an `AbortSignal`, so when the user clicks Stop we resolve the tool call
+ * APIs we call from `exec` don't all accept an `AbortSignal`, so when
+ * the user clicks Stop we resolve the tool call
  * with an `aborted` result and let the underlying work finish in the
  * background. The Think loop sees the abort on the model side regardless,
  * so the turn unwinds even if the container keeps churning briefly.

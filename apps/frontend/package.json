@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.190",
-    "@cloudflare/ai-chat": "^0.7.1",
+    "@cloudflare/ai-chat": "^0.8.3",
     "@radix-ui/react-collapsible": "^1.1.12",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-select": "^2.2.6",
@@ -23,7 +23,7 @@
     "@streamdown/math": "^1.0.2",
     "@streamdown/mermaid": "^1.0.2",
     "@app/shared": "*",
-    "agents": "^0.13.2",
+    "agents": "^0.14.3",
     "ai": "^6.0.188",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

@@ -56,12 +56,6 @@ const result = await sb.exec("python /tmp/program.py");
 return Response.json(result);
 ```
 
-**Build → load workflow** (this app's `worker_deploy` tool):
-1. Push the source tree to the container's filesystem.
-2. `sb.exec("wrangler deploy --dry-run", { cwd: "/workspace" })`.
-3. Read the produced bundle back out.
-4. Load it into a Dynamic Worker via `@cloudflare/workspace/worker-sandbox`.
-
 ## Reference
 
 ```

@@ -33,15 +33,6 @@ describe("buildSystemPrompt — identity & shape", () => {
     expect(prompt).toMatch(/All files live under \/workspace/);
   });
 
-  // The Cloudflare-Worker egress posture moved out of WORKSPACE_NOTE
-  // and into ARCHITECTURE_NOTE alongside the other plane-by-plane
-  // details. Keep the bullet's wording asserted somewhere so a
-  // future copy-edit can't drop it silently.
-  it("calls out that the deployed Worker has no outbound network", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/globalOutbound: null/);
-    expect(prompt).toMatch(/sandbox container does have/);
-  });
 });
 
 describe("buildSystemPrompt — execution environment", () => {
@@ -51,13 +42,12 @@ describe("buildSystemPrompt — execution environment", () => {
   // answers — pin the structural claims here so a future copy-edit
   // can't accidentally collapse the three planes back together.
 
-  it("names the three planes the agent operates across", () => {
+  it("names the two planes the agent operates across", () => {
     const prompt = buildSystemPrompt({});
     // Each plane has a heading-style bullet — the exact name is the
     // anchor the model uses when summarising back to the user.
     expect(prompt).toMatch(/- Agent \(this conversation\):/);
     expect(prompt).toMatch(/- Sandbox container:/);
-    expect(prompt).toMatch(/- Deployed Worker:/);
   });
 
   it("identifies the agent as a Durable Object owning the VFS", () => {
@@ -67,49 +57,27 @@ describe("buildSystemPrompt — execution environment", () => {
     expect(prompt).toMatch(/SQLite/);
   });
 
-  it("places exec/startProcess in the sandbox container, not the DO", () => {
+  it("places exec in the sandbox container, not the DO", () => {
     const prompt = buildSystemPrompt({});
-    // The section explicitly says these tools run inside the
-    // container so the model doesn't conflate them with the cheap
-    // in-DO file tools.
-    expect(prompt).toMatch(/`exec`, `startProcess`[\s\S]*run inside it/);
+    // The section explicitly says exec runs inside the container so
+    // the model doesn't conflate it with the cheap in-DO file tools.
+    expect(prompt).toMatch(/`exec` runs inside it/);
   });
 
   it("explains that file tools sync to the container around exec", () => {
     const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/synced/);
-    expect(prompt).toMatch(/before each `exec`/);
-    expect(prompt).toMatch(/pulled back after/);
-  });
-
-  it("distinguishes the deployed Worker from the agent runtime", () => {
-    const prompt = buildSystemPrompt({});
-    // The deployed Worker is a separate execution plane built by
-    // worker_deploy — not the same Worker the agent is in.
-    expect(prompt).toMatch(/Deployed Worker:[\s\S]*worker_deploy/);
-    expect(prompt).toMatch(/isolation from the agent's runtime/);
-  });
-
-  it("contrasts deployed Worker (no egress) with sandbox container (has egress)", () => {
-    // The most common confusion this section heads off: a user asks
-    // "can my Worker call an API?" — the answer is no, but builds and
-    // npm install work because the container itself does have
-    // network. Pin both halves of the contrast.
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/globalOutbound: null/);
-    expect(prompt).toMatch(/no internet access at runtime/);
-    expect(prompt).toMatch(/sandbox container does have[\s\S]*network/);
+    expect(prompt).toMatch(/FUSE/);
+    expect(prompt).toMatch(/same files/);
   });
 
   it("lists latency tiers so the model can pick tools accordingly", () => {
     // The workspace-ignore section already mentions exec round-trips;
-    // here we make the relative cost of all three tiers explicit, so
-    // the perf hint isn't tied only to the ignore-list discussion.
+    // here we make the relative cost of both tiers explicit, so the
+    // perf hint isn't tied only to the ignore-list discussion.
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/Latency tiers/);
     expect(prompt).toMatch(/File tools[\s\S]*single-digit ms/);
     expect(prompt).toMatch(/`exec`[\s\S]*tens of ms/);
-    expect(prompt).toMatch(/`worker_deploy`[\s\S]*seconds/);
   });
 
   it("places the architecture section between identity and the tool list", () => {
@@ -135,9 +103,7 @@ describe("buildSystemPrompt — tool list", () => {
       "find", "grep",
       "exec",
       "webfetch", "websearch",
-      "git_clone", "git_create_repo", "git_list_repos",
-      "git_commit", "git_push", "git_share",
-      "worker_deploy", "worker_fetch",
+      "git_clone",
     ];
     for (const name of expected) {
       expect(prompt).toMatch(new RegExp(`\\n- ${name}: `));
@@ -149,10 +115,7 @@ describe("buildSystemPrompt — tool list", () => {
     expect(prompt).toMatch(/In addition to the tools above, you may have access to other custom tools/);
   });
 
-  it("describes git_share as the way to hand a URL back to the user for local checkout", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/\n- git_share: [^\n]*URL/);
-  });
+
 });
 
 describe("buildSystemPrompt — capabilities overview", () => {
@@ -193,7 +156,6 @@ describe("buildSystemPrompt — guidelines", () => {
     expect(prompt).toMatch(/Prefer grep \/ find \/ ls over exec/);
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
-    expect(prompt).toMatch(/Use worker_deploy \+ worker_fetch to test Workers, not exec/);
   });
 });
 

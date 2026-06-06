@@ -27,8 +27,7 @@ const EXPECTED_TOOLS = [
   "find", "grep",
   "exec",
   "webfetch", "websearch",  // websearch only because BRAVE_API_KEY is set in wrangler.test
-  "worker_deploy", "worker_fetch",
-  "git_clone", "git_commit", "git_push", "git_share",
+  "git_clone",
 ] as const;
 
 describe("Agent — getTools()", () => {

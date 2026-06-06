@@ -6,10 +6,11 @@ Phase 1: ✅ Done.
 Phase 2: 🟡 Build-green. Runtime-untested. Known regressions listed.
 Phase 3 (revised): ✅ Done — vendor tree deleted, agent on
 published `@cloudflare/workspace@0.0.0-alpha.3` + GHCR wsd image.
-Phase 4: ⏳ Pending. Regression #7 (agent-suite
-vitest-pool-workers `SyntaxError: Invalid or unexpected token`)
-*did not* self-heal with the swap; still six files failing at
-module evaluation.
+Phase 4: 🟢 In progress. Agent-suite green (13/13), unit tests green
+(223/223). Regression #7 root-caused and fixed (TC39 decorator
+transform). Regression #4 (skills R2 mount) fixed alongside it.
+Remaining: smoke test under `wrangler dev`; regressions #1
+(streaming exec), #3 (`/tar` route).
 
 Work landed in branch `port-workspace-next` (off `hackspace`).
 
@@ -332,18 +333,64 @@ vendored snapshot in two places that bit us:
 
 ## Phase 4 — Tests, docs, cleanup
 
-- **Regression #7 survived Phase 3.** All six agent-suite test
-  files still fail with `SyntaxError: Invalid or unexpected token`
-  at `node:vm.runInThisContext`. So it isn't a node:sqlite / dofs
-  bundling quirk — the published rolldown bundle has the same
-  effect. Next diagnostic step: run with `--no-isolate` plus
-  `VITE_DEBUG=1`, or strip imports one at a time from a single
-  agent-suite test until the error goes away, to identify which
-  module's evaluated output trips workerd's parser. Likely culprit
-  is something in `@cloudflare/workspace`'s `dist/index.js`
-  (capnweb? a top-level await?) that vitest-pool-workers can't
-  ingest as-is. Add a `deps.optimizer` / `external` entry once the
-  offender is identified.
+### Done
+
+- **Cloudflare dep bumps.** `@cloudflare/ai-chat` 0.7→20.8,
+  `@cloudflare/think` 0.7→0.8, `agents` 0.13→0.14,
+  `@cloudflare/workers-types` pin bumped to 4.20260606. All
+  caret-respected; transitive `node_modules/agents` is now a single
+  copy at 0.14.3.
+- **Regression #7 — agent-suite vitest-pool-workers
+  `SyntaxError`.** Root-caused: vite's SSR transform leaves
+  `@callable()` decorators in place, oxc/rolldown's default
+  transformer doesn't implement TC39 stage-3 decorators yet
+  ([oxc#9170]), so workerd's V8 rejects the module at load time
+  with an opaque syntax error (no line/column — attributes to
+  whichever file first awaits an import of the offending module).
+  Diagnostic path: patched `node_modules/vitest/.../module-evaluator.js`
+  to re-parse failed source with Acorn before throwing; that gave a
+  real `loc` pointing at `@(0,__vite_ssr_import_N__.callable)()`.
+  Fix: add `@rolldown/plugin-babel` + `@babel/plugin-proposal-decorators`
+  (`version: "2023-11"`) to the agent-suite vitest config. Same
+  pattern as `cloudflare/agents/packages/agents/src/vite.ts`,
+  inlined locally so we don't pull in the rest of that plugin's
+  surface (skills import rewrite, turndown stub).
+- **Regression #4 — skills R2 mount.** `discoverSkills` rewritten
+  to walk the R2 binding directly instead of going through the old
+  `R2Mount`. Wired into both `onStart` (background prime) and
+  `beforeTurn` (synchronous fallback when `_skills` is empty so a
+  cold turn from a fresh DO still gets the prompt block populated).
+- **Compat date.** Test wrangler bumped from 2026-01-28 to
+  2026-06-06 so the test runtime matches production capability
+  surface. Also enables
+  [`enable_top_level_await_in_require`](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#disable-top-level-await-in-require)
+  defensively — vite's SSR transform emits `await __vite_ssr_import__(...)`
+  at module top level inside the `require()`d wrapper, and the
+  default-on `disable_top_level_await_in_require` flag rejects
+  that. Not the actual cause of the original failure (decorators
+  were), but the same wrapper would trip it eventually, so leave
+  it set.
+- **Dropped `worker_deploy` / `worker_fetch` references.** The
+  tools themselves were removed in Phase 2; this pass cleaned up
+  stale references in the system prompt, agent tool tests,
+  README, and the `cloudflare-workers` / `sandbox-sdk` /
+  `capabilities-overview` skills.
+
+### Remaining
+
+- End-to-end smoke test: `wrangler dev`, create an agent, run a
+  read/write/exec sequence against the container, confirm `wsd`
+  starts under both `FUSE_MOUNT=auto` paths (shim under dev, real
+  FUSE in Containers).
+- Regression #1 (streaming exec). Still needs a framed transport
+  on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
+  Track in a separate issue.
+- Regression #3 (`/tar` route returns 501). Reimplement via
+  `Workspace.fs.find` + `readFile`, or drop the route.
+- Update `apps/agent/README.md` and the root README: drop the
+  vendored package references, document the alpha.3 pin (npm +
+  GHCR) and how to bump them in lockstep, note `FUSE_MOUNT=auto`
+  semantics.
 - End-to-end smoke test: `wrangler dev`, create an agent, run a
   read/write/exec sequence against the container, confirm `wsd`
   starts under both `FUSE_MOUNT=auto` paths (shim under dev, real

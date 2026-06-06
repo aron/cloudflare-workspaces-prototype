@@ -122,11 +122,9 @@ npx wrangler tail   # follow logs while you exercise the UI
 
 Per-persona smoke tests:
 
-- **cloudflare-worker** — ask it to build a tiny Worker and call
-  `worker_deploy` + `worker_fetch`.
-- **zig** / **go** — ask it to write, compile (`exec`) and run (`run`)
-  a small program. Confirms the Sandbox container started and the WASM
-  Dynamic Worker loader is wired.
+- **zig** / **go** — ask it to write, compile (`exec`) and run a small
+  program. Confirms the Sandbox container started and wsd is serving
+  the FUSE-mounted workspace.
 - Any persona — file ops (`read`/`write`/`edit`) and, if `BRAVE_API_KEY`
   is set, `webSearch`.
 
