@@ -8,8 +8,11 @@ Phase 3 (revised): ✅ Done — vendor tree deleted, agent on
 published `@cloudflare/workspace@0.0.0-alpha.3` + GHCR wsd image.
 Phase 4: 🟢 In progress. Agent-suite green (13/13), unit tests green
 (223/223). Regressions #3 (`/tar` route), #4 (skills R2 mount),
-#7 (decorator transform) closed. Remaining: smoke test under
-`wrangler dev`; regression #1 (streaming exec).
+#7 (decorator transform) closed. `wrangler dev` smoke test passes
+for the worker side (DOs migrate, App/Room boot, `/tar` returns
+a valid POSIX ustar). The full container path still wants a
+WARP-aware Docker build before we can exercise wsd in-loop.
+Remaining: regression #1 (streaming exec); README updates.
 
 Work landed in branch `port-workspace-next` (off `hackspace`).
 
@@ -334,6 +337,23 @@ vendored snapshot in two places that bit us:
 
 ### Done
 
+- **`wrangler dev` smoke (worker side).** Booted the worker with
+  the `containers` array commented out (the Docker build problem
+  is environmental, see Remaining). All DO classes register and
+  migrate cleanly, App creates rooms (`POST /api/app/rooms` → 201),
+  R2 binding wires through. `GET /api/threads/<id>/tar` returns a
+  3.5 KB POSIX ustar with the expected `<id>/metadata.json` +
+  `<id>/messages.json` entries (no `vfs/` block because the cold
+  sandbox falls back to the metadata-only path the new tar code
+  was written to handle). Required two add-on changes:
+    * Pinned `@cloudflare/worker-bundler@^0.2.0` as a direct
+      dependency. `agents@0.14` does a dynamic `import("@cloudflare/worker-bundler")`
+      that esbuild resolves at bundle time, so the package has to
+      be on disk or wrangler refuses to start with a 'Could not
+      resolve' error.
+    * Disabled the AI binding (`"remote": true`) and the
+      `containers` array for the smoke. Documented above; not
+      committed.
 - **Regression #3 — `/tar` debug export.** Ported `debug-tar.ts`
   to the new `WorkspaceStub.fs` surface (`find` + `stat` +
   `readFile`). One round-trip per file instead of the old
@@ -385,10 +405,26 @@ vendored snapshot in two places that bit us:
 
 ### Remaining
 
-- End-to-end smoke test: `wrangler dev`, create an agent, run a
-  read/write/exec sequence against the container, confirm `wsd`
-  starts under both `FUSE_MOUNT=auto` paths (shim under dev, real
-  FUSE in Containers).
+- **Container-path smoke test.** The worker side of `wrangler dev`
+  boots cleanly (see notes below), but the Docker build for the
+  Sandbox image fails inside this sandbox env at the Zig download
+  step: `curl: SSL certificate problem: unable to get local
+  issuer certificate`. The host runs behind Cloudflare WARP, which
+  MITM-decrypts external TLS — the host bundle has the WARP CA but
+  the Docker build context doesn't. Two ways forward:
+  1. Bake the WARP root into the image: `COPY warp-ca.crt
+     /usr/local/share/ca-certificates/warp.crt && update-ca-certificates`
+     before any `curl` step. Phase 2 left an untracked
+     `packages/wsd-linux-x64/warp-ca.crt` for exactly this; the
+     same file should land at `apps/agent/warp-ca.crt` (gitignored)
+     with the Dockerfile picking it up only when present.
+  2. Run the test on a host that isn't behind WARP, or skip the
+     container in dev (`apps/agent/wrangler.jsonc`'s `containers`
+     array commented out — what we did during the smoke run).
+  Exercising wsd in-loop (FUSE shim under wrangler dev, real FUSE
+  in production Containers) is still the blocker; once the build
+  is reproducible we want a smoke that drives `read`/`write`/`exec`
+  + `git_clone` against a live Sandbox DO.
 - Regression #1 (streaming exec). Still needs a framed transport
   on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
   Track in a separate issue.
