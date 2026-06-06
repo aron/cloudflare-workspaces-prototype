@@ -7,10 +7,9 @@ Phase 2: 🟡 Build-green. Runtime-untested. Known regressions listed.
 Phase 3 (revised): ✅ Done — vendor tree deleted, agent on
 published `@cloudflare/workspace@0.0.0-alpha.3` + GHCR wsd image.
 Phase 4: 🟢 In progress. Agent-suite green (13/13), unit tests green
-(223/223). Regression #7 root-caused and fixed (TC39 decorator
-transform). Regression #4 (skills R2 mount) fixed alongside it.
-Remaining: smoke test under `wrangler dev`; regressions #1
-(streaming exec), #3 (`/tar` route).
+(223/223). Regressions #3 (`/tar` route), #4 (skills R2 mount),
+#7 (decorator transform) closed. Remaining: smoke test under
+`wrangler dev`; regression #1 (streaming exec).
 
 Work landed in branch `port-workspace-next` (off `hackspace`).
 
@@ -335,6 +334,14 @@ vendored snapshot in two places that bit us:
 
 ### Done
 
+- **Regression #3 — `/tar` debug export.** Ported `debug-tar.ts`
+  to the new `WorkspaceStub.fs` surface (`find` + `stat` +
+  `readFile`). One round-trip per file instead of the old
+  `workspace.vfs.snapshot()` single-stream walk, but the output
+  shape is identical (POSIX ustar, `<agentName>/{metadata,messages,
+  vfs-index}.json` + `<agentName>/vfs/<path>` entries). The route
+  no longer 501s; missing-sandbox callers still get a usable
+  tarball with just metadata + messages.
 - **Cloudflare dep bumps.** `@cloudflare/ai-chat` 0.7→20.8,
   `@cloudflare/think` 0.7→0.8, `agents` 0.13→0.14,
   `@cloudflare/workers-types` pin bumped to 4.20260606. All
@@ -385,8 +392,7 @@ vendored snapshot in two places that bit us:
 - Regression #1 (streaming exec). Still needs a framed transport
   on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
   Track in a separate issue.
-- Regression #3 (`/tar` route returns 501). Reimplement via
-  `Workspace.fs.find` + `readFile`, or drop the route.
+
 - Update `apps/agent/README.md` and the root README: drop the
   vendored package references, document the alpha.3 pin (npm +
   GHCR) and how to bump them in lockstep, note `FUSE_MOUNT=auto`

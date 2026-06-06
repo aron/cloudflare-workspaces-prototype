@@ -62,6 +62,7 @@ import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from
 import { buildSystemPrompt, type Skill } from "./system-prompt.js";
 import { discoverSkills } from "./skills.js";
 import { trace, redactSecrets } from "./tracing.js";
+import { buildSessionTar } from "./debug-tar.js";
 
 const WORKSPACE   = "/workspace";
 const SKILLS_PATH = "/workspace/.agents/skills";
@@ -778,13 +779,36 @@ export class Agent extends Think<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/tar")) {
-      // /tar built a debug tarball over the old Workspace.find +
-      // readFile surface. It hasn't been ported to the new
-      // Workspace.fs API yet; returning 501 keeps the route
-      // honest until the rebuild lands.
-      return new Response("tar export not yet ported to new workspace", {
-        status: 501,
-        headers: { "content-type": "text/plain" },
+      // Debug snapshot — dumps metadata, chat history, and the VFS
+      // under /workspace as a single uncompressed ustar archive.
+      // The workspace walk goes through the `WorkspaceStub` so the
+      // capnweb session inside the Sandbox DO does the actual file
+      // reads. We don't gate this on a successful stub resolution:
+      // if the sandbox is cold the tarball still ships with
+      // metadata + messages, which is the bug-report bit anyway.
+      let ws: WorkspaceStub | undefined;
+      try {
+        ws = await this.getWorkspace();
+      } catch {
+        ws = undefined;
+      }
+      const tar = await buildSessionTar({
+        agentName: this.name,
+        metadata:  {
+          agent:        this.name,
+          model:        currentModelId(this.env),
+          messageCount: this.messages.length,
+          capturedAt:   new Date().toISOString(),
+        },
+        messages:  this.messages,
+        workspace: ws,
+      });
+      return new Response(tar as BodyInit, {
+        headers: {
+          "content-type":        "application/x-tar",
+          "content-disposition": `attachment; filename="${this.name}.tar"`,
+          "cache-control":       "no-store",
+        },
       });
     }
 
