@@ -23,6 +23,28 @@ RUN apt-get update \
       nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
+# Optional WARP / corporate-MITM CA bundle.
+#
+# When the host runs behind Cloudflare WARP (or any other decrypting
+# TLS proxy), the certificates the public CA bundle trusts are
+# replaced with WARP's own roots. `curl`, `npm install`, etc. inside
+# the build then fail with "unable to get local issuer certificate"
+# the first time they touch an external HTTPS endpoint.
+#
+# The fix is to drop the WARP root bundle at `apps/agent/ca/warp-ca.crt`
+# (gitignored — host-specific) before the build. The `ca/` directory
+# itself is committed with a `.keep` so the `COPY` below always has
+# at least one source; when no real CA file is present, the conditional
+# `update-ca-certificates` is a no-op and the build behaves identically.
+#
+# Hosts without WARP just don't drop the file and pay zero cost.
+COPY apps/agent/ca/ /opt/agent-ca/
+RUN if ls /opt/agent-ca/*.crt >/dev/null 2>&1; then \
+      cp /opt/agent-ca/*.crt /usr/local/share/ca-certificates/ \
+      && update-ca-certificates ; \
+    fi \
+ && rm -rf /opt/agent-ca
+
 # wsd binary. Statically linked SEA, no external deps needed.
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 

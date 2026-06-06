@@ -4,6 +4,16 @@
 .dev.vars.*
 !.dev.vars.example
 
+# WARP / corporate-MITM CA bundles. The agent's Dockerfile picks up any
+# `.crt` file under `apps/agent/ca/` and trusts it inside the build, so
+# `curl`/`npm install` steps can reach external HTTPS through a
+# Cloudflare WARP-style decrypting proxy. Drop the host bundle (e.g.
+# `/usr/local/share/ca-certificates/extra-ca.crt`) at
+# `apps/agent/ca/warp-ca.crt` locally; not committed because it's
+# host-specific. The `apps/agent/ca/` directory itself is tracked via
+# its `.keep` so the Dockerfile's COPY always has a source.
+apps/agent/ca/*.crt
+
 
 node_modules/
 .wrangler/

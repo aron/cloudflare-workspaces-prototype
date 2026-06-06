@@ -1,0 +1,6 @@
+# Drop host-specific CA bundles here as `<name>.crt`. They're picked
+# up by the Sandbox Dockerfile when present and trusted by every
+# subsequent build step. The directory is committed with this `.keep`
+# so the Dockerfile's COPY always finds at least one entry; the
+# `.crt` files themselves are gitignored (.gitignore at the repo
+# root). See the comment block in apps/agent/Dockerfile for context.
