@@ -1,26 +1,28 @@
 /**
- * Sandbox — container-enabled Durable Object that owns a wsd
- * instance and exposes a `@cloudflare/workspace` Workspace over it.
+ * Sandbox — container-enabled Durable Object that owns a `Workspace`
+ * instance and the Cloudflare Container it talks to over capnweb.
  *
- * Replaces the old `@cloudflare/sandbox` SDK. The Agent DO no longer
- * holds the Workspace directly because `CloudflareContainerBackend`
- * is same-DO-only: `ctx.container` can't cross isolates. Instead the
- * Agent DO is assigned a Sandbox instance (via the warm pool) and
- * pulls a serialisable `WorkspaceStub` over Durable Object RPC.
+ * Wiring mirrors `examples/wsd-container/src/index.ts` upstream
+ * verbatim: `withWorkspaceContainer` wraps a `DurableObject` so the
+ * runtime can hand us a sibling `WorkspaceProxy` egress fetcher,
+ * `CloudflareContainerBackend` joins the container handle to the
+ * workspace, `fetch` forwards every container-routed request back
+ * to the backend.
  *
- * Wiring mirrors examples/think on the workspace `next` branch:
- *   - `WorkspaceProxy` is re-exported at the worker entrypoint so
- *     the runtime can build a loopback Fetcher for the egress
- *     interceptor.
- *   - The DO forwards `/ws` upgrades to the backend.
- *   - `getWorkspace()` returns a `WorkspaceStub` callers can hold
- *     across RPC.
+ * The Agent DO doesn't hold the Workspace directly because
+ * `CloudflareContainerBackend` is same-DO-only (`ctx.container`
+ * can't cross isolates). Instead the warm pool assigns each agent
+ * session to a Sandbox DO and the agent pulls a `WorkspaceStub` —
+ * a thin RpcTarget — across DO RPC.
  *
- * The Sandbox DO also stands in for the bits of the old
- * `@cloudflare/sandbox` SDK the WarmPool drives:
- * `startAndWaitForPorts`, `stop`, `getState`, `renewActivityTimeout`.
- * The semantics are mapped onto `Workspace.ready()` + the
- * `ctx.container` lifecycle.
+ * The four warm-pool surface methods (`startAndWaitForPorts` /
+ * `stop` / `getState` / `gitClone`) are direct pass-throughs over
+ * `ctx.container.*` plus the workspace. There's no synthetic
+ * "connected" flag or rebuild dance: the Workspace's own
+ * `connect()` retry loop handles transient session drops, and
+ * `ctx.container.running` is the source of truth for whether the
+ * container is up. If it isn't, the next caller's `ready()` will
+ * boot it.
  */
 
 import {
@@ -34,10 +36,7 @@ import {
 import { createGitClient } from "@cloudflare/workspace/git";
 import { DurableObject } from "cloudflare:workers";
 
-/**
- * Options accepted by `Sandbox.gitClone()`. Mirrors the input
- * schema in `@cloudflare/git-tools`'s clone tool.
- */
+/** Options for `Sandbox.gitClone()`. Mirrors @cloudflare/git-tools. */
 export interface GitCloneRequest {
   repo: string;
   dest: string;
@@ -50,49 +49,41 @@ export interface GitCloneResponse {
   repo: string;
   ref: string;
   dest: string;
-  head?: string;
 }
 
 export { WorkspaceProxy };
 
 /**
- * Bindings the Sandbox container DO sees. Kept minimal: it doesn't
- * need the rest of the agent env to run.
+ * Bindings the Sandbox DO needs. Kept minimal — only the self-
+ * binding (so the loopback `WorkspaceProxy` egress can reach
+ * back into this instance) is required.
  */
 interface SandboxEnv {
   Sandbox: DurableObjectNamespace<Sandbox>;
 }
 
 /**
- * Shape returned by `getState()`. Lossy mirror of the surface the
- * warm pool used to inspect on `@cloudflare/sandbox`-backed
- * containers. We only synthesise the fields the pool actually reads.
+ * Lifecycle snapshot the warm pool reads via `getState()`.
+ * `lastChange` exists so the pool's idle/health checks have
+ * something monotone to compare against — `ctx.container.running`
+ * doesn't carry a timestamp.
+ *
+ * `status` is a literal projection of `ctx.container.running`:
+ * `"healthy"` when running, `"stopped"` when not. The richer
+ * status enum (`"starting"`, `"stopping"`, `"stopped_with_code"`,
+ * etc.) the old `@cloudflare/sandbox` SDK reported isn't tracked
+ * here — the pool only branches on `=== "healthy"` and `=== "stopped"`.
  */
 export interface SandboxState {
   lastChange: number;
-  status: "running" | "stopping" | "stopped" | "healthy" | "stopped_with_code";
-  exitCode?: number;
+  status: "healthy" | "stopped";
 }
 
-/**
- * Base class for the Sandbox DO. `withWorkspaceContainer` wraps a
- * `DurableObject` subclass with the loopback wiring the
- * `CloudflareContainerBackend` egress needs (the runtime spawns a
- * sibling `WorkspaceProxy` bound to this DO's id). Without the
- * mixin, `CloudflareContainerBackend.handleFetch` doesn't know how
- * to route the wsd-initiated `/ws` upgrade back into the backend.
- */
 class SandboxBase extends DurableObject<SandboxEnv> {}
 
 export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   readonly #backend: CloudflareContainerBackend;
   readonly #workspace: Workspace;
-  /**
-   * Timestamp of the last lifecycle transition. Used by `getState()`
-   * so the warm pool's idle/health checks have something monotone
-   * to compare against — the underlying `ctx.container.running`
-   * flag doesn't carry one.
-   */
   #lastChange = Date.now();
 
   constructor(ctx: DurableObjectState, env: SandboxEnv) {
@@ -104,14 +95,13 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
       );
     }
     this.#backend = new CloudflareContainerBackend({
-      // `withWorkspaceContainer` makes this DO a `ContainerHostHolder`
-      // (it implements `getWorkspaceContainer()` against
-      // `ctx.container`). Passing `() => this` is the documented
-      // pattern from examples/wsd-container.
       container: () => this,
       workspace: { binding: "Sandbox", id: ctx.id.toString() },
     });
     this.#workspace = new Workspace({
+      // ctx.storage.sql.exec returns a narrower row type than
+      // DurableObjectStorageLike declares; the runtime shape
+      // matches. Cast through unknown to bypass invariance.
       storage: ctx.storage as unknown as DurableObjectStorageLike,
       backends: [this.#backend],
     });
@@ -120,17 +110,18 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   /**
    * Forward every container-routed request to the backend. wsd's
    * outbound `/ws` upgrade lands here via the loopback fetcher
-   * `withWorkspaceContainer` wires up; the backend's own handler
-   * knows how to dispatch.
+   * `withWorkspaceContainer` wires up; the backend dispatches.
    */
   override async fetch(request: Request): Promise<Response> {
     return this.#backend.handleFetch(request);
   }
 
   /**
-   * Connect (if necessary) and hand out a Workspace stub the caller
-   * can drive out across RPC. The stub is a lazy RpcTarget that proxies
-   * every call back into this DO; it owns no resources itself.
+   * Hand out a `WorkspaceStub` the caller can drive across DO RPC.
+   * Awaits `ready()` so the container is up and the capnweb session
+   * established before the stub leaves this isolate. The Workspace
+   * caches its `#readyPromise` and reconnects internally on transient
+   * failures — we don't manage that lifecycle here.
    */
   async getWorkspace(): Promise<WorkspaceStub> {
     await this.#workspace.ready();
@@ -144,12 +135,6 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
    * needs `Workspace.provider()`, which only exists on the in-DO
    * `Workspace` instance — the `WorkspaceStub` we hand the agent
    * doesn't expose a provider.
-   *
-   * The git client is built per-call. It's cheap enough
-   * (`@platformatic/vfs.create()` + an isogit cache object) that
-   * caching adds more code than it saves; revisit if we add other
-   * git tools (`diff`, `status`) that should share a packfile cache
-   * with `clone`.
    */
   async gitClone(opts: GitCloneRequest): Promise<GitCloneResponse> {
     await this.#workspace.ready();
@@ -169,9 +154,6 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
       depth: opts.depth,
       singleBranch: true,
     });
-    // `createGitClient` doesn't expose `resolveRef`; the upstream
-    // tool returns no `head` either when it isn't available, so we
-    // mirror that behaviour rather than reaching past the client.
     return {
       ok: true,
       repo: opts.repo,
@@ -182,73 +164,53 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
 
   // ── Warm-pool surface ────────────────────────────────────────────
   //
-  // The pool was originally written against the `@cloudflare/sandbox`
-  // SDK's `Container` base class. We provide the same method names
-  // here so the pool driver doesn't have to know which backend it's
-  // talking to. Semantics map onto `Workspace.ready()` plus a thin
-  // wrapper over `ctx.container`.
+  // The pool was originally written against the @cloudflare/sandbox
+  // SDK's Container base class. We retain three of the original
+  // method names so the pool driver doesn't need to know which
+  // backend it's talking to; each is a one-liner over
+  // `ctx.container.*` plus the workspace.
 
   /**
    * Pre-warm the container: start it and wait until wsd is listening
-   * + the WebSocket session is up. Used by the WarmPool to fill its
-   * idle pool before any agent actually requests a workspace.
+   * and the capnweb session is up. `Workspace.ready()` does both;
+   * the warm pool calls this when filling its idle slots so the
+   * first agent to land on this Sandbox doesn't pay the boot cost.
    */
   async startAndWaitForPorts(): Promise<void> {
     await this.#workspace.ready();
     this.#lastChange = Date.now();
   }
 
-  /** Alias retained for compatibility with the warm pool. */
-  async warmup(): Promise<{ ok: true }> {
-    await this.startAndWaitForPorts();
-    return { ok: true };
-  }
-
   /**
-   * Stop the running container. The pool calls this to evict idle
-   * assignments and to recycle a slot. We forward to
-   * `ctx.container.destroy()` which the Cloudflare runtime treats
-   * as a hard stop; the next start() rebuilds from the image.
+   * Stop the running container. Pool calls this for idle eviction
+   * and slot recycling. `ctx.container.destroy()` tears down the
+   * VM; the next `ready()` will rebuild it from the image. Workspace
+   * state (SQLite VFS) lives in DO storage and survives untouched.
+   *
+   * Best-effort: a double-stop or an already-exited container
+   * shouldn't crash the pool's eviction sweep.
    */
   async stop(_signal?: string): Promise<void> {
     const container = this.ctx.container;
-    if (!container) return;
-    if (container.running) {
-      try {
-        await container.destroy();
-      } catch {
-        // Best-effort. A double-stop or a container that already
-        // exited shouldn't crash the pool's eviction sweep.
-      }
+    if (!container?.running) return;
+    try {
+      await container.destroy();
+    } catch {
+      // already exited / double-stop / lost the handle — pool can't
+      // recover regardless, and the next start will rebuild.
     }
     this.#lastChange = Date.now();
   }
 
   /**
-   * Keep the DO alive so the pool's alarm sweep can find us. The
-   * `@cloudflare/sandbox` SDK used this to push the activity-timeout
-   * timer forward; with the new backend there's no implicit timer to
-   * renew, so this is a no-op that exists for API parity. Leaving it
-   * in place means the pool's existing call sites don't fork around
-   * a missing method on the stub.
-   */
-  renewActivityTimeout(): void {
-    // intentional no-op
-  }
-
-  /**
-   * Synthetic container state. The warm pool uses two predicates:
-   * `status === "healthy"` (assignment is good to hand out) and
-   * `status === "stopped"` / `"stopped_with_code"` (re-warm needed).
-   * Map `ctx.container.running` to "healthy"/"stopped" so those
-   * predicates keep working.
+   * Synthetic container state. The warm pool branches on
+   * `status === "healthy"` (good to hand out) and `status === "stopped"`
+   * (re-warm needed). Map `ctx.container.running` directly.
    */
   async getState(): Promise<SandboxState> {
-    const container = this.ctx.container;
-    const running = container?.running ?? false;
     return {
       lastChange: this.#lastChange,
-      status: running ? "healthy" : "stopped",
+      status: this.ctx.container?.running ? "healthy" : "stopped",
     };
   }
 }

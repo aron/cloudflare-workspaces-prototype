@@ -213,9 +213,15 @@ export class Agent extends Think<Env> {
 
   /**
    * Resolve the Workspace stub for this agent's session, going
-   * through the warm pool. Cached across calls; the cache is
-   * dropped when the underlying connection drops (heartbeat
-   * failure, container cycle), and the next call rebuilds.
+   * through the warm pool. Cached across calls.
+   *
+   * The Workspace inside the Sandbox DO does its own reconnect on
+   * transient capnweb drops, and the warm pool's `isAssignmentUsable`
+   * check gates handouts on `Sandbox.getState() === "healthy"`, so
+   * we don't need to probe before reusing a cached stub. If the
+   * Sandbox is recycled out from under us, the next pool round
+   * trip after a thread reset / new container will pick up a fresh
+   * assignment.
    */
   private async getWorkspace(): Promise<WorkspaceStub> {
     if (this._workspaceStub) return this._workspaceStub;
