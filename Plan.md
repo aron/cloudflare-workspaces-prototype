@@ -340,6 +340,23 @@ vendored snapshot in two places that bit us:
 
 ### Done
 
+- **Sandbox lifecycle simplified.** Original bug report: agents
+  hit `Workspace not connected — await ready() first` after a
+  container restart — the warm pool was handing out stubs whose
+  underlying capnweb session had been torn down. Two-step fix:
+  1. `getState()` now returns `{ status: "healthy" | "stopped",
+     lastChange }` projected directly from `ctx.container.running`,
+     matching the upstream `examples/wsd-container` shape. The
+     pool's `isAssignmentUsable` check (`status === "healthy"`)
+     now correctly rejects assignments whose container has died.
+  2. Sandbox restructured to be a thin pass-through over
+     `ctx.container.*` plus `Workspace.ready()`. Removed the
+     `#connected` flag, `#tearDownWorkspace` dance, synthetic
+     state machine, `renewActivityTimeout` no-op, and the
+     agent-side `getState()` probe-before-cached-stub-reuse. The
+     Workspace's own `connect()` retry handles transient session
+     drops; we don't need to drive it from outside. ~100 LOC
+     lighter and structurally identical to the upstream example.
 - **`wrangler dev` smoke (worker side).** Booted the worker with
   the `containers` array commented out (first pass). All DO
   classes register and migrate cleanly, App creates rooms
@@ -428,37 +445,20 @@ vendored snapshot in two places that bit us:
 
 ### Remaining
 
-- Regression #1 (streaming exec). Still needs a framed transport
-  on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
-  Track in a separate issue.
-- Regression #1 (streaming exec). Still needs a framed transport
-  on `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3.
-  Track in a separate issue.
-
-- Update `apps/agent/README.md` and the root README: drop the
-  vendored package references, document the alpha.3 pin (npm +
-  GHCR) and how to bump them in lockstep, note `FUSE_MOUNT=auto`
-  semantics.
-- End-to-end smoke test: `wrangler dev`, create an agent, run a
-  read/write/exec sequence against the container, confirm `wsd`
-  starts under both `FUSE_MOUNT=auto` paths (shim under dev, real
-  FUSE in Containers).
-- Re-evaluate the remaining regressions now that the vendor tree
-  is gone:
-  - #1 streaming exec — still needs a framed transport on
-    `WorkspaceShellStub`. Upstream doesn't ship one in alpha.3;
-    track in a separate issue.
-  - #3 `/tar` — reimplement via `Workspace.fs.find` + `readFile`,
-    or drop the route.
-  - #4 skills R2 mount — rebuild via direct R2 reads, materialised
-    into the workspace before the first turn.
-  - #5 `git_clone` — closed by Phase 3c.
-  - #6 `worker_deploy` / `worker_fetch` — separate design.
-- Update `apps/agent/README.md` and the root README:
-  - Drop references to the vendored packages.
-  - Document the alpha.3 pin (npm + GHCR) and how to bump them in
-    lockstep.
-  - Note `FUSE_MOUNT=auto` semantics for local dev vs production.
+- **Regression #1 — streaming exec.** `WorkspaceShellStub.exec`
+  returns `{ stdout, stderr, exitCode }` once the command exits;
+  there's no incremental stream across the DO RPC boundary.
+  Upstream's underlying `WorkspaceShell.exec` does return a
+  `ReadableStream<WorkspaceExecEvent>`, but exposing it across
+  capnweb needs a framed / length-prefixed transport that
+  alpha.3 doesn't ship. Track upstream; revisit on the next
+  workspace package bump.
+- **Pick up `@cloudflare/workspace/observe/cloudflare`.** Shipped
+  after alpha.3 in upstream commit `6fe9774`. When we bump past
+  alpha.3 we should pass `observer: createCloudflareObserver({ tracing })`
+  to the Workspace constructor in `sandbox.ts` so workspace ops
+  show up alongside the runtime's automatic fetch + binding spans
+  in the Observability dashboard. Mirrors the upstream example.
 
 ## Reproduce / verify (post-Phase 3)
 
