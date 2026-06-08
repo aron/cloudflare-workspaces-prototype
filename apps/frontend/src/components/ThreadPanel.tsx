@@ -56,6 +56,13 @@ import { navigate } from "@/lib/nav";
 import { useReceipts } from "@/lib/receipts";
 import { initials, relTime } from "@/lib/utils";
 import { isAtBottom, isMoreThanOneViewportFromBottom } from "@/lib/scroll-pinning";
+import {
+  composerHint,
+  composerPlaceholder,
+  shouldDrain,
+  shouldQueue,
+  type ConnectionStatus,
+} from "@/lib/compose-queue";
 
 const AVATAR_PALETTE = [
   "bg-[#ea7d3a]",
@@ -84,7 +91,7 @@ export function ThreadPanel({
   const [root, setRoot] = useState<AppMessage | null>(null);
   const [input, setInput] = useState("");
   const resolveHandle = useHandleResolver();
-  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [steerQueue, setSteerQueue] = useState<string[]>([]);
@@ -252,7 +259,7 @@ export function ThreadPanel({
 
     setInput("");
     const serialised = serializeMentions(text, resolveHandle);
-    if (turnInFlight || status !== "connected") {
+    if (shouldQueue({ turnInFlight, status })) {
       setSteerQueue(q => [...q, serialised]);
     } else {
       sendMessage({ role: "user", parts: [{ type: "text", text: serialised }] });
@@ -277,7 +284,7 @@ export function ThreadPanel({
   // arrives as its own user turn rather than a burst the agent has to
   // untangle.
   useEffect(() => {
-    if (turnInFlight || status !== "connected" || steerQueue.length === 0) return;
+    if (!shouldDrain({ turnInFlight, status, queuedCount: steerQueue.length })) return;
     const [next, ...rest] = steerQueue;
     setSteerQueue(rest);
     sendMessage({ role: "user", parts: [{ type: "text", text: next }] });
@@ -568,26 +575,12 @@ export function ThreadPanel({
               }
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
             }}
-            placeholder={
-              status !== "connected"
-                ? "Reconnecting… messages will queue"
-                : turnInFlight
-                  ? "Steer the agent…"
-                  : "Reply…"
-            }
+            placeholder={composerPlaceholder({ turnInFlight, status })}
             className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive"
           />
           <div className="flex items-end justify-between gap-2 pt-2">
             <span className="text-2xs font-medium text-kumo-inactive" title="current model">
-              {status !== "connected"
-                ? steerQueue.length > 0
-                  ? `offline · ${steerQueue.length} queued`
-                  : "offline · enter to queue"
-                : turnInFlight
-                  ? steerQueue.length > 0
-                    ? `steering · ${steerQueue.length} queued`
-                    : "steering… enter to queue"
-                  : model}
+              {composerHint({ turnInFlight, status, queuedCount: steerQueue.length }) ?? model}
             </span>
             <div className="flex items-center gap-2">
               {turnInFlight && (
