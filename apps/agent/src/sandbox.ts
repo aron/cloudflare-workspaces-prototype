@@ -116,11 +116,18 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
     const container = this.ctx.container;
     if (!container) return;
     if (!container.running) {
-      // Match @cloudflare/workspace's container-host implementation: pre-warm
-      // the VM, but don't install the Containers SDK's internet proxy here.
-      // In local workerd, `enableInternet: true` trips an internal Fetcher
-      // subrequest-channel path before any Workspace code runs.
-      container.start();
+      // Start with the same shape as @cloudflare/workspace's
+      // WorkspaceContainerAPI.start(). A prewarmed container is already
+      // `running` when the Agent backend dials it; the upstream start method
+      // returns early in that case, so this warm-pool start is the only chance
+      // to install the internet proxy and seed wsd's env.
+      container.start({
+        enableInternet: true,
+        env: {
+          PORT: "8080",
+          MOUNT_POINT: "/workspace",
+        },
+      });
     }
     this.#lastChange = Date.now();
   }
