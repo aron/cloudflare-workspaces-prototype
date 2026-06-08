@@ -20,7 +20,6 @@ RUN apt-get update \
       ca-certificates curl xz-utils git \
       fuse3 libfuse2t64 \
       build-essential \
-      nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
 # Optional WARP / corporate-MITM CA bundle.
@@ -61,8 +60,16 @@ RUN ZIG_VERSION=0.13.0 && \
       | tar -xJ -C /usr/local && \
     ln -s /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
-# TypeScript / Cloudflare Worker toolchain.
-RUN npm install -g esbuild@0.25.0 wrangler@4
+# Node.js 22 + TypeScript / Cloudflare Worker toolchain.
+# Debian's `nodejs` package version moves with the base image; install the
+# official binary tarball so shells inside the workspace consistently see
+# Node 22.
+RUN NODE_VERSION=22.12.0 && \
+    curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
+      https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+      | tar -xJ -C /usr/local --strip-components=1 && \
+    node --version && npm --version && \
+    npm install -g esbuild@0.25.0 wrangler@4
 
 # Go.
 ENV GOTOOLCHAIN=local
