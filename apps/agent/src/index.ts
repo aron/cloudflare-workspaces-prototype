@@ -1,9 +1,15 @@
 import { Hono } from "hono";
 import { routeAgentRequest } from "agents";
 import { Agent, SubAgent } from "./agent.js";
-import { Sandbox, WorkspaceProxy } from "./sandbox.js";
+import { Sandbox } from "./sandbox.js";
+// WorkspaceProxy is re-exported at the worker entrypoint so the
+// runtime can build a loopback Fetcher (`ctx.exports.WorkspaceProxy`)
+// for the wsd-side `/ws` upgrade. It lives in `@cloudflare/workspace`;
+// importing it here just puts it in the worker's top-level module
+// graph.
+import { WorkspaceProxy } from "@cloudflare/workspace";
 import { WarmPool } from "./warm-pool.js";
-import { resolveContainerId, poolStats, primePool, sandboxForSession } from "./pool.js";
+import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
 import { Room } from "./room.js";
 import {
@@ -206,70 +212,16 @@ app.all("/api/threads/:id", (c) => {
 // ---- /debug/:sessionId/:cmd ---------------------------------------------
 //
 // Debug routes hit the same warm-pool container the agent uses, plus a
-// passthrough to the Agent DO for messages/vfs/reset.
-// Debug routes drive the same Sandbox DO the agent uses, but pull
-// the workspace stub directly rather than reaching through the
-// agent's chat layer. Replaces the old `@cloudflare/sandbox` SDK
-// route helpers (`getSandbox(...).exec / .readFile`) with the new
-// `WorkspaceStub.shell.exec` / `fs.readFile` surface.
-app.post("/debug/:sessionId/exec", async (c) => {
-  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
-  const { command, cwd } = (await c.req.json()) as {
-    command: string;
-    cwd?: string;
-  };
-  const handle = await ws.shell.exec(command, { cwd, encoding: "utf8" });
-  const result = await handle.result();
-  return Response.json(result);
-});
-
-app.get("/debug/:sessionId/env", async (c) => {
-  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
-  const probe = async (command: string) => {
-    try {
-      const handle = await ws.shell.exec(command, { encoding: "utf8" });
-      return await handle.result();
-    } catch (err) {
-      return { exitCode: -1, stdout: "", stderr: String(err) };
-    }
-  };
-  const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] =
-    await Promise.all([
-      probe("zig version"),
-      probe("go version"),
-      probe("node --version"),
-      probe("esbuild --version"),
-      probe("wrangler --version"),
-      probe("uname -a"),
-      probe("cat /proc/mounts | grep fuse || echo no-fuse"),
-      probe("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
-    ]);
-  return Response.json({
-    zig, go, node, esbuild, wrangler, uname, mounts, fuse,
-  });
-});
-
-app.get("/debug/:sessionId/logs", async (c) => {
-  const ws = await sandboxForSession(c.env, c.req.param("sessionId"));
-  // wsd's stdio log lives under /tmp inside the container. The
-  // workspace shell can `cat` it back for us; the old SDK had a
-  // dedicated readFile RPC, but the container's /tmp isn't part of
-  // the synced workspace tree so a shell read is the right path.
-  const handle = await ws.shell.exec("cat /tmp/server.log || true", {
-    encoding: "utf8",
-  });
-  const result = await handle.result();
-  return new Response(result.stdout || "(no log file yet)", {
-    headers: { "content-type": "text/plain" },
-  });
-});
+// Debug routes forward to the Agent DO that owns the workspace.
+// Before the cross-DO refactor these reached the Sandbox DO
+// directly; now the Agent holds the Workspace + container backend
+// itself, so we just punt to its onRequest handler.
 
 app.get("/debug/:sessionId/pool", async (c) =>
   Response.json(await poolStats(c.env)),
 );
 
-// Forward agent-level debug routes (messages, vfs, reset) to the DO's onRequest().
-app.all("/debug/:sessionId/:cmd{messages|vfs|reset}", (c) => {
+app.all("/debug/:sessionId/:cmd{messages|vfs|reset|exec|env|logs}", (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.Agent.idFromName(sessionId);
   const stub = c.env.Agent.get(id);

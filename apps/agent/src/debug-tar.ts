@@ -19,7 +19,15 @@
  * cost is one round-trip per file rather than a single snapshot stream.
  */
 
-import type { WorkspaceStub } from "@cloudflare/workspace";
+import type { Workspace, WorkspaceStub } from "@cloudflare/workspace";
+
+/**
+ * Anything with the `fs` getter our walker calls. Both
+ * `Workspace.fs` (live in-isolate) and `WorkspaceStub.fs` (RPC
+ * stub) implement the same `find` / `stat` / `readFile` surface,
+ * so we accept either.
+ */
+type WorkspaceFsHolder = Pick<Workspace, "fs"> | Pick<WorkspaceStub, "fs">;
 import { drain } from "./workspace-adapter.js";
 
 const BLOCK = 512;
@@ -106,8 +114,8 @@ export interface SessionTarInputs {
   metadata:   Record<string, unknown>;
   /** Full chat history; written to `messages.json` as pretty JSON. */
   messages:   unknown;
-  /** The agent's `WorkspaceStub` — VFS contents go under `vfs/`. */
-  workspace?: WorkspaceStub;
+  /** The agent's `Workspace` or `WorkspaceStub` — VFS contents go under `vfs/`. */
+  workspace?: WorkspaceFsHolder;
   /**
    * Walk only this subtree of the workspace. Defaults to `/workspace`.
    * Use `/` to dump everything the VFS exposes.
@@ -142,7 +150,7 @@ export async function buildSessionTar(inputs: SessionTarInputs): Promise<Uint8Ar
     // through `fs.readFile`. The dofs implementation already filters
     // entries the workspace config marks as ignored (e.g.
     // `node_modules`), so we don't replicate that here.
-    let found: Awaited<ReturnType<WorkspaceStub["fs"]["find"]>>;
+    let found: Awaited<ReturnType<WorkspaceFsHolder["fs"]["find"]>>;
     try {
       found = await workspace.fs.find(root);
     } catch {

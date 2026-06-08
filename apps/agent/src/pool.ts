@@ -14,7 +14,6 @@
 
 import type { WarmPool, WarmPoolConfig } from "./warm-pool.js";
 import type { Sandbox } from "./sandbox.js";
-import type { WorkspaceStub } from "@cloudflare/workspace";
 
 interface PoolEnv {
   WarmPool: DurableObjectNamespace<WarmPool>;
@@ -74,19 +73,4 @@ export async function poolStats(env: PoolEnv) {
   return poolStub(env).getStats();
 }
 
-/**
- * Resolve a session id all the way through to a connected
- * WorkspaceStub. Convenience helper for the debug routes and any
- * other caller that doesn't need the underlying Sandbox stub.
- */
-export async function sandboxForSession(
-  env: PoolEnv,
-  sessionId: string,
-): Promise<WorkspaceStub> {
-  const name = await resolveContainerId(env, sessionId);
-  const stub = env.Sandbox.get(env.Sandbox.idFromName(name));
-  // Workers RPC returns a Stub<WorkspaceStub>; structurally a
-  // superset of WorkspaceStub but not assignable to it. Same
-  // cast pattern as Agent.getWorkspace().
-  return (await stub.getWorkspace()) as unknown as WorkspaceStub;
-}
+

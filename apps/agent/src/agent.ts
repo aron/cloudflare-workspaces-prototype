@@ -33,7 +33,14 @@ import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
-import type { WorkspaceStub } from "@cloudflare/workspace";
+import {
+  type DurableObjectStorageLike,
+  Workspace,
+} from "@cloudflare/workspace";
+import { CrossDOContainerBackend } from "./cross-do-container-backend.js";
+import { createGitClient } from "@cloudflare/workspace/git";
+import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
+import { tracing } from "cloudflare:workers";
 import { resolveContainerId, releaseContainer } from "./pool.js";
 import type { Sandbox } from "./sandbox.js";
 import { adaptForFsTools } from "./workspace-adapter.js";
@@ -88,24 +95,27 @@ export class Agent extends Think<Env> {
   override maxSteps = 20;
 
   /**
-   * `WorkspaceStub` over RPC to this agent's assigned Sandbox DO.
-   * Built lazily on first use; rebuilt if the Sandbox cycles. The
-   * Workspace itself lives inside the Sandbox DO (because
-   * `CloudflareContainerBackend` is same-DO-only); this stub is
-   * what Think's `workspace` field carries.
+   * The Workspace lives *on this DO*, backed by `ctx.storage`.
+   * The capnweb session to wsd runs across DO RPC to a Sandbox
+   * container-host chosen by the warm pool. See `#backend` below.
    *
-   * Typed `any` so the Think baseline's `WorkspaceLike` contract
-   * doesn't clash with our concrete shape. The few places Think
-   * touches it default tools never fire here because `getTools()`
-   * doesn't include any of them and `workspaceBash` is off.
+   * Stored as a private field; we never override Think's public
+   * `workspace` slot because Think types it against its own
+   * `WorkspaceLike` shape (the @cloudflare/shell one) which is a
+   * different surface. The Think default tools that consult it
+   * are inert here — `getTools()` doesn't include any of them and
+   * `workspaceBash` is off — so nothing in the Think baseline
+   * actually reads `.workspace`.
    */
-  declare workspace: any;
+  readonly #workspace: Workspace;
 
-  /** Cached Sandbox DO stub for this agent's session. */
-  private _sandboxStub: DurableObjectStub<Sandbox> | null = null;
-
-  /** Cached connected WorkspaceStub. */
-  private _workspaceStub: WorkspaceStub | null = null;
+  /**
+   * The Cloudflare container backend. Its `container: () => ...`
+   * factory runs once per `connect()`, so each fresh dial can pick
+   * a different Sandbox UUID — mid-session container churn is the
+   * pool's problem, not ours.
+   */
+  readonly #backend: CrossDOContainerBackend;
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
@@ -198,13 +208,38 @@ export class Agent extends Think<Env> {
     const self = this as any;
     const original = self._wrapToolsWithDecision.bind(this);
     self._wrapToolsWithDecision = splitStreamingTools(Agent.STREAMING_TOOLS, original);
-    // Workspace lives in the Sandbox DO; the agent holds a stub
-    // fetched on first use via the warm pool. Skills discovery and
-    // mkdir(/workspace) used to happen at construction against the
-    // local Workspace; those are deferred to first turn now because
-    // we can't do RPC inside blockConcurrencyWhile against a DO
-    // we haven't been assigned yet.
-    this.workspace = null;
+    // Workspace lives in this Agent DO; the backend dials a warm-pool
+    // Sandbox DO that owns only ctx.container. Use the app-local backend
+    // variant so container TCP-port fetches happen inside the Sandbox DO
+    // instead of returning raw Fetchers across Workers RPC.
+    this.#backend = new CrossDOContainerBackend({
+      // Per-dial factory. resolveContainerId returns the warm-pool
+      // UUID for this session; the backend re-invokes us on every
+      // reconnect, so a Sandbox eviction or container restart
+      // upstream transparently re-picks via the pool.
+      container: async () => {
+        const uuid = await resolveContainerId(this.env, this.name);
+        return this.env.Sandbox.get(this.env.Sandbox.idFromName(uuid));
+      },
+      // Identifies *this* DO so wsd's outbound /ws upgrade dials
+      // back here (see fetch() override below).
+      workspace: { binding: "Agent", id: this.ctx.id.toString() },
+    });
+    this.#workspace = new Workspace({
+      // ctx.storage.sql.exec returns a narrower row type than
+      // DurableObjectStorageLike declares; the runtime shape
+      // matches. Cast through unknown to bypass invariance.
+      storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+      backends: [this.#backend],
+      // Route every workspace op through the Workers Observability
+      // user-tracing surface. With `observability.traces.enabled:
+      // true` in wrangler.jsonc, spans land in the dashboard
+      // alongside the runtime's automatic fetch + binding spans.
+      // `tracing` may be undefined in environments without the
+      // user-tracing feature flag (e.g. the agent-suite vitest
+      // pool); `createCloudflareObserver` degrades to a no-op.
+      observer: createCloudflareObserver({ tracing }),
+    });
     this.ctx.blockConcurrencyWhile(async () => {
       this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
       this._roomName = (await this.ctx.storage.get<string>(Agent.ROOM_NAME_STORAGE_KEY)) ?? null;
@@ -212,39 +247,41 @@ export class Agent extends Think<Env> {
   }
 
   /**
-   * Resolve the Workspace stub for this agent's session, going
-   * through the warm pool. Cached across calls.
-   *
-   * The Workspace inside the Sandbox DO does its own reconnect on
-   * transient capnweb drops, and the warm pool's `isAssignmentUsable`
-   * check gates handouts on `Sandbox.getState() === "healthy"`, so
-   * we don't need to probe before reusing a cached stub. If the
-   * Sandbox is recycled out from under us, the next pool round
-   * trip after a thread reset / new container will pick up a fresh
-   * assignment.
+   * Worker-routed fetch handler. wsd dials back into the Agent DO
+   * over the loopback `WorkspaceProxy` egress with path `/ws` to
+   * upgrade the capnweb session. Forward those upgrades to the
+   * backend; defer everything else to the agents/partyserver base
+   * class so chat WS upgrades, RPC routing, and onRequest dispatch
+   * keep working.
    */
-  private async getWorkspace(): Promise<WorkspaceStub> {
-    if (this._workspaceStub) return this._workspaceStub;
-    const name = await resolveContainerId(this.env, this.name);
-    const id = this.env.Sandbox.idFromName(name);
-    const stub = this.env.Sandbox.get(id);
-    this._sandboxStub = stub;
-    // Workers RPC wraps the returned WorkspaceStub in a Stub<>
-    // proxy that's structurally a superset of the RpcTarget but
-    // not assignable to it. Cast at this boundary; downstream
-    // consumers (the FS / shell tools) only touch the methods
-    // both shapes expose.
-    const ws = (await stub.getWorkspace()) as unknown as WorkspaceStub;
-    this._workspaceStub = ws;
-    this.workspace = ws;
-    return ws;
+  override async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname === "/ws") {
+      return this.#backend.handleFetch(request);
+    }
+    return super.fetch(request);
   }
 
   /**
-   * Best-effort warmup. Mirrors the old `Workspace.warmup()` call
-   * sites — hits the warm pool, primes the Sandbox container, and
-   * caches the resulting stub. Failures are swallowed at call sites
-   * (they're all `ctx.waitUntil(...).catch(() => {})`).
+   * Bring the Workspace up if it isn't already — the backend's
+   * `connect()` runs the first time, subsequent calls return the
+   * cached handle. Failures bubble up to the caller.
+   *
+   * Returns the local Workspace, not a stub: the Agent owns the
+   * instance directly, so fs / shell calls are in-isolate (no
+   * DO RPC hop). The `fs` and `shell` getters are the same shape
+   * the old `WorkspaceStub` exposed, so existing call sites work
+   * unchanged.
+   */
+  private async getWorkspace(): Promise<Workspace> {
+    await this.#workspace.ready();
+    return this.#workspace;
+  }
+
+  /**
+   * Best-effort warmup. Hits the warm pool to mint / claim a
+   * Sandbox UUID, dials it, and brings the workspace up. Failures
+   * are swallowed at call sites (they're all
+   * `ctx.waitUntil(...).catch(() => {})`).
    */
   private async warmupWorkspace(): Promise<void> {
     await this.getWorkspace();
@@ -787,12 +824,11 @@ export class Agent extends Think<Env> {
     if (request.method === "GET" && url.pathname.endsWith("/tar")) {
       // Debug snapshot — dumps metadata, chat history, and the VFS
       // under /workspace as a single uncompressed ustar archive.
-      // The workspace walk goes through the `WorkspaceStub` so the
-      // capnweb session inside the Sandbox DO does the actual file
-      // reads. We don't gate this on a successful stub resolution:
-      // if the sandbox is cold the tarball still ships with
+      // The workspace walk runs against the live `Workspace` on
+      // this DO. We don't gate this on a successful ready(): if
+      // the container is cold the tarball still ships with
       // metadata + messages, which is the bug-report bit anyway.
-      let ws: WorkspaceStub | undefined;
+      let ws: Workspace | undefined;
       try {
         ws = await this.getWorkspace();
       } catch {
@@ -815,6 +851,55 @@ export class Agent extends Think<Env> {
           "content-disposition": `attachment; filename="${this.name}.tar"`,
           "cache-control":       "no-store",
         },
+      });
+    }
+
+    // ── Debug routes (forwarded from /debug/<sessionId>/<cmd>) ────────
+
+    if (request.method === "POST" && url.pathname.endsWith("/exec")) {
+      const { command, cwd } = (await request.json().catch(() => ({}))) as {
+        command?: string; cwd?: string;
+      };
+      if (!command) return Response.json({ error: "missing command" }, { status: 400 });
+      const ws = await this.getWorkspace();
+      const handle = await ws.shell.exec(command, { cwd, encoding: "utf8" });
+      const result = await handle.result();
+      return Response.json(result);
+    }
+
+    if (request.method === "GET" && url.pathname.endsWith("/env")) {
+      const ws = await this.getWorkspace();
+      const probe = async (command: string) => {
+        try {
+          const handle = await ws.shell.exec(command, { encoding: "utf8" });
+          return await handle.result();
+        } catch (err) {
+          return { exitCode: -1, stdout: "", stderr: String(err) };
+        }
+      };
+      const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] =
+        await Promise.all([
+          probe("zig version"),
+          probe("go version"),
+          probe("node --version"),
+          probe("esbuild --version"),
+          probe("wrangler --version"),
+          probe("uname -a"),
+          probe("cat /proc/mounts | grep fuse || echo no-fuse"),
+          probe("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
+        ]);
+      return Response.json({ zig, go, node, esbuild, wrangler, uname, mounts, fuse });
+    }
+
+    if (request.method === "GET" && url.pathname.endsWith("/logs")) {
+      // wsd's stdio log lives under /tmp inside the container. The
+      // workspace shell can `cat` it back for us; /tmp isn't part
+      // of the synced workspace tree so a shell read is the right path.
+      const ws = await this.getWorkspace();
+      const handle = await ws.shell.exec("cat /tmp/server.log || true", { encoding: "utf8" });
+      const result = await handle.result();
+      return new Response(result.stdout || "(no log file yet)", {
+        headers: { "content-type": "text/plain" },
       });
     }
 
@@ -1008,20 +1093,34 @@ export class Agent extends Think<Env> {
       })),
 
       ...pick("git_clone", createGitCloneTool({
-        // Forward the clone to the Sandbox DO, which is where the
-        // live Workspace (and therefore `Workspace.provider()`) is
-        // reachable. The agent only holds a WorkspaceStub, which
-        // doesn't expose a provider.
+        // Workspace lives on this DO, so the git client runs here
+        // — no cross-DO hop. `createGitClient` reaches
+        // `Workspace.provider()` to back isomorphic-git with the
+        // SQLite VFS directly.
         cloneOnSandbox: async (invocation) => {
-          // Force the sandbox stub to be resolved + cached. The
-          // gitClone RPC method is defined on Sandbox itself, not
-          // on the WorkspaceStub we hand to the rest of the tools.
-          await self.getWorkspace();
-          const sandbox = self._sandboxStub;
-          if (!sandbox) {
-            throw new Error("git_clone: sandbox stub not resolved");
-          }
-          return await sandbox.gitClone(invocation);
+          const ws = await self.getWorkspace();
+          const git = createGitClient({ ws });
+          const url = `https://github.com/${invocation.repo}`;
+          // Wipe any prior clone at the target. Stale `.git`
+          // directories from a previous failed call cause
+          // isomorphic-git to error out with "commit ... not
+          // available locally" — the second clone refuses to
+          // overwrite the orphaned refs.
+          await ws.fs.rm(invocation.dest, { recursive: true, force: true });
+          await ws.fs.mkdir(invocation.dest, { recursive: true });
+          await git.clone({
+            url,
+            dir: invocation.dest,
+            ref: invocation.ref,
+            depth: invocation.depth,
+            singleBranch: true,
+          });
+          return {
+            ok: true,
+            repo: invocation.repo,
+            ref: invocation.ref ?? "default",
+            dest: invocation.dest,
+          };
         },
       })),
     };
@@ -1388,16 +1487,16 @@ export function renderTranscriptForSummary(
  * cache can drop on a Sandbox cycle.
  */
 function makeLazyStore(
-  getWs: () => Promise<WorkspaceStub>,
+  getWs: () => Promise<Workspace>,
 ): FileStore {
-  // Build the inner store on first use, but rebuild if the cached
-  // WorkspaceStub identity changes (a sandbox cycle clears the
-  // cache; the next call returns a new stub).
-  let cached: { stub: WorkspaceStub; store: FileStore } | null = null;
+  // Build the inner store on first use, but rebuild if the
+  // Workspace identity changes (a future workspace recycle or a
+  // thread reset that swaps the instance).
+  let cached: { ws: Workspace; store: FileStore } | null = null;
   const get = async (): Promise<FileStore> => {
-    const stub = await getWs();
-    if (!cached || cached.stub !== stub) {
-      cached = { stub, store: new WorkspaceFileStore(adaptForFsTools(stub)) };
+    const ws = await getWs();
+    if (!cached || cached.ws !== ws) {
+      cached = { ws, store: new WorkspaceFileStore(adaptForFsTools(ws)) };
     }
     return cached.store;
   };
