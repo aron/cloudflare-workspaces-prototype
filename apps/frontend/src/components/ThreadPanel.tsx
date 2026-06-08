@@ -63,6 +63,7 @@ import {
   shouldQueue,
   type ConnectionStatus,
 } from "@/lib/compose-queue";
+import { collapsibleWindow, partKey } from "@/lib/collapsible-window";
 
 const AVATAR_PALETTE = [
   "bg-[#ea7d3a]",
@@ -134,6 +135,40 @@ export function ThreadPanel({
   });
 
   const { messages, sendMessage, isStreaming, isServerStreaming, stop } = useAgentChat({ agent });
+
+  // Auto-collapse all but the last few reasoning/tool boxes so the
+  // streaming output stays in view. The user can still toggle any
+  // box manually; the override is remembered until the page reloads.
+  //
+  // The window size is small on purpose — three lines up with the
+  // assistant's typical pattern of "reason, call a tool, summarise"
+  // and keeps the body in view without scrolling on a long turn.
+  const OPEN_WINDOW = 3;
+  const openByDefault = useMemo(
+    () => collapsibleWindow(messages, OPEN_WINDOW),
+    [messages],
+  );
+  // Manual overrides survive re-renders but not a remount; that's
+  // intentional — switching threads (which remounts via key= on the
+  // wrapper) is a clean slate, but scrolling around within a single
+  // thread preserves what the user opened or closed.
+  const [manualOverrides, setManualOverrides] = useState<Map<string, boolean>>(() => new Map());
+  const isOpenFor = useCallback((key: string): boolean => {
+    const override = manualOverrides.get(key);
+    if (override !== undefined) return override;
+    return openByDefault.has(key);
+  }, [manualOverrides, openByDefault]);
+  const handleToggle = useCallback((key: string, next: boolean) => {
+    // Only record the override when the user's choice diverges from
+    // the auto rule; that way the manual map stays small and the
+    // override naturally fades as the auto window catches up.
+    setManualOverrides(prev => {
+      const auto = openByDefault.has(key);
+      const map = new Map(prev);
+      if (next === auto) map.delete(key); else map.set(key, next);
+      return map;
+    });
+  }, [openByDefault]);
 
   // Mark this thread read whenever messages change. Covers initial load,
   // the user's own sends, and live assistant frames in one place. We use
@@ -445,8 +480,14 @@ export function ThreadPanel({
                       if (part.type === "reasoning") {
                         const text = (part as { text?: string }).text;
                         if (!text) return null;
+                        const k = partKey(m.id, i);
                         return (
-                          <Reasoning key={i} isStreaming={false} defaultOpen={false}>
+                          <Reasoning
+                            key={i}
+                            isStreaming={false}
+                            open={isOpenFor(k)}
+                            onOpenChange={(next) => handleToggle(k, next)}
+                          >
                             <ReasoningTrigger />
                             <ReasoningContent>{text}</ReasoningContent>
                           </Reasoning>
@@ -486,8 +527,9 @@ export function ThreadPanel({
                         // result has landed yet. Show a Cancel affordance so the
                         // user can fail a wedged tool without nuking the whole turn.
                         const isRunning = part.state === "input-streaming" || part.state === "input-available";
+                        const k = partKey(m.id, i);
                         return (
-                          <Tool key={i} defaultOpen={false}>
+                          <Tool key={i} open={isOpenFor(k)} onOpenChange={(next) => handleToggle(k, next)}>
                             <ToolHeader type={`tool-${name}` as `tool-${string}`} state={part.state} callDurationMs={callDurationMs} />
                             <ToolContent>
                               {input != null && <ToolInput input={input} />}
