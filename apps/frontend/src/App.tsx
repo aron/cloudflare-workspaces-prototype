@@ -90,8 +90,22 @@ export function App() {
               threadId={route.threadId}
               centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
               thread={
+                // `key={route.threadId}` is load-bearing. Without it,
+                // React keeps the same ThreadPanel instance across
+                // thread switches: the underlying `useAgent` socket
+                // does rebind to the new room (partysocket reacts to
+                // the `name` prop), but every other piece of local
+                // state — `messages` from `useAgentChat`, the steer
+                // queue, `root`, viewer entries, scroll pinning, the
+                // composer input — leaks from the previous thread.
+                // Symptom: the right pane gets "stuck" rendering the
+                // last thread's content for a beat (or indefinitely
+                // for fields the component doesn't reset on prop
+                // change). Remounting on thread id is the
+                // idiomatic fix and survives future state being
+                // added to the component.
                 <Suspense fallback={ThreadFallback}>
-                  <ThreadPanel roomId={route.roomId} threadId={route.threadId} model={me.model} />
+                  <ThreadPanel key={route.threadId} roomId={route.roomId} threadId={route.threadId} model={me.model} />
                 </Suspense>
               }
             />
