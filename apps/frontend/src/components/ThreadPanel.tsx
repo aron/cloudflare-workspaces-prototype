@@ -213,10 +213,18 @@ export function ThreadPanel({
   // server — exactly the case where users need a stop button.
   const turnInFlight = isStreaming || isServerStreaming;
 
-  // Submit the current input. Behaviour depends on whether the agent is
-  // mid-turn: when idle we send straight to the model; while a turn is in
-  // flight we enqueue locally and drain on completion. The composer is the
-  // same control either way — only the placeholder and the helper line change.
+  // Submit the current input. Three branches:
+  //   - mid-turn (agent is streaming): enqueue locally so it lands as the
+  //     next user turn rather than mid-stream interruption.
+  //   - offline (WebSocket reconnecting): enqueue locally so the user gets
+  //     immediate visual feedback. The drain effect below replays once the
+  //     connection comes back and any in-flight turn settles.
+  //   - idle + connected: send straight to the agent.
+  //
+  // PartySocket (which `useAgent` wraps) already buffers frames at the wire
+  // level during reconnects, but app-layer queueing gives us visible
+  // feedback (the "N queued" hint) and keeps the ordering deterministic
+  // around `turnInFlight` transitions.
   const submit = useCallback(() => {
     const text = input.trim();
     if (!text) return;
@@ -244,7 +252,7 @@ export function ThreadPanel({
 
     setInput("");
     const serialised = serializeMentions(text, resolveHandle);
-    if (turnInFlight) {
+    if (turnInFlight || status !== "connected") {
       setSteerQueue(q => [...q, serialised]);
     } else {
       sendMessage({ role: "user", parts: [{ type: "text", text: serialised }] });
@@ -255,29 +263,28 @@ export function ThreadPanel({
     // reply that's about to stream) stay in view without manual
     // intervention.
     scrollToBottom();
-  }, [input, turnInFlight, sendMessage, threadId, scrollToBottom, resolveHandle]);
+  }, [input, turnInFlight, status, sendMessage, threadId, scrollToBottom, resolveHandle]);
 
   const dismissViewerEntry = useCallback((id: string) => {
     setViewerEntries(prev => prev.filter(e => e.id !== id));
   }, []);
 
-  // ── Steering ──────────────────────────────────────────────────────────
+  // ── Steering / offline queue ─────────────────────────────────────────
   //
-  // Messages submitted while a turn is in flight are buffered locally and
-  // drained as soon as the current turn finishes, so they show up as user
-  // turns in the queue rather than mid-stream interruptions. The drain
-  // effect below feeds them to `sendMessage` one render at a time.
+  // Messages submitted while a turn is in flight or while the WebSocket
+  // is reconnecting buffer here and drain once both conditions clear.
+  // The drain feeds them to `sendMessage` one render at a time so each
+  // arrives as its own user turn rather than a burst the agent has to
+  // untangle.
   useEffect(() => {
-    if (turnInFlight || steerQueue.length === 0) return;
-    // Drain one message per render so each goes through `sendMessage`'s own
-    // queueing and we don't fire a burst of WS frames at the agent.
+    if (turnInFlight || status !== "connected" || steerQueue.length === 0) return;
     const [next, ...rest] = steerQueue;
     setSteerQueue(rest);
     sendMessage({ role: "user", parts: [{ type: "text", text: next }] });
     // Same rationale as the direct-submit path: a steered message
     // landing is the user re-engaging with the conversation, re-pin.
     scrollToBottom();
-  }, [turnInFlight, steerQueue, sendMessage, scrollToBottom]);
+  }, [turnInFlight, status, steerQueue, sendMessage, scrollToBottom]);
 
   // Download a tar archive of the agent's session state (messages + VFS +
   // metadata). Useful for filing bug reports — drop it next to a repro.
@@ -561,17 +568,26 @@ export function ThreadPanel({
               }
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
             }}
-            placeholder={turnInFlight ? "Steer the agent…" : "Reply…"}
-            disabled={status !== "connected"}
-            className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive disabled:opacity-50"
+            placeholder={
+              status !== "connected"
+                ? "Reconnecting… messages will queue"
+                : turnInFlight
+                  ? "Steer the agent…"
+                  : "Reply…"
+            }
+            className="block w-full resize-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-kumo-inactive"
           />
           <div className="flex items-end justify-between gap-2 pt-2">
             <span className="text-2xs font-medium text-kumo-inactive" title="current model">
-              {turnInFlight
+              {status !== "connected"
                 ? steerQueue.length > 0
-                  ? `steering · ${steerQueue.length} queued`
-                  : "steering… enter to queue"
-                : model}
+                  ? `offline · ${steerQueue.length} queued`
+                  : "offline · enter to queue"
+                : turnInFlight
+                  ? steerQueue.length > 0
+                    ? `steering · ${steerQueue.length} queued`
+                    : "steering… enter to queue"
+                  : model}
             </span>
             <div className="flex items-center gap-2">
               {turnInFlight && (
@@ -585,10 +601,16 @@ export function ThreadPanel({
               )}
               <Button
                 size="icon-sm"
-                aria-label={turnInFlight ? "Queue steer" : "Send"}
+                aria-label={
+                  status !== "connected"
+                    ? "Queue while offline"
+                    : turnInFlight
+                      ? "Queue steer"
+                      : "Send"
+                }
                 onClick={submit}
-                disabled={status !== "connected" || !input.trim()}
-                className={`h-7 w-7 text-white ${turnInFlight ? "bg-kumo-brand/70 hover:bg-kumo-brand" : "bg-kumo-brand hover:bg-kumo-brand-hover"}`}
+                disabled={!input.trim()}
+                className={`h-7 w-7 text-white ${turnInFlight || status !== "connected" ? "bg-kumo-brand/70 hover:bg-kumo-brand" : "bg-kumo-brand hover:bg-kumo-brand-hover"}`}
               >
                 <ArrowUp size={13} strokeWidth={2.5} />
               </Button>
