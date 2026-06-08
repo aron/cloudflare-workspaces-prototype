@@ -451,14 +451,8 @@ vendored snapshot in two places that bit us:
   Upstream's underlying `WorkspaceShell.exec` does return a
   `ReadableStream<WorkspaceExecEvent>`, but exposing it across
   capnweb needs a framed / length-prefixed transport that
-  alpha.3 doesn't ship. Track upstream; revisit on the next
-  workspace package bump.
-- **Pick up `@cloudflare/workspace/observe/cloudflare`.** Shipped
-  after alpha.3 in upstream commit `6fe9774`. When we bump past
-  alpha.3 we should pass `observer: createCloudflareObserver({ tracing })`
-  to the Workspace constructor in `sandbox.ts` so workspace ops
-  show up alongside the runtime's automatic fetch + binding spans
-  in the Observability dashboard. Mirrors the upstream example.
+  the published alpha series doesn't ship. Track upstream; revisit
+  on the next workspace package bump.
 
 ## Reproduce / verify (post-Phase 3)
 

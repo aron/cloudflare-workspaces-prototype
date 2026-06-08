@@ -17,10 +17,10 @@
   },
   "peerDependencies": {
     "ai":                    "^6.0.0",
-    "@cloudflare/workspace": "^0.0.0-alpha.3"
+    "@cloudflare/workspace": "^0.0.0-alpha.5"
   },
   "devDependencies": {
-    "@cloudflare/workspace":     "0.0.0-alpha.3",
+    "@cloudflare/workspace":     "0.0.0-alpha.5",
     "@cloudflare/workers-types": "^4.20260606.1",
     "@types/node":               "^22.0.0",
     "ai":                        "^6.0.188",

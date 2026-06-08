@@ -10,7 +10,7 @@
 # wrangler) so `exec` calls from the agent find them on PATH inside
 # the FUSE-mounted /workspace.
 
-FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3 AS wsd
+FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 

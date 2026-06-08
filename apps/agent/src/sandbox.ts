@@ -34,7 +34,8 @@ import {
   withWorkspaceContainer,
 } from "@cloudflare/workspace";
 import { createGitClient } from "@cloudflare/workspace/git";
-import { DurableObject } from "cloudflare:workers";
+import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
+import { DurableObject, tracing } from "cloudflare:workers";
 
 /** Options for `Sandbox.gitClone()`. Mirrors @cloudflare/git-tools. */
 export interface GitCloneRequest {
@@ -104,6 +105,19 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
       // matches. Cast through unknown to bypass invariance.
       storage: ctx.storage as unknown as DurableObjectStorageLike,
       backends: [this.#backend],
+      // Route every workspace op through the Workers Observability
+      // user-tracing surface. The runtime owns the span lifecycle;
+      // `createCloudflareObserver` is a thin facade that forwards
+      // seed attributes and the per-span `setAttribute` callback.
+      // With `observability.traces.enabled: true` in wrangler.jsonc,
+      // the spans show up in the dashboard alongside the runtime's
+      // automatic fetch + binding spans.
+      //
+      // `tracing` is `undefined` in environments without the user-
+      // tracing feature flag (e.g. the agent-suite vitest pool); the
+      // observer detects that and degrades to a no-op without us
+      // having to branch here.
+      observer: createCloudflareObserver({ tracing }),
     });
   }
 
