@@ -60,11 +60,13 @@ RUN ZIG_VERSION=0.13.0 && \
       | tar -xJ -C /usr/local && \
     ln -s /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
-# Node.js 22 + TypeScript / Cloudflare Worker toolchain.
+# Node.js 24 (Active LTS) + TypeScript / Cloudflare Worker toolchain.
 # Debian's `nodejs` package version moves with the base image; install the
 # official binary tarball so shells inside the workspace consistently see
-# Node 22.
-RUN NODE_VERSION=22.12.0 && \
+# Node 24. 24.x ships `node:sqlite` without the --experimental-sqlite
+# flag (still RC, but importable as-is) and is the current Active LTS
+# that the Cloudflare Workers runtime aligns against.
+RUN NODE_VERSION=24.16.0 && \
     curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
       https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /usr/local --strip-components=1 && \
