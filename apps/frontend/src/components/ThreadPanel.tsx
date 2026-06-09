@@ -540,7 +540,7 @@ export function ThreadPanel({
                                     onClick={() => {
                                       void agent.call("cancelToolCall", [toolCallId]).catch(() => {});
                                     }}
-                                    className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                                    className="h-7 bg-kumo-danger text-white hover:brightness-95"
                                   >
                                     Cancel tool call
                                   </Button>
@@ -629,7 +629,7 @@ export function ThreadPanel({
                 <Button
                   size="sm"
                   onClick={stop}
-                  className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+                  className="h-7 bg-kumo-danger text-white hover:brightness-95"
                 >
                   Stop
                 </Button>
@@ -645,7 +645,7 @@ export function ThreadPanel({
                 }
                 onClick={submit}
                 disabled={!input.trim()}
-                className={`h-7 w-7 text-white ${turnInFlight || status !== "connected" ? "bg-kumo-brand/70 hover:bg-kumo-brand" : "bg-kumo-brand hover:bg-kumo-brand-hover"}`}
+                className="h-7 w-7 bg-kumo-brand text-white hover:bg-kumo-brand-hover disabled:opacity-50"
               >
                 <ArrowUp size={13} strokeWidth={2.5} />
               </Button>

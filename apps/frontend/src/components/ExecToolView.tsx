@@ -160,7 +160,7 @@ export function ExecToolView({
             <Button
               size="sm"
               onClick={() => onCancel?.(toolCallId)}
-              className="h-7 bg-red-900/40 text-red-300 hover:bg-red-900/60"
+              className="h-7 bg-kumo-danger text-white hover:brightness-95"
             >
               Cancel
             </Button>
