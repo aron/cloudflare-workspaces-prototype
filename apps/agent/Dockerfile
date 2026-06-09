@@ -10,9 +10,9 @@
 # wrangler) so `exec` calls from the agent find them on PATH inside
 # the FUSE-mounted /workspace.
 
-FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
 
-FROM --platform=linux/amd64 debian:stable-slim
+FROM debian:stable-slim
 
 # Base toolchain + FUSE runtime.
 RUN apt-get update \
