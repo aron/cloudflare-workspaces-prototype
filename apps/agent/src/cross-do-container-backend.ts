@@ -1,9 +1,8 @@
+import type { BackendHandle, WorkspaceBackend } from "@cloudflare/workspace";
 import type {
-  BackendHandle,
   CloudflareContainerBackendOptions,
   IWorkspaceContainerAPI,
-  WorkspaceBackend,
-} from "@cloudflare/workspace";
+} from "@cloudflare/workspace/backends/container";
 import { newWebSocketRpcSession } from "capnweb";
 
 const DEFAULT_EGRESS_HOST = "workspace.internal";
@@ -55,6 +54,7 @@ export type CrossDOContainerBackendOptions = Omit<
  * serializable result.
  */
 export class CrossDOContainerBackend implements WorkspaceBackend {
+  readonly type = "cloudflare-container";
   readonly id = "cloudflare-container";
 
   readonly #options: Required<

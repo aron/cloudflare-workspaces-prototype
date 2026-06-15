@@ -35,7 +35,7 @@
  * the Agent DO where the Workspace now lives.
  */
 
-import { withWorkspaceContainer } from "@cloudflare/workspace";
+import { withWorkspaceContainer } from "@cloudflare/workspace/backends/container";
 import { DurableObject } from "cloudflare:workers";
 import type { ContainerFetchResult } from "./cross-do-container-backend.js";
 
