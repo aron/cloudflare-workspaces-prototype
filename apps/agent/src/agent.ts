@@ -930,18 +930,17 @@ export class Agent extends Think<Env> {
           return { exitCode: -1, stdout: "", stderr: String(err) };
         }
       };
-      const [zig, go, node, esbuild, wrangler, uname, mounts, fuse] =
+      const [node, npm, esbuild, wrangler, uname, mounts, fuse] =
         await Promise.all([
-          probe("zig version"),
-          probe("go version"),
           probe("node --version"),
+          probe("npm --version"),
           probe("esbuild --version"),
           probe("wrangler --version"),
           probe("uname -a"),
           probe("cat /proc/mounts | grep fuse || echo no-fuse"),
           probe("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
         ]);
-      return Response.json({ zig, go, node, esbuild, wrangler, uname, mounts, fuse });
+      return Response.json({ node, npm, esbuild, wrangler, uname, mounts, fuse });
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/logs")) {
@@ -1147,14 +1146,14 @@ export class Agent extends Think<Env> {
           "    shell registers a built-in `git` command that forwards to",
           "    the host workspace, so network-bound subcommands like",
           "    `git clone` work even though the isolate has no public",
-          "    network. Cannot run npm, node, python, zig, go, or any",
-          "    binary outside just-bash's built-in command set.",
+          "    network. Cannot run npm, node, or any binary outside",
+          "    just-bash's built-in command set.",
           '  - "container": Cloudflare Container running wsd. Full Linux',
-          "    userland: npm, node, zig, go, esbuild, wrangler, real",
-          "    binaries on $PATH, public network. Cold start is much",
+          "    userland with a Node 24 toolchain on $PATH (node, npm,",
+          "    esbuild, wrangler), public network. Cold start is much",
           "    slower (warm-pool boot); reach for it when shell can't",
           "    run the command \u2014 typically `npm install`, `npm test`,",
-          "    language-specific tooling, or anything that needs a real",
+          "    `tsc`, `wrangler`, or anything else that needs a real",
           "    Linux binary. For git itself, prefer shell.",
           "",
           "Prefer the dedicated tools first: read / write / edit / ls /",

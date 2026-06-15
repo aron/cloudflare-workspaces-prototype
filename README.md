@@ -111,8 +111,8 @@ worker serves as static assets (configured in
 - Container image `hackspace-prototype-sandbox` (pushed to
   `registry.cloudflare.com/<account>/hackspace-prototype-sandbox`).
   Layers a Debian-slim base + the `wsd` SEA binary out of
-  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5` + the
-  project toolchain (Zig, Go, esbuild, wrangler).
+  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5` + a
+  Node 24 toolchain (node, npm, esbuild, wrangler).
 - Cron `* * * * *` — primes the warm pool every minute. Drop the
   `triggers.crons` block in `wrangler.jsonc` if you want manual priming.
 
@@ -137,19 +137,22 @@ curl     https://hackspace-prototype.<account>.workers.dev/personas
 npx wrangler tail   # follow logs while you exercise the UI
 ```
 
-Per-persona smoke tests:
+Smoke tests:
 
-- **zig** / **go** — ask it to write, compile (`exec`) and run a small
-  program. Confirms the Sandbox container started and wsd is serving
-  the FUSE-mounted workspace.
-- Any persona — file ops (`read`/`write`/`edit`) and, if `BRAVE_API_KEY`
-  is set, `websearch`.
+- **node** — ask it to write a small TypeScript or JS program and run
+  it via `exec` with `backend: 'container'`. Confirms the Sandbox
+  container started and wsd is serving the FUSE-mounted workspace.
+- **shell git** — ask it to `git clone` a small public repo, then
+  `ls` / `read` the result. Exercises the worker backend's built-in
+  git command and the shared SQLite VFS.
+- File ops (`read` / `write` / `edit`) and, if `BRAVE_API_KEY` is set,
+  `websearch`.
 
 ### Common failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `curl: (60) SSL certificate problem` during Zig/Go download in Docker build | WARP MITMs TLS, container doesn't trust the cert | Drop your host CA bundle at `apps/agent/ca/warp-ca.crt`. The Dockerfile installs it before the first network step. |
+| `curl: (60) SSL certificate problem` during the Node download in the Docker build | WARP MITMs TLS, container doesn't trust the cert | Drop your host CA bundle at `apps/agent/ca/warp-ca.crt`. The Dockerfile installs it before the first network step. |
 | `failed commit on ref … EOF` mid-push to `registry.cloudflare.com` | WARP throttling large uploads | `warp-cli disconnect`, retry, reconnect. Layer cache resumes. |
 | `failed commit on ref … manifest … EOF` at the very end | Same as above on the final manifest PUT | Single retry usually completes — all blobs already uploaded. |
 | `websearch` missing from a persona | `BRAVE_API_KEY` unset in prod | `wrangler secret put BRAVE_API_KEY`. |

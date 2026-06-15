@@ -6,9 +6,11 @@
 # package.json). wsd runs as PID 1 and serves the workspace RPC +
 # FUSE mount.
 #
-# Layered on top: project-specific build tools (zig, go, esbuild,
-# wrangler) so `exec` calls from the agent find them on PATH inside
-# the FUSE-mounted /workspace.
+# Layered on top: a Node.js toolchain (node, npm, esbuild, wrangler)
+# so `exec` calls from the agent find them on PATH inside the
+# FUSE-mounted /workspace. Anything else the agent needs to build
+# can land on top of npm / npx; the image deliberately stays
+# Node-only — zig and go were dropped to keep the image lean.
 
 FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
 
@@ -47,18 +49,9 @@ RUN if ls /opt/agent-ca/*.crt >/dev/null 2>&1; then \
 # wsd binary. Statically linked SEA, no external deps needed.
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
-# Project-specific toolchain. Mirrors the old sandbox image so the
-# agent's `exec` tool finds the same compilers and CLIs on PATH.
+# Project-specific toolchain. The agent's `exec` tool finds these
+# CLIs on PATH inside the FUSE-mounted /workspace.
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-ENV ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache
-ENV ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
-
-# Zig.
-RUN ZIG_VERSION=0.13.0 && \
-    curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
-      https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz \
-      | tar -xJ -C /usr/local && \
-    ln -s /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
 # Node.js 24 (Active LTS) + TypeScript / Cloudflare Worker toolchain.
 # Debian's `nodejs` package version moves with the base image; install the
@@ -72,16 +65,6 @@ RUN NODE_VERSION=24.16.0 && \
       | tar -xJ -C /usr/local --strip-components=1 && \
     node --version && npm --version && \
     npm install -g esbuild@0.25.0 wrangler@4
-
-# Go.
-ENV GOTOOLCHAIN=local
-ENV GOPATH=/root/go
-ENV PATH=$PATH:/usr/local/go/bin:/root/go/bin
-RUN GO_VERSION=1.23.4 && \
-    curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
-      https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-      | tar -xz -C /usr/local && \
-    /usr/local/go/bin/go version
 
 # wsd configuration. PORT and MOUNT_POINT are the defaults the
 # CloudflareContainerBackend expects. FUSE_MOUNT=auto probes
