@@ -37,6 +37,7 @@ import {
   type DurableObjectStorageLike,
   Workspace,
   type WorkspaceBackend,
+  type WorkspaceStub,
 } from "@cloudflare/workspace";
 import { CrossDOContainerBackend } from "./cross-do-container-backend.js";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
@@ -227,26 +228,27 @@ export class Agent extends Think<Env> {
       // back here (see fetch() override below).
       workspace: { binding: "Agent", id: this.ctx.id.toString() },
     });
-    // Second backend: just-bash in a Dynamic Worker. Same Agent DO,
-    // same SQLite store — the WorkerBackend declares sync: "none"
-    // so the host's DB is the only authoritative store and no sync
-    // round trip happens around shell commands. The shell isolate
-    // reaches back through env.LOADER + ctx.exports.WorkspaceServiceProxy
-    // (re-exported at the worker entrypoint).
+    // Two backends, tiered by cost. The order matters: the first
+    // entry is the workspace's default backend, picked when an exec
+    // call doesn't name one. We want the cheap one default — the
+    // worker backend boots an isolate in tens of ms and runs the
+    // textual command set (cat / grep / sed / awk / jq / git) for
+    // free. The container is reserved for npm / node / language
+    // toolchains the model explicitly opts into via `backend:
+    // 'container'`.
     //
-    // Listed *after* the container backend in step 2 so the default
-    // backend (the first entry in `backends`) stays the container.
-    // Step 3 reorders these and adds an explicit `backend` parameter
-    // to the exec tool; until then this second backend exists only
-    // to prove the wiring stands up.
+    //   [0]  WorkerBackend            id: 'shell'      (default)
+    //   [1]  CrossDOContainerBackend  id: 'container'  (warm pool)
     //
     // env.LOADER is optional at construction time because the agent-
     // suite vitest fixtures run against a stripped wrangler config
     // without a `worker_loaders` binding (the private-beta binding
     // isn't surfaced by vitest-pool-workers, and tests never exec).
-    // In prod the binding is present and the convenience constructor
-    // path mints the Dynamic Worker on first connect().
-    const backends: WorkspaceBackend[] = [this.#backend];
+    // When the loader binding isn't there, the shell backend isn't
+    // constructed and the container takes the default slot so the
+    // workspace still boots; in prod LOADER is present and the
+    // shell takes the lead.
+    const backends: WorkspaceBackend[] = [];
     if (this.env.LOADER) {
       backends.push(
         new WorkerBackend({
@@ -257,6 +259,7 @@ export class Agent extends Think<Env> {
         }),
       );
     }
+    backends.push(this.#backend);
     this.#workspace = new Workspace({
       // ctx.storage.sql.exec returns a narrower row type than
       // DurableObjectStorageLike declares; the runtime shape
@@ -303,10 +306,30 @@ export class Agent extends Think<Env> {
    * DO RPC hop). The `fs` and `shell` getters are the same shape
    * the old `WorkspaceStub` exposed, so existing call sites work
    * unchanged.
+   *
+   * Private because the public RPC method below (`getWorkspace`)
+   * returns the stub shape that WorkspaceServiceProxy expects —
+   * we don't want callers reaching across the RPC boundary to grab
+   * the live Workspace and accidentally serializing it.
    */
-  private async getWorkspace(): Promise<Workspace> {
+  private async _localWorkspace(): Promise<Workspace> {
     await this.#workspace.ready();
     return this.#workspace;
+  }
+
+  /**
+   * Public RPC entry point reachable through WorkspaceServiceProxy.
+   * The worker backend's shell isolate calls
+   * `env.HOST.getWorkspace()` per exec; the proxy resolves it to
+   * `this.env.Agent.get(thisId).getWorkspace()` on the host side,
+   * lands inside this DO's own request context, and returns a
+   * `WorkspaceStub` whose `.fs` / `.shell` calls are normal Workers
+   * RPC. Returning the live Workspace instance here would fail with
+   * "Could not serialize object of type Workspace" on the way out.
+   */
+  async getWorkspace(): Promise<WorkspaceStub> {
+    await this.#workspace.ready();
+    return this.#workspace.stub();
   }
 
   /**
@@ -316,7 +339,7 @@ export class Agent extends Think<Env> {
    * `ctx.waitUntil(...).catch(() => {})`).
    */
   private async warmupWorkspace(): Promise<void> {
-    await this.getWorkspace();
+    await this._localWorkspace();
   }
 
   onStart() {
@@ -764,7 +787,7 @@ export class Agent extends Think<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/vfs")) {
-      const ws = await this.getWorkspace();
+      const ws = await this._localWorkspace();
       const matches = await ws.fs.find(WORKSPACE, "");
       const entries: Array<{ path: string; type: string; size: number; mtime: number }> = [];
       for (const m of matches) {
@@ -793,7 +816,7 @@ export class Agent extends Think<Env> {
       }
       const limitRaw = url.searchParams.get("limit");
       const limit = Math.min(Math.max(parseInt(limitRaw ?? "20", 10) || 20, 1), 100);
-      const ws = await this.getWorkspace();
+      const ws = await this._localWorkspace();
       const matches = await ws.fs.find(WORKSPACE, "");
       const all: ListingEntry[] = [];
       for (const m of matches) {
@@ -824,7 +847,7 @@ export class Agent extends Think<Env> {
       if (abs.split("/").includes("..")) {
         return new Response("bad path", { status: 400 });
       }
-      const ws = await this.getWorkspace();
+      const ws = await this._localWorkspace();
       let stat;
       try {
         stat = await ws.fs.stat(abs);
@@ -862,7 +885,7 @@ export class Agent extends Think<Env> {
       // metadata + messages, which is the bug-report bit anyway.
       let ws: Workspace | undefined;
       try {
-        ws = await this.getWorkspace();
+        ws = await this._localWorkspace();
       } catch {
         ws = undefined;
       }
@@ -889,18 +912,18 @@ export class Agent extends Think<Env> {
     // ── Debug routes (forwarded from /debug/<sessionId>/<cmd>) ────────
 
     if (request.method === "POST" && url.pathname.endsWith("/exec")) {
-      const { command, cwd } = (await request.json().catch(() => ({}))) as {
-        command?: string; cwd?: string;
+      const { command, cwd, backend } = (await request.json().catch(() => ({}))) as {
+        command?: string; cwd?: string; backend?: "shell" | "container";
       };
       if (!command) return Response.json({ error: "missing command" }, { status: 400 });
-      const ws = await this.getWorkspace();
-      const handle = await ws.shell.exec(command, { cwd, encoding: "utf8" });
+      const ws = await this._localWorkspace();
+      const handle = await ws.shell.exec(command, { cwd, encoding: "utf8", backend });
       const result = await handle.result();
       return Response.json(result);
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/env")) {
-      const ws = await this.getWorkspace();
+      const ws = await this._localWorkspace();
       const probe = async (command: string) => {
         try {
           const handle = await ws.shell.exec(command, { encoding: "utf8" });
@@ -927,7 +950,7 @@ export class Agent extends Think<Env> {
       // wsd's stdio log lives under /tmp inside the container. The
       // workspace shell can `cat` it back for us; /tmp isn't part
       // of the synced workspace tree so a shell read is the right path.
-      const ws = await this.getWorkspace();
+      const ws = await this._localWorkspace();
       const handle = await ws.shell.exec("cat /tmp/server.log || true", { encoding: "utf8" });
       const result = await handle.result();
       return new Response(result.stdout || "(no log file yet)", {
@@ -1023,7 +1046,7 @@ export class Agent extends Think<Env> {
     // getWs and re-await it on each call. The cache lives in
     // this._workspaceStub so the underlying RPC handshake only runs
     // on first contact.
-    const getWs = () => this.getWorkspace();
+    const getWs = () => this._localWorkspace();
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
@@ -1112,14 +1135,45 @@ export class Agent extends Think<Env> {
       })),
 
       ...pick("exec", tool({
-        description:
-          "Run a shell command in the workspace sandbox. " +
-          "Prefer the dedicated tools first: read/write/edit/ls/stat/" +
-          "mkdir/rm/find/grep for file ops. " +
-          "Primary use: compilation and build-tool invocation (zig, go, npm, etc.).",
+        description: [
+          "Run a shell command in the workspace. The workspace exposes",
+          "two backends with different capabilities; pick the cheapest",
+          "one that can run the command.",
+          "",
+          "Backends:",
+          '  - "shell" (default): just-bash in a Dynamic Worker. Cold-',
+          "    start instant, no container, no public network. Good for",
+          "    cat / grep / sed / awk / jq / head / tail / sort / find /",
+          "    file inspection, quick text transformations, and `git`",
+          "    (clone / status / diff / log / branch / commit) \u2014 the",
+          "    shell registers a built-in `git` command that forwards to",
+          "    the host workspace, so network-bound subcommands like",
+          "    `git clone` work even though the isolate has no public",
+          "    network. Cannot run npm, node, python, zig, go, or any",
+          "    binary outside just-bash's built-in command set.",
+          '  - "container": Cloudflare Container running wsd. Full Linux',
+          "    userland: npm, node, zig, go, esbuild, wrangler, real",
+          "    binaries on $PATH, public network. Cold start is much",
+          "    slower (warm-pool boot); reach for it when shell can't",
+          "    run the command \u2014 typically `npm install`, `npm test`,",
+          "    language-specific tooling, or anything that needs a real",
+          "    Linux binary. For git itself, prefer shell.",
+          "",
+          "Prefer the dedicated tools first: read / write / edit / ls /",
+          "stat / mkdir / rm / find / grep for file ops. Use exec for",
+          "git plumbing, builds, tests, typechecks, formatters.",
+        ].join("\n"),
         inputSchema: z.object({
-          command: z.string().describe("Build command, e.g. 'zig build-exe ...'"),
-          cwd:     z.string().optional().describe("Working directory, defaults to /workspace"),
+          command: z.string().describe(
+            "Shell command, e.g. 'git clone https://github.com/owner/repo /workspace/repo' or 'npm test'.",
+          ),
+          cwd: z.string().optional().describe("Working directory, defaults to /workspace."),
+          backend: z.enum(["shell", "container"]).optional().describe(
+            "Which backend to run on. Omit for the default ('shell'). " +
+              "Set 'container' when the command needs npm / node / a real " +
+              "language toolchain. Keep 'shell' for git, text manipulation, " +
+              "and anything the just-bash built-ins cover.",
+          ),
         }),
         execute: this._execTool(),
       })),
@@ -1130,7 +1184,7 @@ export class Agent extends Think<Env> {
         // `Workspace.provider()` to back isomorphic-git with the
         // SQLite VFS directly.
         cloneOnSandbox: async (invocation) => {
-          const ws = await self.getWorkspace();
+          const ws = await self._localWorkspace();
           const git = createGitClient({ ws });
           const url = `https://github.com/${invocation.repo}`;
           // Wipe any prior clone at the target. Stale `.git`
@@ -1185,21 +1239,31 @@ export class Agent extends Think<Env> {
   private _execTool() {
     const self = this;
     return async (
-      { command, cwd }: { command: string; cwd?: string },
+      {
+        command,
+        cwd,
+        backend,
+      }: { command: string; cwd?: string; backend?: "shell" | "container" },
       opts: { toolCallId: string; abortSignal?: AbortSignal },
     ) => {
+      // Resolve the backend the workspace will actually run against
+      // *now*, before kicking off runCancellable, so error reports
+      // name the right backend even when the model omitted it.
+      const resolvedBackend = backend ?? (self.env.LOADER ? "shell" : "container");
       return self.runCancellable(
         opts,
         async () => {
-          const ws = await self.getWorkspace();
+          const ws = await self._localWorkspace();
           const handle = await ws.shell.exec(command, {
             cwd,
             encoding: "utf8",
+            backend,
           });
           const result = await handle.result();
           return {
             command,
             cwd: cwd ?? null,
+            backend: resolvedBackend,
             exitCode: result.exitCode,
             stdout: truncateExecStream(result.stdout),
             stderr: truncateExecStream(result.stderr),
@@ -1209,6 +1273,7 @@ export class Agent extends Think<Env> {
           onError: (err) => ({
             command,
             cwd: cwd ?? null,
+            backend: resolvedBackend,
             error: { details: err instanceof Error ? err.message : String(err) },
           }),
         },

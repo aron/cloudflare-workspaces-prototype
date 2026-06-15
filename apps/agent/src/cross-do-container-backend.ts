@@ -54,8 +54,14 @@ export type CrossDOContainerBackendOptions = Omit<
  * serializable result.
  */
 export class CrossDOContainerBackend implements WorkspaceBackend {
+  // `type` mirrors the upstream CloudflareContainerBackend so logs
+  // and tracing keep using the same identifier across the two
+  // backend implementations. `id` is the selector the agent (and
+  // the exec tool's `backend` parameter) names this entry by;
+  // keeping it short (`container`) matches the convention in
+  // @cloudflare/workspace's examples and is what the model writes.
   readonly type = "cloudflare-container";
-  readonly id = "cloudflare-container";
+  readonly id = "container";
 
   readonly #options: Required<
     Pick<
