@@ -36,8 +36,10 @@ import { z } from "zod";
 import {
   type DurableObjectStorageLike,
   Workspace,
+  type WorkspaceBackend,
 } from "@cloudflare/workspace";
 import { CrossDOContainerBackend } from "./cross-do-container-backend.js";
+import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createGitClient } from "@cloudflare/workspace/git";
 import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
 import { tracing } from "cloudflare:workers";
@@ -225,12 +227,42 @@ export class Agent extends Think<Env> {
       // back here (see fetch() override below).
       workspace: { binding: "Agent", id: this.ctx.id.toString() },
     });
+    // Second backend: just-bash in a Dynamic Worker. Same Agent DO,
+    // same SQLite store — the WorkerBackend declares sync: "none"
+    // so the host's DB is the only authoritative store and no sync
+    // round trip happens around shell commands. The shell isolate
+    // reaches back through env.LOADER + ctx.exports.WorkspaceServiceProxy
+    // (re-exported at the worker entrypoint).
+    //
+    // Listed *after* the container backend in step 2 so the default
+    // backend (the first entry in `backends`) stays the container.
+    // Step 3 reorders these and adds an explicit `backend` parameter
+    // to the exec tool; until then this second backend exists only
+    // to prove the wiring stands up.
+    //
+    // env.LOADER is optional at construction time because the agent-
+    // suite vitest fixtures run against a stripped wrangler config
+    // without a `worker_loaders` binding (the private-beta binding
+    // isn't surfaced by vitest-pool-workers, and tests never exec).
+    // In prod the binding is present and the convenience constructor
+    // path mints the Dynamic Worker on first connect().
+    const backends: WorkspaceBackend[] = [this.#backend];
+    if (this.env.LOADER) {
+      backends.push(
+        new WorkerBackend({
+          id: "shell",
+          loader: this.env.LOADER,
+          workspace: { binding: "Agent", id: this.ctx.id.toString() },
+          ctx: this.ctx,
+        }),
+      );
+    }
     this.#workspace = new Workspace({
       // ctx.storage.sql.exec returns a narrower row type than
       // DurableObjectStorageLike declares; the runtime shape
       // matches. Cast through unknown to bypass invariance.
       storage: this.ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#backend],
+      backends,
       // Route every workspace op through the Workers Observability
       // user-tracing surface. With `observability.traces.enabled:
       // true` in wrangler.jsonc, spans land in the dashboard

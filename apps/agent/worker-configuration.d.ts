@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     WarmPool:       DurableObjectNamespace<import("./src/warm-pool").WarmPool>;
     AI:             Ai;
     SKILLS:         R2Bucket;
+    LOADER:         WorkerLoader;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
     BRAVE_API_KEY?:  string;

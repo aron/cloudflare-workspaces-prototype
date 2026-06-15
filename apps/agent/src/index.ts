@@ -2,12 +2,21 @@ import { Hono } from "hono";
 import { routeAgentRequest } from "agents";
 import { Agent, SubAgent } from "./agent.js";
 import { Sandbox } from "./sandbox.js";
-// WorkspaceProxy is re-exported at the worker entrypoint so the
-// runtime can build a loopback Fetcher (`ctx.exports.WorkspaceProxy`)
-// for the wsd-side `/ws` upgrade. It lives in `@cloudflare/workspace`;
-// importing it here just puts it in the worker's top-level module
-// graph.
-import { WorkspaceProxy } from "@cloudflare/workspace";
+// WorkspaceProxy and WorkspaceServiceProxy are re-exported at the
+// worker entrypoint so the runtime can build the loopback Fetchers
+// the backends use:
+//
+//   - WorkspaceProxy  carries the wsd-side `/ws` upgrade back into
+//                    the Agent DO. Used by the container backend.
+//   - WorkspaceServiceProxy is the Fetcher the worker backend hands
+//                    into its Dynamic Worker so the in-isolate shell
+//                    can reach back to getWorkspace().
+//
+// Both classes live in `@cloudflare/workspace`; importing them here
+// just puts them in the worker's top-level module graph so
+// `ctx.exports.WorkspaceProxy(...)` / `ctx.exports.WorkspaceServiceProxy(...)`
+// resolve at runtime.
+import { WorkspaceProxy, WorkspaceServiceProxy } from "@cloudflare/workspace";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
@@ -19,7 +28,7 @@ import {
 } from "./identity.js";
 import { resolveBaseUrl, withBaseUrl } from "./base-url.js";
 
-export { Agent, SubAgent, App, Room, Sandbox, WarmPool, WorkspaceProxy };
+export { Agent, SubAgent, App, Room, Sandbox, WarmPool, WorkspaceProxy, WorkspaceServiceProxy };
 
 type Variables = { identity: AccessIdentity; baseUrl: string };
 

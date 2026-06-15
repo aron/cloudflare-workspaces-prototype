@@ -8,6 +8,13 @@
   "ai": { "binding": "AI", "remote": true },
   "r2_buckets": [{ "binding": "SKILLS", "bucket_name": "hackspace-skills" }],
 
+  // Worker Loader binding. The Agent DO's Workspace mounts a worker
+  // backend (just-bash in a Dynamic Worker) alongside the container
+  // backend so cheap textual commands skip the container roundtrip;
+  // the worker backend dials through env.LOADER. Private-beta binding
+  // — the deploy account needs the worker-loader feature flag.
+  "worker_loaders": [{ "binding": "LOADER" }],
+
   // Dropped during the workspace `next` port:
   //   worker_loaders / LOADER  — fed @cloudflare/workspace/worker-sandbox
   //   artifacts / Artifacts    — fed @cloudflare/workspace/git
