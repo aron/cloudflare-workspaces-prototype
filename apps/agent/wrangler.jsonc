@@ -15,12 +15,6 @@
   // — the deploy account needs the worker-loader feature flag.
   "worker_loaders": [{ "binding": "LOADER" }],
 
-  // Dropped during the workspace `next` port:
-  //   worker_loaders / LOADER  — fed @cloudflare/workspace/worker-sandbox
-  //   artifacts / Artifacts    — fed @cloudflare/workspace/git
-  // Both subpaths are gone from the next-branch workspace; neither
-  // the agent nor git-tools references them any more.
-
   "assets": {
     "directory": "../frontend/dist",
     "not_found_handling": "single-page-application",

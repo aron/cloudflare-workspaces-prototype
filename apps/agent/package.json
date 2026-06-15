@@ -19,7 +19,6 @@
     "@cloudflare/ai-chat": "^0.8.3",
     "@cloudflare/containers": "^0.3.4",
     "@cloudflare/fs-tools": "*",
-    "@cloudflare/git-tools": "*",
     "@cloudflare/shell": "^0.3.8",
     "@cloudflare/think": "^0.8.4",
     "@cloudflare/web-tools": "*",

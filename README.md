@@ -19,7 +19,6 @@ package](#upgrading-the-workspace-package) below.
 | Path | Package | Description |
 |---|---|---|
 | [packages/fs-tools](./packages/fs-tools)   | `@cloudflare/fs-tools`  | `read` / `write` / `edit` tools over a pluggable file store. |
-| [packages/git-tools](./packages/git-tools) | `@cloudflare/git-tools` | `git_clone` tool — thin AI-SDK shim over `@cloudflare/workspace/git`. |
 | [packages/web-tools](./packages/web-tools) | `@cloudflare/web-tools` | `webfetch` / `websearch` (Brave) tools. |
 | [packages/shared](./packages/shared)       | `@app/shared`           | Wire types shared between agent and frontend. |
 | [apps/agent](./apps/agent)                 | `@app/agent`            | The Worker: Agent / SubAgent / App / Room / Sandbox / WarmPool DOs. |
@@ -157,23 +156,25 @@ Per-persona smoke tests:
 
 ## Upgrading the workspace package
 
-The agent depends on three artefacts that all need to move in lockstep:
+The agent depends on two artefacts that need to move in lockstep:
 
 1. **npm:** `@cloudflare/workspace` (pinned in
-   `apps/agent/package.json` and `packages/git-tools/package.json`).
+   `apps/agent/package.json`).
 2. **GHCR:** `ghcr.io/cloudflare/workspace-wsd-linux-x64:<version>`
    (the `FROM` line in `apps/agent/Dockerfile`).
-3. **Optional:** the `wsd` examples in the upstream
-   [cloudflare/workspace](https://github.com/cloudflare/workspace)
-   repo are the source-of-truth for the Sandbox DO wiring
-   (`withWorkspaceContainer` + `CloudflareContainerBackend`).
+
+The `wsd` examples in the upstream
+[cloudflare/workspace](https://github.com/cloudflare/workspace) repo
+(particularly `examples/think`) are the source-of-truth for the
+tiered backend wiring we use — `WorkerBackend` + `WorkspaceServiceProxy`
+for the shell tier, `withWorkspaceContainer` + `CloudflareContainerBackend`
+for the container tier.
 
 To bump:
 
 ```sh
 # 1. pin the npm package
-npm install --workspace=@app/agent      @cloudflare/workspace@<version>
-npm install --workspace=@cloudflare/git-tools @cloudflare/workspace@<version>
+npm install --workspace=@app/agent @cloudflare/workspace@<version>
 
 # 2. update the GHCR tag in apps/agent/Dockerfile to match.
 #    Look for the `FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:` line.
