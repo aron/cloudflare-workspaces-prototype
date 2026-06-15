@@ -133,14 +133,14 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["rm",              "remove a file or directory recursively"],
   ["find",            "locate files by name substring"],
   ["grep",            "search file contents for a pattern"],
-  ["exec",            "run a build/compile command in the container"],
+  ["exec",            "run a shell command \u2014 default backend 'shell' is just-bash (cheap text tooling + built-in git), pass backend: 'container' for npm/node/zig/go/python"],
   ["webfetch",        "fetch and summarize a URL"],
   ["websearch",       "search the web for documentation or examples"],
-  ["git_clone",       "clone a public GitHub repo into the workspace"],
 ];
 
 const GUIDELINES = [
   "Prefer grep / find / ls over exec for file exploration",
+  "exec runs on two backends: 'shell' (default \u2014 just-bash, instant boot, no public network, but includes a built-in git command for clone/status/diff/log/branch/commit) and 'container' (full Linux, slower cold start, used for npm / node / zig / go / python / wrangler / esbuild and anything else outside the just-bash command set). Use git via the shell backend; fall through to container when the command needs a real binary.",
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
   "Be concise in your responses",
   "Show file paths clearly when working with files",

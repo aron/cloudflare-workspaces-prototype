@@ -41,13 +41,11 @@ import {
 } from "@cloudflare/workspace";
 import { CrossDOContainerBackend } from "./cross-do-container-backend.js";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
-import { createGitClient } from "@cloudflare/workspace/git";
 import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
 import { tracing } from "cloudflare:workers";
 import { resolveContainerId, releaseContainer } from "./pool.js";
 import type { Sandbox } from "./sandbox.js";
 import { adaptForFsTools } from "./workspace-adapter.js";
-import { createGitCloneTool } from "@cloudflare/git-tools";
 
 import {
   createEditTool,
@@ -1178,37 +1176,14 @@ export class Agent extends Think<Env> {
         execute: this._execTool(),
       })),
 
-      ...pick("git_clone", createGitCloneTool({
-        // Workspace lives on this DO, so the git client runs here
-        // — no cross-DO hop. `createGitClient` reaches
-        // `Workspace.provider()` to back isomorphic-git with the
-        // SQLite VFS directly.
-        cloneOnSandbox: async (invocation) => {
-          const ws = await self._localWorkspace();
-          const git = createGitClient({ ws });
-          const url = `https://github.com/${invocation.repo}`;
-          // Wipe any prior clone at the target. Stale `.git`
-          // directories from a previous failed call cause
-          // isomorphic-git to error out with "commit ... not
-          // available locally" — the second clone refuses to
-          // overwrite the orphaned refs.
-          await ws.fs.rm(invocation.dest, { recursive: true, force: true });
-          await ws.fs.mkdir(invocation.dest, { recursive: true });
-          await git.clone({
-            url,
-            dir: invocation.dest,
-            ref: invocation.ref,
-            depth: invocation.depth,
-            singleBranch: true,
-          });
-          return {
-            ok: true,
-            repo: invocation.repo,
-            ref: invocation.ref ?? "default",
-            dest: invocation.dest,
-          };
-        },
-      })),
+      // git_clone retired in the workspace-next port: the shell
+      // backend registers a built-in `git` command that forwards
+      // every invocation across the loopback to the host's
+      // workspace.git.cli (clone / status / diff / log / branch /
+      // commit / ...). The model uses
+      //   exec({ command: 'git clone https://...', backend: 'shell' })
+      // which is described in the exec tool's per-backend guidance
+      // and in the capabilities skill.
     };
   }
 

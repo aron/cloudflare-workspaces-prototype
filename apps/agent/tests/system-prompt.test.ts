@@ -103,7 +103,6 @@ describe("buildSystemPrompt — tool list", () => {
       "find", "grep",
       "exec",
       "webfetch", "websearch",
-      "git_clone",
     ];
     for (const name of expected) {
       expect(prompt).toMatch(new RegExp(`\\n- ${name}: `));

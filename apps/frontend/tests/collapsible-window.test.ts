@@ -32,7 +32,7 @@ describe("isCollapsiblePart", () => {
   it("recognises generic tool parts as collapsible", () => {
     expect(isCollapsiblePart("tool-read")).toBe(true);
     expect(isCollapsiblePart("tool-grep")).toBe(true);
-    expect(isCollapsiblePart("tool-git_clone")).toBe(true);
+    expect(isCollapsiblePart("tool-websearch")).toBe(true);
   });
 
   it("excludes exec (rendered by ExecToolView, always-open chrome)", () => {

@@ -25,9 +25,8 @@ const EXPECTED_TOOLS = [
   "read", "write", "edit",
   "ls", "stat", "mkdir", "rm",
   "find", "grep",
-  "exec",
+  "exec",  // takes an optional backend: 'shell' | 'container'; 'shell' includes a built-in git command
   "webfetch", "websearch",  // websearch only because BRAVE_API_KEY is set in wrangler.test
-  "git_clone",
 ] as const;
 
 describe("Agent — getTools()", () => {
