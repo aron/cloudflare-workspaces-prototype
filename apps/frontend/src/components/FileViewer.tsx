@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { X, FileWarning } from "lucide-react";
+import { X, FileWarning, Copy, Check } from "lucide-react";
 import { decideKind, type ViewerKind } from "@/lib/viewer-kind.js";
 
 const MAX_TEXT_BYTES = 256 * 1024;
@@ -127,6 +127,43 @@ interface FileViewerProps {
 
 export function FileViewer({ entry, onDismiss }: FileViewerProps) {
   const state = useFileViewerEntry(entry);
+  // Copy-button state. Two outcomes worth surfacing:
+  //   "ok"   — short-lived “copied” acknowledgement.
+  //   "err"  — same lifetime; reverts to idle so the user can try again.
+  // Each render reset is keyed by Date.now() on the timer so a rapid
+  // double-click doesn't cancel the still-running acknowledgement.
+  const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const t = window.setTimeout(() => setCopyState("idle"), 1500);
+    return () => window.clearTimeout(t);
+  }, [copyState]);
+
+  // Decide what "copy" means per content kind:
+  //   text     → raw text body.
+  //   image    → the file URL (clipboard image writes need an ArrayBuffer
+  //              + a clipboard permission and don't work in every browser;
+  //              the URL is universally useful and what the agent's prompt
+  //              already encourages users to share).
+  //   download → the file URL.
+  //   loading/error → button is disabled.
+  const canCopy = state.status === "ready";
+  const copy = async () => {
+    if (!canCopy) return;
+    try {
+      const payload =
+        state.kind === "text" && typeof state.text === "string"
+          ? state.text
+          : new URL(entry.url, window.location.origin).toString();
+      await navigator.clipboard.writeText(payload);
+      setCopyState("ok");
+    } catch {
+      // Most likely cause: clipboard API unavailable (non-secure context)
+      // or the user denied permission. Surface a brief error tick and
+      // let them try again; no toast / dialog needed.
+      setCopyState("err");
+    }
+  };
 
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
@@ -135,6 +172,26 @@ export function FileViewer({ entry, onDismiss }: FileViewerProps) {
         {state.status === "ready" && state.size !== undefined && (
           <span className="text-xs text-kumo-inactive">{formatSize(state.size)}</span>
         )}
+        <button
+          type="button"
+          aria-label={
+            copyState === "ok"  ? "Copied" :
+            copyState === "err" ? "Copy failed" :
+            state.kind === "text" ? "Copy file contents" : "Copy file URL"
+          }
+          title={
+            copyState === "ok"  ? "Copied" :
+            copyState === "err" ? "Copy failed" :
+            state.kind === "text" ? "Copy file contents" : "Copy file URL"
+          }
+          onClick={copy}
+          disabled={!canCopy}
+          className="rounded p-1 text-kumo-inactive hover:bg-kumo-tint hover:text-kumo-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-kumo-inactive"
+        >
+          {copyState === "ok"
+            ? <Check className="size-3.5 text-kumo-brand" />
+            : <Copy className="size-3.5" />}
+        </button>
         <button
           type="button"
           aria-label="Dismiss"

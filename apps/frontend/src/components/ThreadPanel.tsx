@@ -606,6 +606,7 @@ export function ThreadPanel({
           />
           <MentionTextarea
             rows={1}
+            autoExpand
             value={input}
             onChange={setInput}
             onKeyDown={(e) => {

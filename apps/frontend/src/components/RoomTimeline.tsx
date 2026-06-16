@@ -428,6 +428,7 @@ export function RoomTimeline({
         <div className="prompt-input rounded-2xl border px-4 pb-2 pt-3">
           <MentionTextarea
             rows={1}
+            autoExpand
             value={input}
             onChange={setInput}
             onKeyDown={(e) => {
@@ -521,7 +522,7 @@ function TopLevelMessage({
             <span className="text-xs text-kumo-inactive tabular-nums">{relTime(message.metadata.createdAt)}</span>
           </div>
           <div className="mt-1 whitespace-pre-wrap text-base leading-6 text-kumo-default">
-            <MentionText text={text} />
+            <CollapsibleText text={text} />
           </div>
           {hasThread && summary && (
             <div className="mt-3 flex items-start gap-2 rounded-lg border border-kumo-line/60 bg-kumo-base/40 px-3 py-2 text-sm leading-5 text-kumo-default">
@@ -557,5 +558,68 @@ function TopLevelMessage({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Renders a message body that may be very long. When the text exceeds
+ * `COLLAPSE_THRESHOLD_LINES` rendered lines, the first chunk is shown
+ * with a fade-out gradient and a "Read more" button reveals the rest;
+ * "Show less" puts it back.
+ *
+ * Truncation runs against the raw text's newline count, not the
+ * rendered height — it's cheap, deterministic, and consistent across
+ * viewport widths. A user wrapping a single 2000-char line still sees
+ * the whole thing on one rendered line, but that's expected for a
+ * chat message: long lines are rare in practice (paste-bombs are
+ * usually code blocks).
+ *
+ * The toggle preserves @mention rendering by passing the visible
+ * slice through `MentionText` either way.
+ */
+const COLLAPSE_THRESHOLD_LINES = 10;
+// When collapsed, show this many lines. Slightly under the threshold
+// so there's a visible payoff for expanding (otherwise "Read more"
+// reveals only one extra line and feels useless).
+const COLLAPSED_LINES = 8;
+
+function CollapsibleText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const [expanded, setExpanded] = useState(false);
+
+  if (lines.length <= COLLAPSE_THRESHOLD_LINES) {
+    return <MentionText text={text} />;
+  }
+
+  const visible = expanded ? text : lines.slice(0, COLLAPSED_LINES).join("\n");
+  const hiddenCount = lines.length - COLLAPSED_LINES;
+
+  return (
+    <>
+      <div className={expanded ? undefined : "relative"}>
+        <MentionText text={visible} />
+        {/*
+         * Fade-out gradient over the bottom of the collapsed block so
+         * the cutoff doesn't look like a hard text edit. `pointer-events-none`
+         * keeps the gradient from eating clicks on @mentions underneath.
+         */}
+        {!expanded && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-kumo-elevated via-kumo-elevated/80 to-transparent"
+          />
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => setExpanded(e => !e)}
+        // mt-1 keeps the button tight to the text; text-xs / kumo-brand
+        // matches the "Open thread" affordance below so the two read as
+        // the same class of inline control.
+        className="mt-1 text-xs font-medium text-kumo-brand hover:underline"
+      >
+        {expanded ? "Show less" : `Read more (${hiddenCount} more line${hiddenCount === 1 ? "" : "s"})`}
+      </button>
+    </>
   );
 }

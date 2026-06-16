@@ -24,6 +24,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,12 +46,74 @@ type BaseProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>,
 export interface MentionTextareaProps extends BaseProps {
   value:    string;
   onChange: (next: string) => void;
+  /**
+   * Grow the textarea height to fit its content as the user types,
+   * up to `autoExpandMaxLines` lines (default 8). Caps further at the
+   * distance to the top of the viewport so a long paste never pushes
+   * the composer out of view. When false (or omitted), the textarea
+   * stays at whatever `rows`/CSS height the consumer set.
+   */
+  autoExpand?: boolean;
+  /** Hard line cap for auto-expand mode. Defaults to 8. */
+  autoExpandMaxLines?: number;
 }
 
+// Vertical headroom kept between the top of the composer and the top of
+// the viewport when the line cap is overridden by the viewport check.
+// Keeps a bit of the scrollback visible above the composer so the user
+// always has context for what they're typing about.
+const VIEWPORT_HEADROOM_PX = 80;
+
 export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaProps>(
-  function MentionTextarea({ value, onChange, onKeyDown, ...rest }, externalRef) {
+  function MentionTextarea(
+    { value, onChange, onKeyDown, autoExpand = false, autoExpandMaxLines = 8, style, ...rest },
+    externalRef,
+  ) {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
     useImperativeHandle(externalRef, () => innerRef.current!, []);
+
+    // Auto-expand sizing.
+    //
+    // Strategy: reset to `auto` height (so scrollHeight reflects the
+    // intrinsic content height, not the previous expanded one), then
+    // set the inline height to min(content, max-lines, viewport-room).
+    // useLayoutEffect runs synchronously after the DOM has the new
+    // value but before paint, so the user never sees a flash at the
+    // wrong height.
+    //
+    // The line cap comes from computed `line-height`. Falling back to
+    // 24px (1.5rem; matches the existing leading-6 utility on both
+    // composers) keeps the cap sensible on browsers that report a
+    // non-numeric value (e.g. "normal").
+    useLayoutEffect(() => {
+      if (!autoExpand) return;
+      const el = innerRef.current;
+      if (!el) return;
+      // Reset so scrollHeight reflects content, not the current height.
+      el.style.height = "auto";
+      const computed = window.getComputedStyle(el);
+      const parsedLineHeight = parseFloat(computed.lineHeight);
+      const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0
+        ? parsedLineHeight
+        : 24;
+      const paddingY =
+        (parseFloat(computed.paddingTop) || 0) +
+        (parseFloat(computed.paddingBottom) || 0);
+      const borderY =
+        (parseFloat(computed.borderTopWidth) || 0) +
+        (parseFloat(computed.borderBottomWidth) || 0);
+      const linesCap = lineHeight * autoExpandMaxLines + paddingY + borderY;
+      // Viewport cap — the top of the textarea's bounding box should
+      // never go above VIEWPORT_HEADROOM_PX. Anything bigger and we'd
+      // be pushing the composer off-screen.
+      const rect = el.getBoundingClientRect();
+      const viewportCap = Math.max(
+        lineHeight + paddingY + borderY, // never collapse below one line
+        rect.bottom - VIEWPORT_HEADROOM_PX,
+      );
+      const target = Math.min(el.scrollHeight, linesCap, viewportCap);
+      el.style.height = `${target}px`;
+    }, [value, autoExpand, autoExpandMaxLines]);
 
     const { candidates } = useMentionCandidates();
     const [caret,    setCaret]    = useState(0);
@@ -126,18 +189,26 @@ export const MentionTextarea = forwardRef<HTMLTextAreaElement, MentionTextareaPr
       if (el) setCaret(el.selectionStart ?? 0);
     }, []);
 
+    // Auto-expand mode owns the inline height, so we clear any incoming
+    // `style.height` to avoid a useLayoutEffect <-> caller fight. Other
+    // style keys (e.g. min-width) still pass through.
+    const mergedStyle = autoExpand
+      ? { ...(style ?? {}), height: undefined, overflow: "auto" as const }
+      : style;
+
     return (
       <div className="relative">
         <textarea
           ref={innerRef}
           value={value}
+          {...rest}
           onChange={(e) => { onChange(e.target.value); syncCaret(); }}
           onKeyUp={syncCaret}
           onClick={syncCaret}
           onSelect={syncCaret}
           onBlur={() => setOpen(false)}
           onKeyDown={handleKeyDown}
-          {...rest}
+          style={mergedStyle}
         />
         {open && matches.length > 0 && (
           <MentionPopover

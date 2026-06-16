@@ -828,7 +828,10 @@ export class Agent extends Think<Env> {
 
     if (request.method === "GET" && url.pathname.endsWith("/vfs")) {
       const ws = await this._localWorkspace();
-      const matches = await ws.fs.find(WORKSPACE, "");
+      // `pattern: undefined` means "return every entry under WORKSPACE".
+      // Passing an empty string to `find()` compiles to `^$` (alpha.8
+      // behaviour) and filters everything out.
+      const matches = await ws.fs.find(WORKSPACE);
       const entries: Array<{ path: string; type: string; size: number; mtime: number }> = [];
       for (const m of matches) {
         try {
@@ -857,7 +860,9 @@ export class Agent extends Think<Env> {
       const limitRaw = url.searchParams.get("limit");
       const limit = Math.min(Math.max(parseInt(limitRaw ?? "20", 10) || 20, 1), 100);
       const ws = await this._localWorkspace();
-      const matches = await ws.fs.find(WORKSPACE, "");
+      // `pattern: undefined` returns the full tree; an empty string
+      // would compile to `^$` and filter every entry out (alpha.8).
+      const matches = await ws.fs.find(WORKSPACE);
       const all: ListingEntry[] = [];
       for (const m of matches) {
         try {
@@ -1153,7 +1158,10 @@ export class Agent extends Think<Env> {
         }),
         execute: async ({ directory, pattern }) => {
           const ws = await getWs();
-          return { directory, pattern, matches: await ws.fs.find(directory, pattern ?? "") };
+          // Pass `pattern` through verbatim — the workspace's `find`
+          // treats `undefined` as "no filter". Coercing to `""` here
+          // would compile to `^$` and zero-out the result set.
+          return { directory, pattern, matches: await ws.fs.find(directory, pattern) };
         },
       })),
 
