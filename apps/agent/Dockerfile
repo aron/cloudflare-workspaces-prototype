@@ -12,7 +12,7 @@
 # can land on top of npm / npx; the image deliberately stays
 # Node-only — zig and go were dropped to keep the image lean.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.8 AS wsd
 
 FROM debian:stable-slim
 
