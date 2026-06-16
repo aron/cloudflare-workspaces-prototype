@@ -107,6 +107,59 @@ describe("buildSystemPrompt — guidelines", () => {
   });
 });
 
+describe("buildSystemPrompt — project_context: project instructions", () => {
+  // Pi inlines AGENTS.md into <project_context> as a
+  // <project_instructions> sub-block. The hackspace mirrors that
+  // shape but sources the body from R2 instead of disk. These
+  // tests pin the rendering: presence/absence, ordering relative to
+  // operational notes, and XML safety.
+
+  it("omits the project_instructions block when projectInstructions is unset", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).not.toMatch(/<project_instructions/);
+    expect(prompt).not.toMatch(/Project-specific instructions/);
+  });
+
+  it("omits the block when projectInstructions is empty or whitespace", () => {
+    expect(buildSystemPrompt({ projectInstructions: "" })).not.toMatch(/<project_instructions/);
+    expect(buildSystemPrompt({ projectInstructions: "   \n  " })).not.toMatch(/<project_instructions/);
+  });
+
+  it("renders the project_instructions block with the AGENTS.md path label", () => {
+    const body = "# House rules\n- Always use absolute paths.\n- Prefer tsc strict mode.";
+    const prompt = buildSystemPrompt({ projectInstructions: body });
+    expect(prompt).toMatch(/Project-specific instructions and guidelines:/);
+    expect(prompt).toMatch(/<project_instructions path="AGENTS\.md">/);
+    expect(prompt).toMatch(/<\/project_instructions>/);
+    // Body lands verbatim, not XML-escaped (it's markdown).
+    expect(prompt).toContain("# House rules");
+    expect(prompt).toContain("- Always use absolute paths.");
+  });
+
+  it("places project_instructions before the operational notes inside <project_context>", () => {
+    // AGENTS.md (user-controlled) should outrank runtime operational
+    // notes; the model reads it first inside the context block.
+    const prompt = buildSystemPrompt({
+      projectInstructions: "# House rules\nSomething.",
+    });
+    const ctxStart = prompt.indexOf("<project_context>");
+    const instrIdx = prompt.indexOf("<project_instructions");
+    const execIdx  = prompt.indexOf("Execution environment");
+    expect(ctxStart).toBeGreaterThan(0);
+    expect(instrIdx).toBeGreaterThan(ctxStart);
+    expect(execIdx).toBeGreaterThan(instrIdx);
+  });
+
+  it("keeps markdown special characters in the body untouched", () => {
+    // The body is markdown by convention — inline `<Foo>` snippets,
+    // code blocks, etc. Escaping would make the document unreadable.
+    // Pin that we don't accidentally start escaping in a future refactor.
+    const body = '```ts\nconst x: <Foo & "bar"> = 1;\n```';
+    const prompt = buildSystemPrompt({ projectInstructions: body });
+    expect(prompt).toContain('const x: <Foo & "bar"> = 1;');
+  });
+});
+
 describe("buildSystemPrompt — project_context: execution environment", () => {
   // The execution-environment sub-block is the model's grounding when
   // a user asks where their code runs, why exec is slow, or whether

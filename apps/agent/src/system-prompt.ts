@@ -14,12 +14,18 @@
  *   3. Hedge            — "you may have access to other custom tools".
  *   4. Guidelines       — per-tool ergonomics (read/write/edit) +
  *                          hackspace-specific meta-rules.
- *   5. <project_context> — execution environment, workspace layout,
- *                          file serving, workspace-ignore, originator
- *                          mention. Mirrors pi's <project_context>
- *                          slot (which inlines AGENTS.md). The
- *                          hackspace doesn't have an AGENTS.md file,
- *                          so we synthesise the equivalent here.
+ *   5. <project_context> — optional inlined AGENTS.md document plus
+ *                          execution environment, workspace layout,
+ *                          file serving, workspace-ignore, and
+ *                          originator mention. Mirrors pi's
+ *                          <project_context> slot (which inlines
+ *                          AGENTS.md from the project root). The
+ *                          AGENTS.md content, when present, is
+ *                          rendered as a <project_instructions
+ *                          path="AGENTS.md">...</project_instructions>
+ *                          sub-block before the operational notes,
+ *                          so any project-specific persona / style /
+ *                          house-rule guidance lands first.
  *   6. Skills           — pi-style preamble + <available_skills> XML.
  *   7. Footer           — current date + cwd.
  *
@@ -82,6 +88,15 @@ export interface BuildSystemPromptOptions {
   baseUrl?: string;
   /** Active room id, used to anchor message links back to a specific message. */
   roomId?: string;
+  /**
+   * Optional project-instructions document inlined into
+   * `<project_context>`. Pi's `buildSystemPrompt` reads this from
+   * an `AGENTS.md` file at the project root; the hackspace fetches
+   * it from the SKILLS R2 bucket (key `AGENTS.md`) via
+   * `fetchProjectInstructions` and caches the result on the Agent
+   * DO. When unset or empty the block is skipped.
+   */
+  projectInstructions?: string;
 }
 
 // ── Section 1: identity ────────────────────────────────────────────
@@ -243,14 +258,52 @@ function originatorBlock(
   ].join("\n");
 }
 
+/**
+ * Render the AGENTS.md document as a `<project_instructions>`
+ * sub-block. The shape matches pi's exactly:
+ *
+ *   <project_instructions path="AGENTS.md">
+ *   ...body verbatim...
+ *   </project_instructions>
+ *
+ * `path` is a fixed label; the hackspace fetches the body from R2
+ * but the model doesn't need to know that — "AGENTS.md" is the
+ * recognisable name and matches pi's convention.
+ *
+ * Body XML is *not* escaped: pi treats it as markdown and the
+ * convention there is to write `<…>` snippets, code blocks, and
+ * other markup directly. Escaping would make the document
+ * unreadable. The wrapping tags are safe because the path
+ * attribute is fixed and the content is bounded by the closing
+ * `</project_instructions>` tag.
+ */
+function projectInstructionsBlock(body: string): string {
+  return [
+    'Project-specific instructions and guidelines:',
+    "",
+    '<project_instructions path="AGENTS.md">',
+    body,
+    "</project_instructions>",
+  ].join("\n");
+}
+
 function buildProjectContext(opts: {
   threadId: string;
   baseUrl: string;
   roomId: string;
   pullIgnore: string[];
   originator?: { userId: string; name: string };
+  projectInstructions?: string;
 }): string {
-  const sections: string[] = [EXECUTION_BLOCK, WORKSPACE_LAYOUT_BLOCK];
+  const sections: string[] = [];
+  // AGENTS.md first — user-controlled persona / style / house rules
+  // outrank runtime operational notes. Mirrors pi's emission order:
+  // <project_instructions> comes immediately after the
+  // <project_context> opener.
+  if (opts.projectInstructions && opts.projectInstructions.trim().length > 0) {
+    sections.push(projectInstructionsBlock(opts.projectInstructions.trim()));
+  }
+  sections.push(EXECUTION_BLOCK, WORKSPACE_LAYOUT_BLOCK);
   if (opts.pullIgnore.length > 0) sections.push(workspaceIgnoreBlock(opts.pullIgnore));
   sections.push(fileServingBlock(opts.threadId, opts.baseUrl));
   if (opts.originator) {
@@ -275,6 +328,7 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const guidelines = GUIDELINES.map((g) => `- ${g}`).join("\n");
   const projectContext = buildProjectContext({
     threadId, baseUrl, roomId, pullIgnore, originator,
+    projectInstructions: opts.projectInstructions,
   });
 
   const parts: string[] = [

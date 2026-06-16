@@ -69,6 +69,7 @@ import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { buildSystemPrompt, type Skill } from "./system-prompt.js";
 import { discoverSkills } from "./skills.js";
+import { fetchProjectInstructions } from "./project-instructions.js";
 import { trace, redactSecrets } from "./tracing.js";
 import { buildSessionTar } from "./debug-tar.js";
 
@@ -120,6 +121,21 @@ export class Agent extends Think<Env> {
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
+
+  /**
+   * Cached project-instructions document, fetched from
+   * `<SKILLS bucket>/AGENTS.md`. Inlined into `<project_context>` on
+   * every turn, mirroring how pi handles its own AGENTS.md.
+   *
+   * Three sentinels:
+   *   - `undefined` — not fetched yet (cold DO, warmup hasn't run).
+   *   - `null`      — fetched, but missing/empty/oversized.
+   *   - string      — fetched and ready to inline.
+   *
+   * `beforeTurn` collapses `undefined` to one of the other two by
+   * blocking on a fetch, the same way it does for skills.
+   */
+  private _projectInstructions: string | null | undefined = undefined;
 
   /** Room the thread lives in. Hydrated lazily from storage; set on seed. */
   private _roomId: string | null = null;
@@ -361,6 +377,19 @@ export class Agent extends Think<Env> {
         }
       })(),
     );
+    // Project-instructions fetch — same shape as skills discovery,
+    // same swallow-failures contract. `_projectInstructions` stays
+    // `undefined` if the request never completes; `beforeTurn` will
+    // block on a fresh fetch in that case.
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          this._projectInstructions = await fetchProjectInstructions(this.env.SKILLS);
+        } catch {
+          this._projectInstructions = null;
+        }
+      })(),
+    );
   }
 
   /* Removed: exec inflight recovery.
@@ -396,6 +425,7 @@ export class Agent extends Think<Env> {
       pullIgnore: WORKSPACE_IGNORE,
       baseUrl:    (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "",
       originator: this.originatorFromMessages(),
+      projectInstructions: this._projectInstructions ?? undefined,
     });
   }
 
@@ -456,6 +486,18 @@ export class Agent extends Think<Env> {
           this._skills = await discoverSkills(this.env.SKILLS);
         } catch {
           // Leave _skills empty so the system prompt still renders.
+        }
+      }
+
+      // Same lazy materialisation for the AGENTS.md document. We
+      // distinguish "not fetched yet" (undefined) from "fetched, not
+      // present" (null) so a missing file doesn't trigger a fresh R2
+      // fetch on every turn.
+      if (this._projectInstructions === undefined) {
+        try {
+          this._projectInstructions = await fetchProjectInstructions(this.env.SKILLS);
+        } catch {
+          this._projectInstructions = null;
         }
       }
 

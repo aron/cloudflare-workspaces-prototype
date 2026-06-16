@@ -69,6 +69,21 @@ npm run skills:sync:local                            # local miniflare bucket
 Add a new skill by creating `apps/agent/skills/<name>/SKILL.md` and
 re-running `npm run skills:sync`. No redeploy required.
 
+### Project instructions (`AGENTS.md`)
+
+Optional. The agent's system prompt mirrors pi's shape and includes a
+`<project_context>` block; if the SKILLS bucket has a top-level
+`AGENTS.md` object, its body is inlined inside that block as
+`<project_instructions path="AGENTS.md">...</project_instructions>` on
+every turn. Use it for house style, persona, or operator-specific
+rules you want the agent to see without loading a skill.
+
+Drop the file at `apps/agent/skills/AGENTS.md` and run
+`npm run skills:sync` (the sync script walks the whole `skills/` tree,
+and the discoverer ignores anything that isn't `*/SKILL.md`, so it
+won't be mistaken for a skill). Capped at 16 KiB; empty / missing /
+oversized files render no block at all.
+
 ## Run locally
 
 ```sh
