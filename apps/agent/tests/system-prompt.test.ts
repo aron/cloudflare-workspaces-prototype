@@ -3,8 +3,15 @@
  *
  * The system prompt is modelled on pi's `buildSystemPrompt` shape so the
  * structure stays familiar:
- *   identity → workspace → tools → custom-tools hedge → guidelines →
+ *   identity → tools → custom-tools hedge → guidelines →
+ *   <project_context>...</project_context> →
  *   skills preamble + <available_skills> XML → date/cwd footer
+ *
+ * Project context inlines architecture, workspace layout, optional
+ * workspace-ignore rules, file-serving conventions, and (when set)
+ * the thread originator's @-mention rule. That keeps tools and
+ * guidelines in the high-attention top of the prompt and groups
+ * project-shaped operational notes into one block before skills.
  */
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt, type Skill } from "../src/system-prompt.js";
@@ -28,69 +35,21 @@ describe("buildSystemPrompt — identity & shape", () => {
     expect(prompt).toMatch(/\nCurrent date: \d{4}-\d{2}-\d{2}\nCurrent working directory: /);
   });
 
-  it("includes the workspace-paths reminder", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/All files live under \/workspace/);
-  });
-
-});
-
-describe("buildSystemPrompt — execution environment", () => {
-  // The architecture section is the model's grounding when a user
-  // asks where their code runs, why exec is slow, or whether the
-  // deployed Worker has internet. The wording matters for those
-  // answers — pin the structural claims here so a future copy-edit
-  // can't accidentally collapse the three planes back together.
-
-  it("names the two planes the agent operates across", () => {
-    const prompt = buildSystemPrompt({});
-    // Each plane has a heading-style bullet — the exact name is the
-    // anchor the model uses when summarising back to the user.
-    expect(prompt).toMatch(/- Agent \(this conversation\):/);
-    expect(prompt).toMatch(/- Sandbox container:/);
-  });
-
-  it("identifies the agent as a Durable Object owning the VFS", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/Durable Object/);
-    expect(prompt).toMatch(/VFS/);
-    expect(prompt).toMatch(/SQLite/);
-  });
-
-  it("places exec in the sandbox container, not the DO", () => {
-    const prompt = buildSystemPrompt({});
-    // The section explicitly says exec runs inside the container so
-    // the model doesn't conflate it with the cheap in-DO file tools.
-    expect(prompt).toMatch(/`exec` runs inside it/);
-  });
-
-  it("explains that file tools sync to the container around exec", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/FUSE/);
-    expect(prompt).toMatch(/same files/);
-  });
-
-  it("lists latency tiers so the model can pick tools accordingly", () => {
-    // The workspace-ignore section already mentions exec round-trips;
-    // here we make the relative cost of both tiers explicit, so the
-    // perf hint isn't tied only to the ignore-list discussion.
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/Latency tiers/);
-    expect(prompt).toMatch(/File tools[\s\S]*single-digit ms/);
-    expect(prompt).toMatch(/`exec`[\s\S]*tens of ms/);
-  });
-
-  it("places the architecture section between identity and the tool list", () => {
-    // Architecture before tools so the tool descriptions land on a
-    // populated mental model; after identity so the model knows who
-    // it is before learning where it runs.
+  it("emits sections in pi's order: identity → tools → guidelines → project_context → footer", () => {
+    // The whole point of the reshuffle is keeping tools + guidelines
+    // in the early high-attention region. Pin the ordering so a
+    // future refactor can't move project_context back above tools.
     const prompt = buildSystemPrompt({});
     const identityIdx = prompt.indexOf("expert TypeScript developer");
-    const archIdx = prompt.indexOf("Execution environment");
-    const toolsIdx = prompt.indexOf("Available tools:");
+    const toolsIdx    = prompt.indexOf("Available tools:");
+    const guideIdx    = prompt.indexOf("Guidelines:");
+    const ctxIdx      = prompt.indexOf("<project_context>");
+    const dateIdx     = prompt.indexOf("Current date:");
     expect(identityIdx).toBeGreaterThanOrEqual(0);
-    expect(archIdx).toBeGreaterThan(identityIdx);
-    expect(toolsIdx).toBeGreaterThan(archIdx);
+    expect(toolsIdx).toBeGreaterThan(identityIdx);
+    expect(guideIdx).toBeGreaterThan(toolsIdx);
+    expect(ctxIdx).toBeGreaterThan(guideIdx);
+    expect(dateIdx).toBeGreaterThan(ctxIdx);
   });
 });
 
@@ -112,40 +71,6 @@ describe("buildSystemPrompt — tool list", () => {
   it("includes the custom-tools hedge sentence after the tool list", () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/In addition to the tools above, you may have access to other custom tools/);
-  });
-
-
-});
-
-describe("buildSystemPrompt — capabilities overview", () => {
-  it("tells the model to load the capabilities-overview skill when asked what it can do", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/capabilities-overview/);
-    expect(prompt).toMatch(/what can you do|what you can do|how to use/i);
-  });
-});
-
-describe("buildSystemPrompt — file serving", () => {
-  it("tells the model the URL shape for serving workspace files", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
-  });
-
-  it("mentions inline embedding (images) and the download attribute pattern", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/!\[/);
-    expect(prompt).toMatch(/download/);
-  });
-
-  it("substitutes the threadId into URL examples when provided", () => {
-    const prompt = buildSystemPrompt({ threadId: "abc123" });
-    expect(prompt).toMatch(/\/api\/threads\/abc123\/files\/workspace\/diagram\.png/);
-    expect(prompt).not.toMatch(/<threadId>/);
-  });
-
-  it("falls back to <threadId> placeholder when no id is provided", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
   });
 });
 
@@ -173,6 +98,182 @@ describe("buildSystemPrompt — guidelines", () => {
     expect(prompt).toMatch(/matched against the original file, not after earlier edits are applied/);
     expect(prompt).toMatch(/Do not emit overlapping or nested edits/);
     expect(prompt).toMatch(/Keep edits\[\]\.oldText as small as possible/);
+  });
+
+  it("tells the model to load the capabilities-overview skill when asked what it can do", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/capabilities-overview/);
+    expect(prompt).toMatch(/what can you do|what you can do|how to use/i);
+  });
+});
+
+describe("buildSystemPrompt — project_context: execution environment", () => {
+  // The execution-environment sub-block is the model's grounding when
+  // a user asks where their code runs, why exec is slow, or whether
+  // the deployed Worker has internet. The wording matters for those
+  // answers — pin the structural claims here so a future copy-edit
+  // can't accidentally collapse the two planes back together.
+
+  it("names the two planes the agent operates across", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/- Agent \(this conversation\):/);
+    expect(prompt).toMatch(/- Sandbox container:/);
+  });
+
+  it("identifies the agent as a Durable Object owning the VFS", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/Durable Object/);
+    expect(prompt).toMatch(/VFS/);
+    expect(prompt).toMatch(/SQLite/);
+  });
+
+  it("places exec in the sandbox container, not the DO", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/`exec` runs inside it/);
+  });
+
+  it("explains that file tools sync to the container around exec", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/FUSE/);
+    expect(prompt).toMatch(/same files/);
+  });
+
+  it("lists latency tiers so the model can pick tools accordingly", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/Latency tiers/);
+    expect(prompt).toMatch(/File tools[\s\S]*single-digit ms/);
+    expect(prompt).toMatch(/`exec`[\s\S]*tens of ms/);
+  });
+
+  it("lives inside the <project_context> block", () => {
+    // The execution section moved out of a top-level slot into the
+    // project_context wrapper; pin that so it stays grouped with
+    // the other operational sub-sections.
+    const prompt = buildSystemPrompt({});
+    const ctxStart = prompt.indexOf("<project_context>");
+    const ctxEnd   = prompt.indexOf("</project_context>");
+    const execIdx  = prompt.indexOf("Execution environment");
+    expect(ctxStart).toBeGreaterThan(0);
+    expect(ctxEnd).toBeGreaterThan(ctxStart);
+    expect(execIdx).toBeGreaterThan(ctxStart);
+    expect(execIdx).toBeLessThan(ctxEnd);
+  });
+});
+
+describe("buildSystemPrompt — project_context: workspace layout", () => {
+  it("includes the workspace-paths reminder", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/All files live under \/workspace/);
+  });
+});
+
+describe("buildSystemPrompt — project_context: file serving", () => {
+  it("tells the model the URL shape for serving workspace files", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
+  });
+
+  it("mentions inline embedding (images) and the download attribute pattern", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/!\[/);
+    expect(prompt).toMatch(/download/);
+  });
+
+  it("substitutes the threadId into URL examples when provided", () => {
+    const prompt = buildSystemPrompt({ threadId: "abc123" });
+    expect(prompt).toMatch(/\/api\/threads\/abc123\/files\/workspace\/diagram\.png/);
+    expect(prompt).not.toMatch(/<threadId>/);
+  });
+
+  it("falls back to <threadId> placeholder when no id is provided", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/\/api\/threads\/<threadId>\/files\//);
+  });
+});
+
+describe("buildSystemPrompt — project_context: workspace ignore", () => {
+  it("omits the workspace-ignore section when pullIgnore is missing", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).not.toMatch(/Workspace ignore rules/);
+  });
+
+  it("omits the workspace-ignore section when pullIgnore is empty", () => {
+    // [] is the documented way to disable Workspace's pull-ignore;
+    // the prompt section should disappear in lockstep so the model
+    // isn't told about ignores that don't apply.
+    const prompt = buildSystemPrompt({ pullIgnore: [] });
+    expect(prompt).not.toMatch(/Workspace ignore rules/);
+  });
+
+  it("lists each pullIgnore entry verbatim in backticks", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules", ".cache"] });
+    expect(prompt).toMatch(/`node_modules`/);
+    expect(prompt).toMatch(/`\.cache`/);
+  });
+
+  it("explains that ignored paths don't appear via the file tools", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
+    expect(prompt).toMatch(/don't appear via/);
+    for (const name of ["read", "write", "edit", "ls", "stat", "find", "grep"]) {
+      expect(prompt).toMatch(new RegExp(`\\\`${name}\\\``));
+    }
+  });
+
+  it("tells the model that exec sees ignored files but is the slow path", () => {
+    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
+    expect(prompt).toMatch(/files still exist on the container side/);
+    expect(prompt).toMatch(/\bexec\b/);
+    expect(prompt).toMatch(/performance|slow|hundreds of ms|round-trip/i);
+  });
+});
+
+describe("buildSystemPrompt — project_context: originator", () => {
+  // The mention tag is required for the Google Chat notifier to fire
+  // when a turn references the thread starter. Pin both the presence
+  // of the rule and (negatively) the absence of the old "very
+  // important" framing pi-style prompts avoid.
+
+  const o = { userId: "u-venkman", name: "Venkman" };
+
+  it("omits the originator block entirely when no originator is set", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).not.toMatch(/Thread originator/);
+  });
+
+  it("includes the originator block and the literal mention tag when set", () => {
+    const prompt = buildSystemPrompt({ originator: o });
+    expect(prompt).toMatch(/Thread originator:/);
+    expect(prompt).toMatch(/<mention type="user" id="u-venkman">@Venkman<\/mention>/);
+  });
+
+  it("instructs the agent to close each turn with the mention, once", () => {
+    const prompt = buildSystemPrompt({ originator: o });
+    expect(prompt).toMatch(/Close each turn with an @-mention/);
+    expect(prompt).toMatch(/exactly once per turn/);
+  });
+
+  it("uses neutral phrasing instead of the older 'very important' framing", () => {
+    // The earlier wording said "It is very important that you …",
+    // which biased the model's tone. pi's prompts have no such
+    // markers; this assertion is a regression guard against
+    // reintroducing them.
+    const prompt = buildSystemPrompt({ originator: o });
+    expect(prompt).not.toMatch(/very important/i);
+  });
+
+  it("includes the deep-link example only when baseUrl + roomId + threadId are all known", () => {
+    // Without baseUrl/roomId the link can't be anchored to a
+    // specific message, so the prompt should skip the example.
+    const noLink = buildSystemPrompt({ originator: o });
+    expect(noLink).not.toMatch(/#<message-id>/);
+
+    const withLink = buildSystemPrompt({
+      originator: o,
+      baseUrl: "https://example.workers.dev",
+      roomId: "r1",
+      threadId: "t1",
+    });
+    expect(withLink).toMatch(/https:\/\/example\.workers\.dev\/rooms\/r1\/threads\/t1#<message-id>/);
   });
 });
 
@@ -229,62 +330,13 @@ describe("buildSystemPrompt — skills", () => {
     expect(prompt).not.toMatch(/<angle>/);
   });
 
-  it("places the skills block before the date/cwd footer", () => {
+  it("places the skills block after project_context and before the date/cwd footer", () => {
     const prompt = buildSystemPrompt({ skills });
+    const ctxEnd    = prompt.indexOf("</project_context>");
     const skillsIdx = prompt.indexOf("</available_skills>");
     const dateIdx   = prompt.indexOf("Current date:");
-    expect(skillsIdx).toBeGreaterThan(0);
+    expect(ctxEnd).toBeGreaterThan(0);
+    expect(skillsIdx).toBeGreaterThan(ctxEnd);
     expect(dateIdx).toBeGreaterThan(skillsIdx);
-  });
-});
-
-describe("buildSystemPrompt — workspace ignore", () => {
-  it("omits the workspace-ignore section when pullIgnore is missing", () => {
-    const prompt = buildSystemPrompt({});
-    expect(prompt).not.toMatch(/Workspace ignore rules/);
-  });
-
-  it("omits the workspace-ignore section when pullIgnore is empty", () => {
-    // [] is the documented way to disable Workspace's pull-ignore;
-    // the prompt section should disappear in lockstep so the model
-    // isn't told about ignores that don't apply.
-    const prompt = buildSystemPrompt({ pullIgnore: [] });
-    expect(prompt).not.toMatch(/Workspace ignore rules/);
-  });
-
-  it("lists each pullIgnore entry verbatim in backticks", () => {
-    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules", ".cache"] });
-    expect(prompt).toMatch(/`node_modules`/);
-    expect(prompt).toMatch(/`\.cache`/);
-  });
-
-  it("explains that ignored paths don't appear via the file tools", () => {
-    // The whole point of surfacing this in the prompt is to keep
-    // the model from doing read/ls/grep against paths that aren't
-    // there — pin the wording.
-    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
-    expect(prompt).toMatch(/don't appear via/);
-    for (const name of ["read", "write", "edit", "ls", "stat", "find", "grep"]) {
-      expect(prompt).toMatch(new RegExp(`\\\`${name}\\\``));
-    }
-  });
-
-  it("tells the model that exec sees ignored files but is the slow path", () => {
-    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
-    // The container-side files exist; exec can reach them.
-    expect(prompt).toMatch(/files still exist on the container side/);
-    expect(prompt).toMatch(/\bexec\b/);
-    // And the perf warning so the model uses exec deliberately.
-    expect(prompt).toMatch(/performance|slow|hundreds of ms|round-trip/i);
-  });
-
-  it("places the workspace-ignore section between file serving and the tool list", () => {
-    const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
-    const fileServingIdx = prompt.indexOf("Serving workspace files");
-    const ignoreIdx = prompt.indexOf("Workspace ignore rules");
-    const toolsIdx = prompt.indexOf("Available tools:");
-    expect(fileServingIdx).toBeGreaterThan(0);
-    expect(ignoreIdx).toBeGreaterThan(fileServingIdx);
-    expect(toolsIdx).toBeGreaterThan(ignoreIdx);
   });
 });
