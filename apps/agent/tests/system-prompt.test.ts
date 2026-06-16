@@ -156,6 +156,24 @@ describe("buildSystemPrompt — guidelines", () => {
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
   });
+
+  // Per-tool ergonomics guidelines lifted from pi's buildSystemPrompt.
+  // These are what stop the model from rewriting whole files, emitting
+  // overlapping edits, or falling back to `exec cat` for reads. Asserted
+  // explicitly because their absence is the exact behaviour drift we're
+  // trying to fix — if a future refactor drops one of these, the test
+  // should fail loudly.
+  it("includes pi's per-tool ergonomics rules for read/write/edit", () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toMatch(/Use read to examine files instead of exec'ing cat or sed/);
+    expect(prompt).toMatch(/Use write only for new files or complete rewrites/);
+    expect(prompt).toMatch(/Use edit for precise changes/);
+    expect(prompt).toMatch(/edits\[\]\.oldText must match exactly/);
+    expect(prompt).toMatch(/use one edit call with multiple entries in edits\[\]/);
+    expect(prompt).toMatch(/matched against the original file, not after earlier edits are applied/);
+    expect(prompt).toMatch(/Do not emit overlapping or nested edits/);
+    expect(prompt).toMatch(/Keep edits\[\]\.oldText as small as possible/);
+  });
 });
 
 describe("buildSystemPrompt — skills", () => {

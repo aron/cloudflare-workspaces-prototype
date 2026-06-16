@@ -138,9 +138,35 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["websearch",       "search the web for documentation or examples"],
 ];
 
+// Tool-ergonomics guidelines, lifted near-verbatim from pi's
+// `buildSystemPrompt` (earendil-works/pi
+// `packages/coding-agent/src/core/tools/{read,write,edit}.ts` ->
+// `promptGuidelines`). Pi attaches these to each tool definition and
+// folds them into the prompt at render time; we don't have a
+// per-tool plumbing path yet, so we inline them here in the same
+// order pi emits them.
+//
+// These are the rules that make the agent's editing behaviour feel
+// reliable: they keep the model from emitting overlapping edits,
+// from rewriting whole files when a surgical edit would do, and from
+// preferring `exec cat` over the dedicated `read` tool.
 const GUIDELINES = [
+  // File-tool ergonomics (pi's read/write/edit promptGuidelines).
+  "Use read to examine files instead of exec'ing cat or sed",
+  "Use write only for new files or complete rewrites",
+  "Use edit for precise changes \u2014 each edits[].oldText must match exactly",
+  "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+  "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit",
+  "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions",
+
+  // Exploration + backend selection. The exec tool's own description
+  // already spells out the two backends in detail; this bullet exists
+  // so the model sees the steering hint in the same pass as the rest
+  // of the file-tool rules.
   "Prefer grep / find / ls over exec for file exploration",
-  "exec runs on two backends: 'shell' (default \u2014 just-bash, instant boot, no public network, but includes a built-in git command for clone/status/diff/log/branch/commit) and 'container' (full Linux with a Node 24 toolchain \u2014 node / npm / tsc / wrangler / esbuild \u2014 slower cold start). Use git via the shell backend; fall through to container when the command needs a real Node binary.",
+  "exec defaults to the 'shell' backend (just-bash, instant boot, built-in git). Pass backend: 'container' when the command needs a real Node binary (npm, node, tsc, wrangler, esbuild)",
+
+  // Hackspace-specific meta-rules.
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
   "Be concise in your responses",
   "Show file paths clearly when working with files",
