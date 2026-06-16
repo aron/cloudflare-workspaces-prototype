@@ -51,7 +51,31 @@ COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
 # Project-specific toolchain. The agent's `exec` tool finds these
 # CLIs on PATH inside the FUSE-mounted /workspace.
+#
+# TLS trust under Cloudflare WARP (or any decrypting corporate proxy):
+# when the host CA bundle has been merged with WARP's root via the
+# COPY + `update-ca-certificates` step above, every TLS client inside
+# the container needs to find the bundle. Each ecosystem has its own
+# env var:
+#
+#   - SSL_CERT_FILE       — OpenSSL fallback. Curl, git, native libs,
+#                          and most language runtimes honour this.
+#   - NODE_EXTRA_CA_CERTS — Node's TLS stack. Appends to its bundled
+#                          CA list (not a replacement).
+#   - REQUESTS_CA_BUNDLE  — Python's `requests`. Harmless when Python
+#                          isn't installed; cheap insurance for any
+#                          future Python add-ons or `pip` calls a
+#                          user invokes via `exec`.
+#
+# Setting all three before the Node install means the global
+# `npm install -g esbuild wrangler` below also runs through the
+# trusted bundle — npm shells out to curl for some downloads and
+# Node directly for others, so both env vars matter at install time,
+# not just at agent runtime. See apps/agent/ca/ for the file the
+# host-side WARP bundle drops into.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Node.js 24 (Active LTS) + TypeScript / Cloudflare Worker toolchain.
 # Debian's `nodejs` package version moves with the base image; install the
