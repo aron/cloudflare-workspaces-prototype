@@ -3,7 +3,15 @@
   "name": "hackspace-prototype",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
-  "compatibility_flags": ["nodejs_compat"],
+  // `enable_abortsignal_rpc` is experimental but required: alpha.9's
+  // CloudflareContainerBackend health probe (`probeWsdHealth`) passes
+  // an AbortSignal into `host.fetchPort(...)`, and our cross-DO
+  // topology means that call crosses Workers RPC. Without the flag
+  // workerd rejects the call with "AbortSignal serialization is not
+  // enabled." and the backend never reaches readiness. See
+  // https://github.com/cloudflare/workerd compatibility-date.capnp
+  // (abortSignalRpc, flag enable_abortsignal_rpc).
+  "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
 
   "ai": { "binding": "AI", "remote": true },
   "r2_buckets": [{ "binding": "SKILLS", "bucket_name": "hackspace-skills" }],

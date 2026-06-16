@@ -8,9 +8,9 @@ same bytes without an explicit sync.
 
 The workspace primitive itself lives upstream now:
 [`@cloudflare/workspace`](https://github.com/cloudflare/workspace),
-pinned to `0.0.0-alpha.8`. The Sandbox container runs the matching
+pinned to `0.0.0-alpha.9`. The Sandbox container runs the matching
 prebuilt `wsd` daemon from
-[`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.8`](https://github.com/cloudflare/workspace/pkgs/container/workspace-wsd-linux-x64).
+[`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.9`](https://github.com/cloudflare/workspace/pkgs/container/workspace-wsd-linux-x64).
 Both pins move together — see [Upgrading the workspace
 package](#upgrading-the-workspace-package) below.
 
@@ -111,7 +111,7 @@ worker serves as static assets (configured in
 - Container image `hackspace-prototype-sandbox` (pushed to
   `registry.cloudflare.com/<account>/hackspace-prototype-sandbox`).
   Layers a Debian-slim base + the `wsd` SEA binary out of
-  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.8` + a
+  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.9` + a
   Node 24 toolchain (node, npm, esbuild, wrangler).
 - Cron `* * * * *` — primes the warm pool every minute. Drop the
   `triggers.crons` block in `wrangler.jsonc` if you want manual priming.

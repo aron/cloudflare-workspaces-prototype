@@ -37,7 +37,6 @@
 
 import { withWorkspaceContainer } from "@cloudflare/workspace/backends/container";
 import { DurableObject } from "cloudflare:workers";
-import type { ContainerFetchResult } from "./cross-do-container-backend.js";
 
 /**
  * Lifecycle snapshot the warm pool reads via `getState()`.
@@ -69,31 +68,15 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
     }
   }
 
-  /**
-   * Fetch against a TCP port inside this Sandbox DO.
-   *
-   * Do not expose `ctx.container.getTcpPort(port)` itself across RPC:
-   * current local workerd returns a Fetcher without the subrequest channel
-   * needed by callers in another DO (`getSubrequestChannel` crash). Keeping
-   * the Fetcher local and returning a small serializable result preserves the
-   * upstream cross-DO architecture while avoiding Fetcher-over-RPC.
-   */
-  async containerFetch(
-    port: number,
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<ContainerFetchResult> {
-    const container = this.ctx.container;
-    if (!container) {
-      throw new Error("Sandbox DO has no ctx.container");
-    }
-    const res = await container.getTcpPort(port).fetch(input, init);
-    return {
-      ok: res.ok,
-      status: res.status,
-      body: await res.text().catch(() => ""),
-    };
-  }
+  // Previously this DO also exposed `containerFetch(port, req, init)`
+  // returning a plain `{ ok, status, body }` envelope so our forked
+  // `CrossDOContainerBackend` could route /health and /connect
+  // through the container-owning DO without crossing a Fetcher
+  // back over Workers RPC. alpha.9's `WorkspaceContainerAPI.fetchPort(...)`
+  // does the same thing and is installed automatically by
+  // `withWorkspaceContainer`; the upstream `CloudflareContainerBackend`
+  // calls it directly. Both the bespoke method here and the fork
+  // are gone in alpha.9.
 
   // ── Warm-pool surface ────────────────────────────────────────────
   //

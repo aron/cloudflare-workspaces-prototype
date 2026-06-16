@@ -39,7 +39,7 @@ import {
   type WorkspaceBackend,
   type WorkspaceStub,
 } from "@cloudflare/workspace";
-import { CrossDOContainerBackend } from "./cross-do-container-backend.js";
+import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
 import { tracing } from "cloudflare:workers";
@@ -117,7 +117,7 @@ export class Agent extends Think<Env> {
    * a different Sandbox UUID — mid-session container churn is the
    * pool's problem, not ours.
    */
-  readonly #backend: CrossDOContainerBackend;
+  readonly #backend: CloudflareContainerBackend;
 
   /** Cached skill metadata enumerated in the system prompt. */
   private _skills: Skill[] = [];
@@ -226,10 +226,21 @@ export class Agent extends Think<Env> {
     const original = self._wrapToolsWithDecision.bind(this);
     self._wrapToolsWithDecision = splitStreamingTools(Agent.STREAMING_TOOLS, original);
     // Workspace lives in this Agent DO; the backend dials a warm-pool
-    // Sandbox DO that owns only ctx.container. Use the app-local backend
-    // variant so container TCP-port fetches happen inside the Sandbox DO
-    // instead of returning raw Fetchers across Workers RPC.
-    this.#backend = new CrossDOContainerBackend({
+    // Sandbox DO that owns only ctx.container, and reaches it across
+    // Workers RPC through the Sandbox's `getWorkspaceContainer()`
+    // method (installed by `withWorkspaceContainer` in sandbox.ts).
+    //
+    // We previously shipped a fork of this backend
+    // (`CrossDOContainerBackend`) because alpha.6's container API
+    // returned Fetchers from `host.port(8080)` and Fetchers don't
+    // survive a cross-DO Workers RPC hop. alpha.9's container API
+    // routes everything through `host.fetchPort(...)`, which
+    // executes the fetch inside the container-owning Sandbox DO and
+    // returns a plain Response — the exact pattern our fork
+    // invented. We can drop the fork and use the upstream backend
+    // directly across the cross-DO boundary.
+    this.#backend = new CloudflareContainerBackend({
+      id: "container",
       // Per-dial factory. resolveContainerId returns the warm-pool
       // UUID for this session; the backend re-invokes us on every
       // reconnect, so a Sandbox eviction or container restart
@@ -251,8 +262,8 @@ export class Agent extends Think<Env> {
     // toolchains the model explicitly opts into via `backend:
     // 'container'`.
     //
-    //   [0]  WorkerBackend            id: 'shell'      (default)
-    //   [1]  CrossDOContainerBackend  id: 'container'  (warm pool)
+    //   [0]  WorkerBackend             id: 'shell'      (default)
+    //   [1]  CloudflareContainerBackend id: 'container'  (warm pool)
     //
     // env.LOADER is optional at construction time because the agent-
     // suite vitest fixtures run against a stripped wrangler config
