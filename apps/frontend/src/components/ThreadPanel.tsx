@@ -182,10 +182,16 @@ export function ThreadPanel({
     let max = 0;
     for (const m of messages) {
       const meta = (m as { metadata?: { createdAt?: unknown } }).metadata;
-      const ts = typeof meta?.createdAt === "number" ? meta.createdAt : 0;
+      // Assistant messages are never stamped with metadata.createdAt by the
+      // server. Fall back to Date.now() per message so the read marker
+      // advances past the tip that postActivity() recorded with Date.now()
+      // at turn end. Without this, a thread whose last message is from the
+      // assistant stays unread forever: max stays at the last user message
+      // timestamp, which is always older than the tip.
+      const ts = typeof meta?.createdAt === "number" ? meta.createdAt : Date.now();
       if (ts > max) max = ts;
     }
-    markRead("thread", threadId, max > 0 ? max : Date.now());
+    markRead("thread", threadId, max);
   }, [messages, threadId, markRead]);
 
   // Scroll plumbing for the chat panel. The thread loads pinned to
