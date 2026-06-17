@@ -1701,6 +1701,28 @@ export class SubAgent extends Think<Env> {
     return createWorkersAI({ binding: this.env.AI })(modelId);
   }
 
+  /**
+   * Mirror the parent Agent's ZDR (Zero-Data-Retention) posture:
+   * `store: false` + `include: reasoning.encrypted_content` so reasoning
+   * is round-tripped inline rather than referenced by a server-side id.
+   * Without this, OpenAI ZDR orgs reject the request with
+   * "Items are not persisted for Zero Data Retention organizations."
+   */
+  override async beforeTurn() {
+    return {
+      maxSteps: 60,
+      providerOptions: {
+        openai: {
+          reasoningEffort:
+            (this.env as any).OPENAI_REASONING_EFFORT ?? "medium",
+          reasoningSummary: "auto",
+          store: false,
+          include: ["reasoning.encrypted_content"],
+        },
+      },
+    };
+  }
+
   override getTools() {
     // Close over _getWorkspace so every tool lazily resolves the stub.
     const getWs = () => this._getWorkspace();
