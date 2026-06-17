@@ -66,6 +66,52 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
           "for a `containers` entry whose class_name is `Sandbox`.",
       );
     }
+    // Reconcile stale post-deploy containers eagerly, in
+    // blockConcurrencyWhile so no inbound RPC sees the half-state.
+    //
+    // The deploy pattern: every Sandbox DO isolate restarts under a
+    // platform that may keep the underlying container alive across
+    // the deploy. The new isolate's module-level WeakMap (used by
+    // @cloudflare/workspace's container-lifecycle.ts) is empty.
+    // Crucially the platform-level egress intercept rules installed
+    // by a prior isolate's `ctx.container.interceptOutboundHttp(...)`
+    // do not survive that restart either — wsd's already-bound
+    // network stack is in a state we can't re-steer, and the
+    // Agent's next dial sees:
+    //   CloudflareContainerBackend(container) [stage=connect]:
+    //     POST /connect returned 502: upstream /health unreachable
+    // when wsd's fetch("http://workspace.internal/...") trips on
+    // unresolved DNS.
+    //
+    // Detection: at constructor time we haven't started anything
+    // yet, so `ctx.container.running === true` is unambiguous — it's
+    // a leftover container we inherited. Destroy + recreate it
+    // through the upstream API so the next dial's interceptOutboundHttp
+    // applies to a fresh wsd. Failures are swallowed so a flaky
+    // platform restart never prevents the isolate from booting; the
+    // Agent's backend has its own restart-on-readiness budget and
+    // will surface a wedged container that way instead.
+    if (ctx.container.running) {
+      ctx.blockConcurrencyWhile(async () => {
+        const host = this.getWorkspaceContainer();
+        try {
+          await host.restart({ PORT: "8080", MOUNT_POINT: "/workspace" });
+          console.info({
+            message: "Sandbox: reconciled stale post-deploy container",
+            component: "sandbox",
+            sandboxId: ctx.id.toString(),
+          });
+          this.#lastChange = Date.now();
+        } catch (error) {
+          console.warn({
+            message: "Sandbox: stale-container reconcile failed",
+            component: "sandbox",
+            sandboxId: ctx.id.toString(),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    }
   }
 
   // Previously this DO also exposed `containerFetch(port, req, init)`
@@ -87,31 +133,27 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
   /**
    * Pre-warm the container by starting it. The warm pool calls this
    * when filling idle slots so the first Agent to dial doesn't pay
-   * the boot cost. `ctx.container.start()` is idempotent at the
-   * runtime layer; a redundant start on a running container is a
-   * no-op.
+   * the boot cost. Routes through `WorkspaceContainerAPI.start()`
+   * (rather than `ctx.container.start()` directly) so the lifecycle
+   * monitor is installed alongside the container start — important
+   * for the post-deploy reconciliation logic in
+   * `getWorkspaceContainer` above to be able to tell "this isolate
+   * started this container" from "this isolate inherited a running
+   * container from a previous incarnation."
    *
-   * We don't probe the wsd port from here \u2014 that's the backend's
-   * job in the Agent DO's `connect()` path. This call only buys
-   * the container-image pull + VM start time.
+   * We don't probe the wsd port from here — that's the backend's
+   * job in the Agent DO's `connect()` path. This call only buys the
+   * container-image pull + VM start time.
    */
   async startAndWaitForPorts(): Promise<void> {
     const container = this.ctx.container;
     if (!container) return;
-    if (!container.running) {
-      // Start with the same shape as @cloudflare/workspace's
-      // WorkspaceContainerAPI.start(). A prewarmed container is already
-      // `running` when the Agent backend dials it; the upstream start method
-      // returns early in that case, so this warm-pool start is the only chance
-      // to install the internet proxy and seed wsd's env.
-      container.start({
-        enableInternet: true,
-        env: {
-          PORT: "8080",
-          MOUNT_POINT: "/workspace",
-        },
-      });
-    }
+    // host.start() is idempotent on a running container (the upstream
+    // WorkspaceContainerAPI short-circuits when running && !priorExit).
+    // After the constructor's reconcile, this is either a fresh start
+    // or a no-op against the restart we just kicked off.
+    const host = this.getWorkspaceContainer();
+    await host.start({ PORT: "8080", MOUNT_POINT: "/workspace" });
     this.#lastChange = Date.now();
   }
 
