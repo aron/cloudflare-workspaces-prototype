@@ -115,6 +115,12 @@ interface ReceiptsApi extends ReceiptsState {
   markRead(scope: ReceiptScope, scopeId: string, lastRead: number): void;
   /** True when `tip > receipt` for this scope. False before the snapshot loads. */
   isUnread(scope: ReceiptScope, scopeId: string): boolean;
+  /**
+   * For thread scopes: maps threadId → roomId as denormalised from the
+   * server's ActivityTip objects. Used by UnreadPanel to navigate straight
+   * to the right room/thread pair without an extra fetch.
+   */
+  tipRoomIds: ReadonlyMap<string, string>;
 }
 
 const ReceiptsContext = createContext<ReceiptsApi | null>(null);
@@ -138,9 +144,10 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
   // tearing down and rebuilding the socket on every navigation.
   const routeRef = useRef(route);
   routeRef.current = route;
-  const [receipts, setReceipts] = useState<Map<Key, number>>(() => new Map());
-  const [tips,     setTips]     = useState<Map<Key, number>>(() => new Map());
-  const [ready,    setReady]    = useState(false);
+  const [receipts,   setReceipts]   = useState<Map<Key, number>>(() => new Map());
+  const [tips,       setTips]       = useState<Map<Key, number>>(() => new Map());
+  const [tipRoomIds, setTipRoomIds] = useState<Map<string, string>>(() => new Map());
+  const [ready,      setReady]      = useState(false);
 
   // The live socket and the most recently *sent* focus frame are tracked in
   // refs: they're orthogonal to render, and we want effect cleanup to see
@@ -171,6 +178,11 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
       if (cancelled) return;
       setReceipts(new Map(snap.receipts.map(r => [k(r.scope, r.scopeId), r.lastRead])));
       setTips(    new Map(snap.tips.map(    t => [k(t.scope, t.scopeId), t.lastActivity])));
+      setTipRoomIds(new Map(
+        snap.tips
+          .filter(t => t.scope === "thread" && t.roomId)
+          .map(t => [t.scopeId, t.roomId!]),
+      ));
       setReady(true);
     }).catch(err => {
       console.warn("[receipts] snapshot failed", err);
@@ -217,6 +229,16 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
           out.set(key, next);
           return out;
         });
+        // Keep tipRoomIds up-to-date for newly-seen thread scopes.
+        if (f.scope === "thread" && (f as { roomId?: string }).roomId) {
+          const roomId = (f as { roomId?: string }).roomId!;
+          setTipRoomIds(prev => {
+            if (prev.get(f.scopeId!) === roomId) return prev;
+            const out = new Map(prev);
+            out.set(f.scopeId!, roomId);
+            return out;
+          });
+        }
         return;
       }
       if (f.type === "receipt" && f.userId === userId && f.scope && f.scopeId && typeof f.lastRead === "number") {
@@ -346,8 +368,8 @@ export function ReceiptsProvider({ userId, children }: ProviderProps): React.Rea
   }, [ready, tips, receipts]);
 
   const value = useMemo<ReceiptsApi>(() => ({
-    receipts, tips, ready, markRead, isUnread,
-  }), [receipts, tips, ready, markRead, isUnread]);
+    receipts, tips, tipRoomIds, ready, markRead, isUnread,
+  }), [receipts, tips, tipRoomIds, ready, markRead, isUnread]);
 
   return <ReceiptsContext.Provider value={value}>{children}</ReceiptsContext.Provider>;
 }
@@ -364,9 +386,10 @@ export function useReceipts(): ReceiptsApi {
   if (ctx) return ctx;
   const empty = new Map<Key, number>();
   return {
-    receipts: empty,
-    tips:     empty,
-    ready:    false,
+    receipts:   empty,
+    tips:       empty,
+    tipRoomIds: new Map<string, string>(),
+    ready:      false,
     markRead: () => { /* no-op outside provider */ },
     isUnread: () => false,
   };

@@ -5,9 +5,14 @@
  *
  * The centre and right slots are passed in by the caller (App.tsx),
  * so this component is layout-only.
+ *
+ * A toggle in the header opens an Unread panel in the right slot. When a
+ * thread is also open the Unread panel appears as a fourth pane to the right
+ * of the thread.
  */
 
-import { Hexagon } from "lucide-react";
+import { useState } from "react";
+import { Hexagon, Inbox } from "lucide-react";
 
 import {
   ResizableHandle,
@@ -15,8 +20,9 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 
-
 import { RoomSidebar } from "@/components/RoomSidebar";
+import { UnreadPanel } from "@/components/UnreadPanel";
+import { useReceipts } from "@/lib/receipts";
 import type { Me } from "@/lib/api";
 
 export function RoomShell({
@@ -32,7 +38,23 @@ export function RoomShell({
   centre:    React.ReactNode;
   thread?:   React.ReactNode;
 }) {
-  const threadOpen = Boolean(threadId);
+  const threadOpen  = Boolean(threadId);
+  const [unreadOpen, setUnreadOpen] = useState(false);
+
+  // Count unread scopes for the badge on the toggle button.
+  const { tips, isUnread } = useReceipts();
+  const unreadCount = [...tips.keys()].filter(key => {
+    const [scope, scopeId] = key.split(":") as ["room" | "thread", string];
+    return isUnread(scope, scopeId);
+  }).length;
+
+  // autoSaveId encodes which right panels are open so panel widths are
+  // restored correctly when the layout changes.
+  const layoutId = [
+    "agent-layout",
+    threadOpen ? "t" : "",
+    unreadOpen ? "u" : "",
+  ].filter(Boolean).join("-");
 
   return (
     <div className="flex h-screen w-screen flex-col bg-kumo-base text-kumo-default">
@@ -42,18 +64,37 @@ export function RoomShell({
           <span className="text-md font-semibold tracking-tight">hackspace</span>
         </div>
 
+        {/* Unread toggle */}
+        <button
+          type="button"
+          onClick={() => setUnreadOpen(v => !v)}
+          aria-label={unreadOpen ? "Close unread panel" : "Open unread panel"}
+          title={unreadOpen ? "Close unread" : "Unread messages"}
+          className={`relative flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
+            unreadOpen
+              ? "bg-kumo-tint text-kumo-brand"
+              : "text-kumo-inactive hover:bg-kumo-elevated hover:text-kumo-default"
+          }`}
+        >
+          <Inbox size={17} />
+          {unreadCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-kumo-brand px-1 text-[9px] font-bold leading-none text-white">
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
+        </button>
       </header>
 
       <ResizablePanelGroup
         direction="horizontal"
-        autoSaveId={threadOpen ? "agent-layout-3" : "agent-layout-2"}
+        autoSaveId={layoutId}
         className="flex min-h-0 flex-1"
       >
         <ResizablePanel id="rooms" order={1} defaultSize={20} minSize={14} maxSize={32} className="!overflow-visible">
           <RoomSidebar me={me} activeRoomId={roomId} />
         </ResizablePanel>
         <ResizableHandle />
-        <ResizablePanel id="room" order={2} defaultSize={50} minSize={30}>
+        <ResizablePanel id="room" order={2} defaultSize={threadOpen || unreadOpen ? 50 : 80} minSize={30}>
           {centre}
         </ResizablePanel>
         {threadOpen && thread && (
@@ -61,6 +102,14 @@ export function RoomShell({
             <ResizableHandle />
             <ResizablePanel id="thread" order={3} defaultSize={30} minSize={20} maxSize={60}>
               {thread}
+            </ResizablePanel>
+          </>
+        )}
+        {unreadOpen && (
+          <>
+            <ResizableHandle />
+            <ResizablePanel id="unread" order={4} defaultSize={25} minSize={18} maxSize={45}>
+              <UnreadPanel onClose={() => setUnreadOpen(false)} />
             </ResizablePanel>
           </>
         )}
