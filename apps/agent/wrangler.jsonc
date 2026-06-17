@@ -14,7 +14,19 @@
   "compatibility_flags": ["nodejs_compat", "enable_abortsignal_rpc"],
 
   "ai": { "binding": "AI", "remote": true },
-  "r2_buckets": [{ "binding": "SKILLS", "bucket_name": "hackspace-skills" }],
+  "r2_buckets": [
+    { "binding": "SKILLS", "bucket_name": "hackspace-skills" },
+    // Bucket the agent's `assets publish` command uploads to. Each
+    // upload mints a fresh randomised key under a session prefix so
+    // re-shares of the same file don't collide. The presigner needs
+    // R2 S3 credentials in addition to the binding (the binding alone
+    // can't mint a presigned GET URL) — see the R2_* vars below.
+    // Without those credentials the Agent skips wiring the assets
+    // client and the shell-backend `assets publish` command reports
+    // "publishing is not configured for this workspace" rather than
+    // surfacing an RPC error.
+    { "binding": "ASSETS", "bucket_name": "hackspace-assets" }
+  ],
 
   // Worker Loader binding. The Agent DO's Workspace mounts a worker
   // backend (just-bash in a Dynamic Worker) alongside the container
@@ -67,7 +79,25 @@
     "WARM_POOL_TARGET": "3",
     "WARM_POOL_REFRESH_INTERVAL": "10000",
 
-    "OPENAI_MODEL": "gpt-5.5"
+    "OPENAI_MODEL": "gpt-5.5",
+
+    // R2 S3 credentials for the `assets publish` shell command. The
+    // R2 binding alone can't mint a presigned GET URL; the assets
+    // client (createAssets in src/agent.ts) needs the access
+    // key/secret to sign URLs against the R2 S3 endpoint, and the
+    // account id (or an explicit endpoint) to know which endpoint
+    // to sign against.
+    //
+    // Set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY as secrets
+    // (`wrangler secret put ...`), not vars — they're sensitive.
+    // The placeholders here exist so a fresh checkout's wrangler
+    // dev sees the names declared; the empty strings are equivalent
+    // to leaving them unset, and the Agent gates the assets client
+    // on both creds being non-empty.
+    "R2_ACCESS_KEY_ID":     "",
+    "R2_SECRET_ACCESS_KEY": "",
+    "CLOUDFLARE_ACCOUNT_ID": "",
+    "R2_ENDPOINT":          ""
 
     // Public origin used to build absolute URLs in agent messages and
     // Google Chat notifications. Leave unset to fall back to the origin of

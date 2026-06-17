@@ -39,6 +39,7 @@ import {
   type WorkspaceBackend,
   type WorkspaceStub,
 } from "@cloudflare/workspace";
+import { createAssets } from "@cloudflare/workspace/assets";
 import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
@@ -87,6 +88,24 @@ const SKILLS_PATH = "/workspace/.agents/skills";
  * matches when the path contains `/<name>/` or ends with `/<name>`.
  */
 const WORKSPACE_IGNORE = ["node_modules"];
+
+/**
+ * Decide whether the Workspace should be constructed with an assets
+ * client wired in. Two required env vars and one "endpoint source"
+ * (either an account id or an explicit endpoint). All three must
+ * resolve to non-empty strings; the wrangler.jsonc `vars` block
+ * ships them as empty strings so the names are visible to dev, and
+ * the deployment overrides them with secrets.
+ *
+ * Mirrors the same gate `examples/think` uses for its `share` tool.
+ */
+function hasAssetsConfig(env: Env): boolean {
+  return Boolean(
+    env.R2_ACCESS_KEY_ID &&
+      env.R2_SECRET_ACCESS_KEY &&
+      (env.CLOUDFLARE_ACCOUNT_ID || env.R2_ENDPOINT),
+  );
+}
 
 
 export class Agent extends Think<Env> {
@@ -299,6 +318,30 @@ export class Agent extends Think<Env> {
       // user-tracing feature flag (e.g. the agent-suite vitest
       // pool); `createCloudflareObserver` degrades to a no-op.
       observer: createCloudflareObserver({ tracing }),
+      // Wire the assets client when R2 S3 credentials are present.
+      // The worker backend registers an `assets publish <path>` shell
+      // command unconditionally; without this clause the command
+      // surfaces an RPC error the first time the model invokes it.
+      // When credentials are unset the command still registers but
+      // its body reports "publishing is not configured for this
+      // workspace" — a clean refusal instead of a crash.
+      //
+      // The bucket name passed to `s3.bucket` is the *R2* bucket
+      // (matches `bucket_name` in wrangler.jsonc), not the binding
+      // name; the presigner builds canonical S3 URLs against it. We
+      // pin `"hackspace-assets"` to match the binding declaration
+      // above and avoid threading another env var.
+      ...(hasAssetsConfig(this.env)
+        ? {
+            assets: (ws: Workspace) =>
+              createAssets({
+                ws,
+                bucket: this.env.ASSETS,
+                s3: { bucket: "hackspace-assets" },
+                env: this.env as unknown as Record<string, string | undefined>,
+              }),
+          }
+        : {}),
     });
     this.ctx.blockConcurrencyWhile(async () => {
       this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
@@ -1202,13 +1245,16 @@ export class Agent extends Think<Env> {
           '  - "shell" (default): just-bash in a Dynamic Worker. Cold-',
           "    start instant, no container, no public network. Good for",
           "    cat / grep / sed / awk / jq / head / tail / sort / find /",
-          "    file inspection, quick text transformations, and `git`",
-          "    (clone / status / diff / log / branch / commit) \u2014 the",
-          "    shell registers a built-in `git` command that forwards to",
-          "    the host workspace, so network-bound subcommands like",
-          "    `git clone` work even though the isolate has no public",
-          "    network. Cannot run npm, node, or any binary outside",
-          "    just-bash's built-in command set.",
+          "    file inspection, quick text transformations, `git`",
+          "    (clone / status / diff / log / branch / commit), and",
+          "    `assets publish <path> [<expiry>]` to share a workspace",
+          "    file as a time-limited public URL backed by R2. The",
+          "    shell registers `git` and `assets` as built-in commands",
+          "    that forward to the host workspace, so network-bound",
+          "    subcommands like `git clone` and the R2 upload in",
+          "    `assets publish` work even though the isolate has no",
+          "    public network. Cannot run npm, node, or any binary",
+          "    outside just-bash's built-in command set.",
           '  - "container": Cloudflare Container running wsd. Full Linux',
           "    userland with a Node 24 toolchain on $PATH (node, npm,",
           "    esbuild, wrangler), public network. Cold start is much",

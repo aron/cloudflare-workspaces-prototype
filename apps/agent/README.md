@@ -84,6 +84,39 @@ and the discoverer ignores anything that isn't `*/SKILL.md`, so it
 won't be mistaken for a skill). Capped at 16 KiB; empty / missing /
 oversized files render no block at all.
 
+### Assets bucket (`assets publish`)
+
+Optional. The shell backend registers a built-in `assets publish
+<path> [<expiry>]` command that uploads a workspace file to R2 and
+returns a presigned GET URL the model can hand to the user. Wired
+only when R2 S3 credentials are present in the env; without them
+the command still registers but reports "publishing is not
+configured for this workspace."
+
+One-time setup, per environment:
+
+```sh
+# 1. R2 bucket the binding points at. Name matches wrangler.jsonc's
+#    `r2_buckets[].bucket_name` for the ASSETS binding.
+wrangler r2 bucket create hackspace-assets
+
+# 2. R2 S3 API credentials — the binding alone can't mint a presigned
+#    URL; the assets client signs against R2's S3 endpoint with these.
+#    Mint them at
+#    https://dash.cloudflare.com/?to=/:account/r2/api-tokens
+wrangler secret put R2_ACCESS_KEY_ID
+wrangler secret put R2_SECRET_ACCESS_KEY
+
+# 3. Either set CLOUDFLARE_ACCOUNT_ID (recommended; the endpoint URL
+#    is derived) or set R2_ENDPOINT explicitly.
+wrangler secret put CLOUDFLARE_ACCOUNT_ID
+```
+
+Local dev: copy the same keys into `.dev.vars` (see
+`.dev.vars.example`). The agent rechecks the gate every isolate
+restart, so adding the keys requires a `wrangler dev` reload (or
+redeploy) to take effect.
+
 ## Run locally
 
 ```sh

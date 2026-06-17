@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     WarmPool:       DurableObjectNamespace<import("./src/warm-pool").WarmPool>;
     AI:             Ai;
     SKILLS:         R2Bucket;
+    ASSETS:         R2Bucket;
     LOADER:         WorkerLoader;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
@@ -18,6 +19,16 @@ declare namespace Cloudflare {
     ACCESS_DEV_USER?:            string;  // JSON identity for local dev
     GCHAT_WEBHOOK_URL?:          string;  // Google Chat incoming webhook for mention notifications
     APP_BASE_URL?:               string;  // Public origin used to build absolute URLs
+    // R2 S3 credentials for the `assets publish` shell command.
+    // Optional; when any is unset the Agent skips wiring the assets
+    // client and the shell command reports "not configured" rather
+    // than failing on the presign step. The wrangler.jsonc `vars`
+    // block declares them as empty strings so the names are visible
+    // to wrangler dev; secrets override the vars in deploy.
+    R2_ACCESS_KEY_ID?:           string;
+    R2_SECRET_ACCESS_KEY?:       string;
+    CLOUDFLARE_ACCOUNT_ID?:      string;
+    R2_ENDPOINT?:                string;  // optional override of the account-derived endpoint
   }
 }
 interface Env extends Cloudflare.Env {}

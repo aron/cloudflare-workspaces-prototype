@@ -32,3 +32,18 @@ OPENAI_API_KEY=sk-...
 # When unset the worker derives the origin from the inbound request and
 # forwards it to DOs via the `x-app-base-url` header.
 # APP_BASE_URL=http://localhost:8787
+
+# --- assets publishing ---
+# Optional: enables the shell-backend `assets publish <path>` command,
+# which uploads a workspace file to R2 and returns a presigned GET URL.
+# All four are required together. Without them the command still
+# registers but reports "publishing is not configured for this
+# workspace" rather than throwing an RPC error.
+#
+# Create the R2 bucket once per env (`wrangler r2 bucket create
+# hackspace-assets`) and mint S3 API tokens at
+# https://dash.cloudflare.com/?to=/:account/r2/api-tokens.
+# R2_ACCESS_KEY_ID=...
+# R2_SECRET_ACCESS_KEY=...
+# CLOUDFLARE_ACCOUNT_ID=...
+# R2_ENDPOINT=                  # optional; account-id derives one if unset
