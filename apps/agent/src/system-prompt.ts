@@ -121,7 +121,13 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["exec",      "run a shell command on the 'shell' (default) or 'container' backend"],
   ["webfetch",  "fetch and summarize a URL"],
   ["websearch", "search the web for documentation or examples"],
+  ["delegate",  "start a named sub-agent that shares this workspace, or poll its result"],
 ];
+
+/** Tool list for worker sub-agents (same as parent minus delegate). */
+const WORKER_TOOL_SNIPPETS: Array<readonly [string, string]> = TOOL_SNIPPETS.filter(
+  ([name]) => name !== "delegate",
+);
 
 // ── Section 4: guidelines ──────────────────────────────────────────
 
@@ -157,6 +163,13 @@ const GUIDELINES = [
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
   "Be concise in your responses",
   "Show file paths clearly when working with files",
+
+  // Sub-agent delegation guidelines.
+  "Use delegate to fan out a well-scoped, self-contained task — research, a long build, parallel file generation",
+  "Give the sub-agent enough context in its task string to act without asking back — it has no conversation history beyond what you send",
+  "Name sub-agents stably and descriptively: 'builder-1', 'researcher-auth'",
+  "Sub-agents share the same workspace (/workspace). Coordinate paths explicitly — prefer separate subdirectories when working in parallel (e.g. /workspace/research/, /workspace/build/)",
+  "Sub-agents cannot spawn further sub-agents — you are the planner",
 ];
 
 const SKILLS_PREAMBLE = `\
@@ -377,4 +390,44 @@ function escapeXml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+// ── Worker (sub-agent) system prompt ──────────────────────────────
+
+const WORKER_IDENTITY = `\
+You are a worker agent operating inside a shared workspace at /workspace.
+You have been given a specific task by the orchestrating agent. Complete it
+precisely using the tools available, then stop. Do not ask for clarification —
+make your best judgement on any ambiguities. End your final message with a
+concise summary of what you did and what changed.`;
+
+/**
+ * Build a terse system prompt for a SubAgent worker.
+ *
+ * Omits skills, project context, and originator blocks — those are
+ * parent-level concerns. Includes the same tool list (minus delegate),
+ * the same file-tool ergonomics guidelines, and the standard footer.
+ */
+export function buildWorkerSystemPrompt(opts: { now?: Date } = {}): string {
+  const now = opts.now ?? new Date();
+  const tools = WORKER_TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
+  // Worker guidelines: file-tool ergonomics + exec backend selection.
+  // Drop hackspace meta-rules and sub-agent delegation rules — workers
+  // don’t use them.
+  const workerGuidelines = GUIDELINES
+    .filter(g => !g.startsWith("When the user asks") && !g.startsWith("Use delegate") && !g.startsWith("Sub-agents") && !g.startsWith("Name sub-agents") && !g.startsWith("Give the sub-agent"))
+    .map(g => `- ${g}`);
+
+  return [
+    WORKER_IDENTITY,
+    "",
+    "Available tools:",
+    tools,
+    "",
+    "Guidelines:",
+    ...workerGuidelines,
+    "",
+    `Current date: ${formatDate(now)}`,
+    "Current working directory: /workspace",
+  ].join("\n");
 }

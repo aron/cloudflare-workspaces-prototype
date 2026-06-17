@@ -50,6 +50,7 @@ import type { AppMessage } from "@/lib/api";
 import { FileViewer, type FileViewerEntry } from "@/components/FileViewer";
 import { PathAutocomplete } from "@/components/PathAutocomplete";
 import { ExecToolView } from "@/components/ExecToolView";
+import { DelegateToolView } from "@/components/DelegateToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
@@ -520,6 +521,23 @@ export function ThreadPanel({
                               state={part.state}
                               toolCallId={toolCallId}
                               onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
+                            />
+                          );
+                        }
+                        // Custom chrome for delegate — shows sub-agent name,
+                        // task as prose, live child tool calls, and final
+                        // output as markdown.
+                        if (name === "delegate") {
+                          return (
+                            <DelegateToolView
+                              key={i}
+                              input={input as { name?: string; task?: string } | undefined}
+                              output={output}
+                              errorText={errorText}
+                              state={part.state}
+                              toolCallId={toolCallId}
+                              callDurationMs={callDurationMs}
+                              agent={agent}
                             />
                           );
                         }

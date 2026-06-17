@@ -1,10 +1,10 @@
 /**
- * Agent — a Think-based DO that owns one Slack-style conversation.
+ * Agent - a Think-based DO that owns one Slack-style conversation.
  *
  * Inherits from `@cloudflare/think` for the agentic loop, Session-backed
  * message storage (branches, FTS5, non-destructive compaction), durable
  * chat fibers via `chatRecovery`, stream resumption, and the lifecycle
- * hooks. The custom `@cloudflare/workspace` Workspace stays put — it
+ * hooks. The custom `@cloudflare/workspace` Workspace stays put - it
  * owns the SQLite VFS, the container sync, and the capnweb session.
  *
  * This file only does chat-shaped things: defining tools, picking a model,
@@ -15,7 +15,7 @@
  * `this.subAgent(SubAgent, name)` for fan-out work (research, parallel
  * compilation, longer-horizon side tasks). The class lives at the bottom
  * of this file with the same Think baseline (chatRecovery on, empty tool
- * set by default — fill in per use case).
+ * set by default - fill in per use case).
  */
 import type { ChatResponseResult, StepContext, ToolCallResultContext, TurnContext } from "@cloudflare/think";
 import { LoopTracker } from "./loop-tracker.js";
@@ -28,6 +28,7 @@ import {
 } from "./notify.js";
 
 import { Think } from "@cloudflare/think";
+import { agentTool } from "agents/agent-tools";
 import { callable } from "agents";
 import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -68,7 +69,7 @@ import { resolveOrphanToolCalls } from "./orphan-tools.js";
 import { splitStreamingTools } from "./streaming-tools.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
-import { buildSystemPrompt, type Skill } from "./system-prompt.js";
+import { buildSystemPrompt, buildWorkerSystemPrompt, type Skill } from "./system-prompt.js";
 import { discoverSkills } from "./skills.js";
 import { fetchProjectInstructions } from "./project-instructions.js";
 import { trace, redactSecrets } from "./tracing.js";
@@ -124,8 +125,8 @@ export class Agent extends Think<Env> {
    * `workspace` slot because Think types it against its own
    * `WorkspaceLike` shape (the @cloudflare/shell one) which is a
    * different surface. The Think default tools that consult it
-   * are inert here — `getTools()` doesn't include any of them and
-   * `workspaceBash` is off — so nothing in the Think baseline
+   * are inert here - `getTools()` doesn't include any of them and
+   * `workspaceBash` is off - so nothing in the Think baseline
    * actually reads `.workspace`.
    */
   readonly #workspace: Workspace;
@@ -133,7 +134,7 @@ export class Agent extends Think<Env> {
   /**
    * The Cloudflare container backend. Its `container: () => ...`
    * factory runs once per `connect()`, so each fresh dial can pick
-   * a different Sandbox UUID — mid-session container churn is the
+   * a different Sandbox UUID - mid-session container churn is the
    * pool's problem, not ours.
    */
   readonly #backend: CloudflareContainerBackend;
@@ -147,9 +148,9 @@ export class Agent extends Think<Env> {
    * every turn, mirroring how pi handles its own AGENTS.md.
    *
    * Three sentinels:
-   *   - `undefined` — not fetched yet (cold DO, warmup hasn't run).
-   *   - `null`      — fetched, but missing/empty/oversized.
-   *   - string      — fetched and ready to inline.
+   *   - `undefined` - not fetched yet (cold DO, warmup hasn't run).
+   *   - `null`      - fetched, but missing/empty/oversized.
+   *   - string      - fetched and ready to inline.
    *
    * `beforeTurn` collapses `undefined` to one of the other two by
    * blocking on a fetch, the same way it does for skills.
@@ -175,7 +176,7 @@ export class Agent extends Think<Env> {
    */
   private _toolAborts = new Map<string, AbortController>();
 
-  /** Tools that read state but never mutate it — free in the budget. */
+  /** Tools that read state but never mutate it - free in the budget. */
   private static readonly READ_ONLY_TOOLS = new Set<string>([
     "read", "ls", "stat", "find", "grep",
     "webfetch", "websearch",
@@ -255,7 +256,7 @@ export class Agent extends Think<Env> {
     // survive a cross-DO Workers RPC hop. alpha.9's container API
     // routes everything through `host.fetchPort(...)`, which
     // executes the fetch inside the container-owning Sandbox DO and
-    // returns a plain Response — the exact pattern our fork
+    // returns a plain Response - the exact pattern our fork
     // invented. We can drop the fork and use the upstream backend
     // directly across the cross-DO boundary.
     this.#backend = new CloudflareContainerBackend({
@@ -274,7 +275,7 @@ export class Agent extends Think<Env> {
     });
     // Two backends, tiered by cost. The order matters: the first
     // entry is the workspace's default backend, picked when an exec
-    // call doesn't name one. We want the cheap one default — the
+    // call doesn't name one. We want the cheap one default - the
     // worker backend boots an isolate in tens of ms and runs the
     // textual command set (cat / grep / sed / awk / jq / git) for
     // free. The container is reserved for npm / node / language
@@ -365,7 +366,7 @@ export class Agent extends Think<Env> {
   }
 
   /**
-   * Bring the Workspace up if it isn't already — the backend's
+   * Bring the Workspace up if it isn't already - the backend's
    * `connect()` runs the first time, subsequent calls return the
    * cached handle. Failures bubble up to the caller.
    *
@@ -376,7 +377,7 @@ export class Agent extends Think<Env> {
    * unchanged.
    *
    * Private because the public RPC method below (`getWorkspace`)
-   * returns the stub shape that WorkspaceServiceProxy expects —
+   * returns the stub shape that WorkspaceServiceProxy expects -
    * we don't want callers reaching across the RPC boundary to grab
    * the live Workspace and accidentally serializing it.
    */
@@ -420,7 +421,7 @@ export class Agent extends Think<Env> {
     // the workspace-next port this rode the R2Mount in the Workspace;
     // the new package doesn't expose that surface, so we hit R2
     // directly and let the system prompt render the result. Failures
-    // are swallowed — an empty skill list is preferable to a turn that
+    // are swallowed - an empty skill list is preferable to a turn that
     // never starts.
     this.ctx.waitUntil(
       (async () => {
@@ -431,7 +432,7 @@ export class Agent extends Think<Env> {
         }
       })(),
     );
-    // Project-instructions fetch — same shape as skills discovery,
+    // Project-instructions fetch - same shape as skills discovery,
     // same swallow-failures contract. `_projectInstructions` stays
     // `undefined` if the request never completes; `beforeTurn` will
     // block on a fresh fetch in that case.
@@ -586,7 +587,7 @@ export class Agent extends Think<Env> {
       // works across the whole logical turn.
       if (!ctx?.continuation) this._loop.reset();
       return {
-        // Hard ceiling well above the soft budget — the LoopTracker
+        // Hard ceiling well above the soft budget - the LoopTracker
         // decides when to fire a reflection.
         maxSteps: 60,
         providerOptions: {
@@ -615,7 +616,7 @@ export class Agent extends Think<Env> {
    * Record the tool call's wall-clock duration so `onChatResponse` can
    * stamp it onto the persisted assistant message's tool part. The AI
    * SDK gives us `durationMs` on both the success and error branches of
-   * `ToolCallResultContext`, so we record either way — a failed call's
+   * `ToolCallResultContext`, so we record either way - a failed call's
    * duration is just as interesting to surface as a successful one.
    */
   override afterToolCall(ctx: ToolCallResultContext): void {
@@ -623,7 +624,7 @@ export class Agent extends Think<Env> {
   }
 
   /**
-   * Introspection RPC — returns the bits of TurnConfig that don't
+   * Introspection RPC - returns the bits of TurnConfig that don't
    * require a real model call. Used by tests to assert the persona
    * prompt, ZDR posture, and that a model object is constructable.
    */
@@ -667,7 +668,7 @@ export class Agent extends Think<Env> {
     if (typeof message === "string") {
       const author = (connection.state as { author?: ChatAuthor } | null)?.author ?? null;
       message = stampChatFrame(message, author);
-      // A user reply arrived — arm the background summary tick. Idempotent,
+      // A user reply arrived - arm the background summary tick. Idempotent,
       // so multiple frames in quick succession collapse onto one schedule.
       this.ctx.waitUntil(this.kickSummary());
       // Mirror the room's behaviour: a user message bumps the activity tip
@@ -700,7 +701,7 @@ export class Agent extends Think<Env> {
     // Span shape: one span per finished turn, covering the synchronous
     // fanout that schedules the four background tasks. The tasks
     // themselves keep running after the span closes (they're
-    // `waitUntil`-attached, not awaited here) — we accept that the
+    // `waitUntil`-attached, not awaited here) - we accept that the
     // span's duration only measures the dispatch, not the work, in
     // exchange for keeping `onChatResponse` non-blocking. The
     // individual background tasks (stamp / summary / reflection /
@@ -743,7 +744,7 @@ export class Agent extends Think<Env> {
   /**
    * Notify the App DO that this thread just received a message (user or
    * assistant). The App keeps the canonical tip used by sidebar unread
-   * badges. Best-effort under waitUntil — a failure here must not affect
+   * badges. Best-effort under waitUntil - a failure here must not affect
    * the chat turn that just landed.
    *
    * No-op when we don't yet know the parent roomId (pre-seed). The seed
@@ -763,17 +764,17 @@ export class Agent extends Think<Env> {
           headers: { "content-type": "application/json" },
           body:    JSON.stringify({ scope: "thread", scopeId: threadId, roomId, lastActivity }),
         }));
-      } catch { /* swallow — best-effort */ }
+      } catch { /* swallow - best-effort */ }
     })());
   }
 
   /**
    * Enqueue @mention notifications to the App DO for the just-finished
-   * assistant turn. Same shape as the Room path — the App owns dedup,
+   * assistant turn. Same shape as the Room path - the App owns dedup,
    * debounce, and webhook delivery.
    */
   private async maybeNotifyMentions(result: ChatResponseResult): Promise<void> {
-    // Concatenate every text part of the assistant message — the model may
+    // Concatenate every text part of the assistant message - the model may
     // split its closing line across parts depending on tool-use shape.
     const text = (result.message.parts ?? [])
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -807,7 +808,7 @@ export class Agent extends Think<Env> {
    * message and broadcast the update.
    *
    * Only fires the storage write + broadcast when something actually
-   * changed — the common case for a model turn with no tool calls is a
+   * changed - the common case for a model turn with no tool calls is a
    * no-op. The buffer is cleared unconditionally so a continuation turn
    * starts with a clean slate.
    */
@@ -821,7 +822,7 @@ export class Agent extends Think<Env> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const updated = { ...result.message, parts } as any;
     await this.updateMessageInHistory(updated);
-    // Think's `updateMessageInHistory` doesn't broadcast — it only
+    // Think's `updateMessageInHistory` doesn't broadcast - it only
     // refreshes the live cache. Push a MESSAGE_UPDATED frame so connected
     // `useAgentChat` clients see the new field without waiting for the
     // next full-message broadcast.
@@ -834,7 +835,7 @@ export class Agent extends Think<Env> {
   /**
    * If the LoopTracker says we're over budget or thrashing, append a
    * user-visible reflection prompt to the conversation. This re-enters
-   * the turn queue via saveMessages — safe here because Think releases
+   * the turn queue via saveMessages - safe here because Think releases
    * the turn lock before calling onChatResponse.
    */
   private async maybeInjectReflection(): Promise<void> {
@@ -854,7 +855,7 @@ export class Agent extends Think<Env> {
     // Wrap the whole dispatcher in one span; downstream workspace /
     // file calls re-nest underneath. `route` is the path with secrets
     // (e.g. preview-share tokens, future query-param API keys) stripped
-    // by `redactSecrets` — we want grouping by route, not high-
+    // by `redactSecrets` - we want grouping by route, not high-
     // cardinality URL strings, so query string is truncated by
     // taking just the pathname.
     const url = new URL(request.url);
@@ -903,7 +904,7 @@ export class Agent extends Think<Env> {
       return Response.json({ count: entries.length, entries }, { headers: { "cache-control": "no-store" } });
     }
 
-    // GET /files-list?prefix=&limit= — prefix listing for the path
+    // GET /files-list?prefix=&limit= - prefix listing for the path
     // autocomplete in the file viewer. Narrower than /vfs (which
     // returns the full snapshot) so the popover can poll cheaply.
     if (request.method === "GET" && url.pathname.endsWith("/files-list")) {
@@ -930,7 +931,7 @@ export class Agent extends Think<Env> {
       return Response.json(result, { headers: { "cache-control": "no-store" } });
     }
 
-    // GET /files/<absolute path> — stream a workspace file with a
+    // GET /files/<absolute path> - stream a workspace file with a
     // sensible Content-Type. The agent advertises these URLs in chat
     // so the user can view images / download artifacts directly.
     // Path after the /files/ prefix is treated as the absolute VFS
@@ -976,7 +977,7 @@ export class Agent extends Think<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/tar")) {
-      // Debug snapshot — dumps metadata, chat history, and the VFS
+      // Debug snapshot - dumps metadata, chat history, and the VFS
       // under /workspace as a single uncompressed ustar archive.
       // The workspace walk runs against the live `Workspace` on
       // this DO. We don't gate this on a successful ready(): if
@@ -1064,7 +1065,7 @@ export class Agent extends Think<Env> {
       await this.clearMessages();
       // The agent's sessionId (which the pool keys assignments on) is this
       // DO's name. Releasing here returns the container to the pool
-      // immediately on reset instead of waiting for the idle sweep —
+      // immediately on reset instead of waiting for the idle sweep -
       // matters most when a user resets a thread to recover from a
       // wedged exec (e.g. the 503 fallout we just spent three commits
       // hardening).
@@ -1072,7 +1073,7 @@ export class Agent extends Think<Env> {
       return Response.json({ cleared: true });
     }
 
-    // DELETE / — wipe everything (messages, VFS, summary, fork registry).
+    // DELETE / - wipe everything (messages, VFS, summary, fork registry).
     // Called by the worker as part of /api/rooms/:id (cascade) and
     // /api/rooms/:id/threads/:tid deletion.
     if (request.method === "DELETE" && (url.pathname === "/" || url.pathname === "")) {
@@ -1081,7 +1082,7 @@ export class Agent extends Think<Env> {
       return Response.json({ ok: true });
     }
 
-    // POST /seed { roomId, threadId, message } — called by Room when an
+    // POST /seed { roomId, threadId, message } - called by Room when an
     // @agent mention mints a thread. Persists the originating user message
     // so the agent sees it on first turn. Idempotent: re-seeding the same
     // message id is a no-op so the client can safely retry.
@@ -1097,11 +1098,11 @@ export class Agent extends Think<Env> {
       const alreadySeeded = typeof messageId === "string"
         && this.messages.some(m => m.id === messageId);
       if (!alreadySeeded) {
-        // Cast through `any` — saveMessages accepts the AI SDK UIMessage shape;
+        // Cast through `any` - saveMessages accepts the AI SDK UIMessage shape;
         // we trust the caller (Room) to send a well-formed AppMessage.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await this.saveMessages([message as any]);
-        // Seeding counts as a new message — arm the summary tick. The
+        // Seeding counts as a new message - arm the summary tick. The
         // assistant's reply will arm another one when its turn completes.
         this.ctx.waitUntil(this.kickSummary());
       }
@@ -1125,7 +1126,7 @@ export class Agent extends Think<Env> {
   // ---- tools ----
 
   /**
-   * Tools the agentic loop sees this turn. Single fixed tool set —
+   * Tools the agentic loop sees this turn. Single fixed tool set -
    * the agent has one persona, so there's no gating. websearch is
    * registered only when BRAVE_API_KEY is configured.
    */
@@ -1212,7 +1213,7 @@ export class Agent extends Think<Env> {
         }),
         execute: async ({ directory, pattern }) => {
           const ws = await getWs();
-          // Pass `pattern` through verbatim — the workspace's `find`
+          // Pass `pattern` through verbatim - the workspace's `find`
           // treats `undefined` as "no filter". Coercing to `""` here
           // would compile to `^$` and zero-out the result set.
           return { directory, pattern, matches: await ws.fs.find(directory, pattern) };
@@ -1290,6 +1291,56 @@ export class Agent extends Think<Env> {
       //   exec({ command: 'git clone https://...', backend: 'shell' })
       // which is described in the exec tool's per-backend guidance
       // and in the capabilities skill.
+
+      // ── Sub-agent delegation ────────────────────────────────────
+      //
+      // `agentTool(SubAgent, options)` creates an AI SDK tool that:
+      //   1. On call: picks or reuses a child SubAgent facet by a
+      //      stable `runId`, calls `startAgentToolRun(input, { runId })`
+      //      on it, waits for the turn to finish, and returns the result.
+      //   2. Broadcasts `agent-tool-event` frames to connected clients
+      //      so the UI can render live child progress.
+      //   3. Handles chatRecovery on the child - a DO eviction mid-child
+      //      turn is recovered transparently by the fiber infrastructure.
+      //
+      // The child DO name is derived from the `runId` the parent passes.
+      // The child resolves `this.parentAgent(Agent)` → `getWorkspace()`
+      // to obtain the shared workspace stub.
+      //
+      // `name` is the stable model-visible identifier for the child.
+      // We encode it into `runId` so re-invoking the same name in a
+      // later tool call re-uses the same child facet and its durable
+      // history, enabling multi-turn conversations with a child.
+      ...pick("delegate", agentTool(SubAgent, {
+        description: [
+          "Delegate a self-contained task to a named sub-agent that shares",
+          "this workspace (/workspace). The sub-agent has the same file",
+          "and exec tools as this agent (read/write/edit/ls/stat/mkdir/rm/",
+          "find/grep/exec/webfetch/websearch) but cannot delegate further.",
+          "",
+          "Good use-cases:",
+          "  \u2022 Fan out parallel work: start several children with distinct",
+          "    names writing to separate subdirectories.",
+          "  \u2022 Off-load a slow build or research task while continuing to",
+          "    answer the user.",
+          "  \u2022 Give a child a tight scope (\"investigate only auth.ts\") so it",
+          "    doesn't wander.",
+          "",
+          "The `name` field is the stable identifier for the child. Reusing",
+          "the same name in a later call reconnects to that child's existing",
+          "history, so you can have a multi-turn conversation with it.",
+          "",
+          "The tool returns when the child's turn is done (or on error).",
+          "The result includes the child's summary and output.",
+        ].join("\n"),
+        inputSchema: z.object({
+          name: z.string().min(1).max(64)
+            .describe("Stable identifier for this child, e.g. 'researcher-auth' or 'builder-1'. Use the same name to continue a previous conversation."),
+          task: z.string().min(1)
+            .describe("Full task description. Be explicit - the sub-agent has no conversation context beyond what you send here."),
+        }),
+        displayName: "Sub-agent",
+      })),
     };
   }
 
@@ -1402,8 +1453,8 @@ export class Agent extends Think<Env> {
    * with `{ aborted: true }` shortly after, the model loop sees a terminal
    * answer for that call, and the turn proceeds.
    *
-   * The underlying workspace promise is *not* killed — the workspace SDK
-   * doesn't accept abort signals — it's allowed to drain in the background.
+   * The underlying workspace promise is *not* killed - the workspace SDK
+   * doesn't accept abort signals - it's allowed to drain in the background.
    */
   @callable()
   async cancelToolCall(toolCallId: string): Promise<{ cancelled: boolean }> {
@@ -1437,6 +1488,24 @@ export class Agent extends Think<Env> {
     return child.whoIsMyParent();
   }
 
+  /**
+   * Spawn a SubAgent and return the tool names it exposes.
+   * Used by tests to assert the child's tool set without driving a model turn.
+   */
+  async spawnAndInspectTools(childName: string): Promise<string[]> {
+    const child = await this.subAgent(SubAgent, childName);
+    return child.activeSubAgentToolNames();
+  }
+
+  /**
+   * Spawn a SubAgent and return its system prompt.
+   * Used by tests to assert the worker-agent preamble.
+   */
+  async spawnAndReadWorkerPrompt(childName: string): Promise<string> {
+    const child = await this.subAgent(SubAgent, childName);
+    return child.previewWorkerSystemPrompt();
+  }
+
   /** Returns this agent's DO name. Used as a sanity RPC from children. */
   whoAmI(): string {
     return this.name;
@@ -1444,7 +1513,7 @@ export class Agent extends Think<Env> {
 
   /**
    * Append a bare user message to the conversation without driving a
-   * model turn. Test-only helper — production code uses the chat WS or
+   * model turn. Test-only helper - production code uses the chat WS or
    * sub-agent `chat()`. Persists through Session so /messages and
    * /reset behave correctly afterwards.
    */
@@ -1467,7 +1536,7 @@ export class Agent extends Think<Env> {
   // request hot path. New activity (user message, assistant turn, seed)
   // calls `kickSummary()`, which idempotently schedules a debounced tick.
   // The tick generates a summary if messages have changed and then
-  // exits — it does *not* reschedule itself. Old threads that nobody
+  // exits - it does *not* reschedule itself. Old threads that nobody
   // touches simply stop ticking. The `/summary` endpoint is a pure read
   // of the cached value.
 
@@ -1477,7 +1546,7 @@ export class Agent extends Think<Env> {
   /** Cached summary blob persisted to storage so it survives eviction. */
   private static readonly SUMMARY_STORAGE_KEY = "thread-summary";
 
-  /** Returns the cached summary. Pure read — never calls the model. */
+  /** Returns the cached summary. Pure read - never calls the model. */
   private async handleSummary(): Promise<Response> {
     const cached = await this.ctx.storage.get<{ count: number; text: string }>(
       Agent.SUMMARY_STORAGE_KEY,
@@ -1509,7 +1578,7 @@ export class Agent extends Think<Env> {
 
   /**
    * Scheduled callback: generate a summary if the message count has
-   * advanced since the last run. Exits without rescheduling — the next
+   * advanced since the last run. Exits without rescheduling - the next
    * message will arm a fresh tick via `kickSummary()`. This is how
    * idle threads stop consuming model calls.
    */
@@ -1554,7 +1623,7 @@ export class Agent extends Think<Env> {
         span.set("hackspace.summary_bytes", () => text.trim().length);
         span.set("hackspace.outcome", () => "generated");
       } catch (err) {
-        // Swallow — the next message will trigger another attempt. We
+        // Swallow - the next message will trigger another attempt. We
         // intentionally don't overwrite the cached summary on failure so
         // a transient model error doesn't blank out a usable preview.
         // The span still records the error via setError so dashboards
@@ -1565,18 +1634,235 @@ export class Agent extends Think<Env> {
   }
 }
 /**
- * SubAgent — a Think DO that the top-level `Agent` can spawn via
- * `this.subAgent(SubAgent, name)`. Lives as a facet of its parent, with
- * its own SQLite storage and message history.
+ * SubAgent - a worker Think DO spawned by the top-level `Agent` via
+ * `agentTool(SubAgent, ...)` inside the parent's `getTools()` return.
  *
- * Currently bare-bones: model selection mirrors the parent and the tool
- * set is empty. Subclass or fill in `getModel()`/`getTools()` when a
- * concrete delegation use-case appears. The class exists today so the
- * runtime binding and migration are already wired — spawning a child
- * doesn't require a redeploy.
+ * Each instance gets:
+ *   - The parent's shared workspace (via `parentAgent(Agent).getWorkspace()`)
+ *     so every file tool reads/writes the same VFS as the parent.
+ *   - The same fs / exec tool set as the parent, minus `delegate`
+ *     (workers do not spawn further workers).
+ *   - A focused system prompt that tells it to complete its task and
+ *     stop without asking back.
+ *
+ * Think's `agentTool()` factory (see `Agent.buildTools`) handles the
+ * `startAgentToolRun` → stream → result pipeline automatically.
+ * The child's chatRecovery fiber keeps the turn alive across DO
+ * evictions, same as the parent.
+ *
+ * Naming convention: the parent passes `runId = name` from the
+ * model's tool input; Think maps that to a child DO name so
+ * subsequent calls with the same name reconnect to the same facet
+ * and its durable message history (multi-turn children).
  */
 export class SubAgent extends Think<Env> {
   override chatRecovery = true;
+
+  // ── Workspace access ---------------------------------
+
+  /**
+   * Cache of the workspace stub fetched from the parent Agent DO.
+   * The stub is an RpcTarget that wraps the parent's live Workspace,
+   * so every fs/shell call crosses the DO-RPC boundary but operates
+   * on the same underlying VFS.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _ws: any = null;
+
+  /**
+   * Fetch the parent's WorkspaceStub via Workers RPC.
+   *
+   * The parent DO exposes `getWorkspace()` as a public RPC so both
+   * the worker backend's shell isolate and this sub-agent can reach
+   * the same workspace without owning it. The RPC returns a
+   * `Stub<WorkspaceStub>` (not a `WorkspaceStub` directly) because
+   * Workers RPC wraps all `RpcTarget` return values in `Stub<T>`.
+   * The stub surface (`fs`, `shell`) is identical at runtime.
+   */
+  private async _getWorkspace(): Promise<WorkspaceStub> {
+    if (this._ws) return this._ws as WorkspaceStub;
+    const parent = await this.parentAgent(Agent);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._ws = await (parent as any).getWorkspace();
+    return this._ws as WorkspaceStub;
+  }
+
+  // ── Think overrides --------------------------------
+
+  override getSystemPrompt(): string {
+    return buildWorkerSystemPrompt();
+  }
+
+  override getModel() {
+    const modelId = currentModelId(this.env);
+    if (this.env.OPENAI_API_KEY) {
+      return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(modelId);
+    }
+    return createWorkersAI({ binding: this.env.AI })(modelId);
+  }
+
+  override getTools() {
+    // Close over _getWorkspace so every tool lazily resolves the stub.
+    const getWs = () => this._getWorkspace();
+    const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
+      ({ [name]: def });
+
+    return {
+      ...pick("read",  createReadTool({ store: makeLazyStubStore(getWs) })),
+      ...pick("write", createWriteTool({ store: makeLazyStubStore(getWs) })),
+      ...pick("edit",  createEditTool({ store: makeLazyStubStore(getWs) })),
+      ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
+      ...(this.env.BRAVE_API_KEY
+        ? pick("websearch", createWebSearchTool({
+            provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
+          }))
+        : {}),
+
+      ...pick("ls", tool({
+        description: "List files and directories at a path",
+        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          return { path, entries: await ws.fs.readdir(path) };
+        },
+      })),
+
+      ...pick("stat", tool({
+        description: "Get metadata for a file or directory: type, size, mtime",
+        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          try {
+            const s = await ws.fs.stat(path);
+            return { path, type: s.isDirectory ? "dir" : "file", size: s.size, mtime: s.mtime, mode: s.mode };
+          } catch {
+            return { error: `Not found: ${path}` };
+          }
+        },
+      })),
+
+      ...pick("mkdir", tool({
+        description: "Create a directory (including parent directories)",
+        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          await ws.fs.mkdir(path, { recursive: true });
+          return { path, created: true };
+        },
+      })),
+
+      ...pick("rm", tool({
+        description: "Delete a file or directory (recursive)",
+        inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
+        execute: async ({ path }) => {
+          const ws = await getWs();
+          await ws.fs.rm(path, { recursive: true, force: true });
+          return { path, deleted: true };
+        },
+      })),
+
+      ...pick("find", tool({
+        description: "Search for files matching a pattern under a directory",
+        inputSchema: z.object({
+          directory: z.string().describe("Directory to search under"),
+          pattern:   z.string().optional().describe("Substring to match against filename"),
+        }),
+        execute: async ({ directory, pattern }) => {
+          const ws = await getWs();
+          return { directory, pattern, matches: await ws.fs.find(directory, pattern) };
+        },
+      })),
+
+      ...pick("grep", tool({
+        description: "Search file contents for a string pattern. Returns matching lines.",
+        inputSchema: z.object({
+          pattern:    z.string().describe("String to search for"),
+          path:       z.string().describe("File or directory to search"),
+          ignoreCase: z.boolean().optional().describe("Case-insensitive search"),
+        }),
+        execute: async ({ pattern, path, ignoreCase }) => {
+          const ws = await getWs();
+          return {
+            pattern, path,
+            matches: await ws.fs.grep(pattern, path, ignoreCase ? { ignoreCase } : {}),
+          };
+        },
+      })),
+
+      ...pick("exec", tool({
+        description: [
+          "Run a shell command in the workspace (shared with the parent agent).",
+          "Backends:",
+          '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot, built-in git.',
+          '  - "container": full Linux userland with Node 24. Use for npm/node/tsc/wrangler.',
+          "Prefer the dedicated tools first: read/write/edit/ls/stat/mkdir/rm/find/grep.",
+        ].join("\n"),
+        inputSchema: z.object({
+          command: z.string().describe("Shell command to run"),
+          cwd:     z.string().optional().describe("Working directory, defaults to /workspace"),
+          backend: z.enum(["shell", "container"]).optional().describe(
+            "Backend to use. Omit for 'shell'. Set 'container' for npm/node/tsc.",
+          ),
+        }),
+        execute: async (
+          { command, cwd, backend },
+          opts: { toolCallId: string; abortSignal?: AbortSignal },
+        ) => {
+          const resolvedBackend = backend ?? (this.env.LOADER ? "shell" : "container");
+          // Route exec through the parent's workspace shell so it runs
+          // in the container attached to the parent's session.
+          try {
+            const ws = await getWs();
+            const handle = await ws.shell.exec(command, { cwd, encoding: "utf8", backend });
+            const result = await handle.result();
+            return {
+              command,
+              cwd: cwd ?? null,
+              backend: resolvedBackend,
+              exitCode: result.exitCode,
+              stdout: truncateExecStream(result.stdout),
+              stderr: truncateExecStream(result.stderr),
+            };
+          } catch (err) {
+            return {
+              command,
+              cwd: cwd ?? null,
+              backend: resolvedBackend,
+              error: { details: err instanceof Error ? err.message : String(err) },
+            };
+          }
+        },
+      })),
+    };
+  }
+
+  // ── Agent-tool output --------------------------------
+
+  /**
+   * Return the final text of the last assistant message as the
+   * agent-tool output. The parent's `agentTool` call receives this
+   * value in `RunAgentToolResult.output` / `.summary` once the child
+   * turn completes.
+   */
+  protected override getAgentToolOutput(_runId: string): unknown {
+    const msgs = [...this.messages].reverse();
+    for (const m of msgs) {
+      if (m.role !== "assistant") continue;
+      const text = extractLastAssistantText(m);
+      if (text) return text;
+    }
+    return null;
+  }
+
+  protected override getAgentToolSummary(_runId: string, output: unknown): string {
+    if (typeof output === "string" && output.trim()) {
+      // Trim to a short preview for parent event frames.
+      return output.trim().slice(0, 500);
+    }
+    return "(no output)";
+  }
+
+  // ── Legacy sanity RPCs (preserved for existing tests) ----------
 
   /** Returns this sub-agent's DO name. Used as a sanity RPC. */
   whoAmI(): string {
@@ -1586,9 +1872,19 @@ export class SubAgent extends Think<Env> {
   /** Returns the parent agent's DO name via `parentAgent(Agent)`. */
   async whoIsMyParent(): Promise<string> {
     const parent = await this.parentAgent(Agent);
-    // The parent stub exposes its own `whoAmI()` (defined below on
-    // Agent) so the child can read it without any extra glue.
     return parent.whoAmI();
+  }
+
+  // ── Introspection RPCs (used by tests) ──────────────────────────────
+
+  /** Returns the tool names visible to the model on this sub-agent. */
+  activeSubAgentToolNames(): string[] {
+    return Object.keys(this.getTools());
+  }
+
+  /** Returns the worker system prompt (no AI binding required). */
+  previewWorkerSystemPrompt(): string {
+    return this.getSystemPrompt();
   }
 }
 
@@ -1626,7 +1922,7 @@ async function raceWithSignal<T>(
 /**
  * Render a thread's chat history as a plain transcript for summarisation.
  *
- * Strips reasoning/thinking parts and tool calls/results — the summary
+ * Strips reasoning/thinking parts and tool calls/results - the summary
  * cares about what the humans and the agent *said*, not the machinery
  * the agent used to get there. Only `text` parts survive.
  *
@@ -1660,7 +1956,7 @@ export function renderTranscriptForSummary(
  * Build a `FileStore` that lazily resolves the underlying
  * `WorkspaceFileStore` per call. Lets the fs-tools (`read` /
  * `write` / `edit`) close over a getter rather than a stub fixed at
- * tool-construction time — important because the agent's Workspace
+ * tool-construction time - important because the agent's Workspace
  * stub is resolved asynchronously through the warm pool and the
  * cache can drop on a Sandbox cycle.
  */
@@ -1695,6 +1991,61 @@ function makeLazyStore(
       }
     },
   };
+}
+
+/**
+ * Like `makeLazyStore` but for a `WorkspaceStub` (used by SubAgent
+ * whose workspace comes from the parent via RPC rather than being
+ * owned locally).
+ *
+ * The cache key is the stub reference itself. A new stub object from
+ * a reconnect will rebuild the inner FileStore, same as the Workspace
+ * variant does.
+ */
+function makeLazyStubStore(
+  getStub: () => Promise<WorkspaceStub>,
+): FileStore {
+  let cached: { stub: WorkspaceStub; store: FileStore } | null = null;
+  const get = async (): Promise<FileStore> => {
+    const stub = await getStub();
+    if (!cached || cached.stub !== stub) {
+      cached = { stub, store: new WorkspaceFileStore(adaptForFsTools(stub)) };
+    }
+    return cached.store;
+  };
+  return {
+    async stat(path) {
+      return (await get()).stat(path);
+    },
+    async readAll(path) {
+      return (await get()).readAll(path);
+    },
+    async write(path, content, opts) {
+      return (await get()).write(path, content, opts);
+    },
+    async *readChunks(path, off, len) {
+      const store = await get();
+      for await (const chunk of store.readChunks(path, off, len)) {
+        yield chunk;
+      }
+    },
+  };
+}
+
+/**
+ * Extract the concatenated text parts from an assistant UIMessage.
+ * Returns an empty string when the message contains no text parts.
+ */
+function extractLastAssistantText(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  m: any,
+): string {
+  if (!m || !Array.isArray(m.parts)) return "";
+  return m.parts
+    .filter((p: { type?: unknown }) => p && p.type === "text")
+    .map((p: { text?: unknown }) => (typeof p.text === "string" ? p.text : ""))
+    .join("")
+    .trim();
 }
 
 /**
