@@ -23,7 +23,7 @@
     "@cloudflare/think": "^0.10.0",
     "@cloudflare/web-tools": "*",
     "@cloudflare/worker-bundler": "^0.2.0",
-    "@cloudflare/workspace": "0.0.0-alpha.9",
+    "@cloudflare/workspace": "0.0.0-alpha.10",
     "@platformatic/vfs": "^0.4.0",
     "acorn": "^8.16.0",
     "agents": "^0.16.1",
