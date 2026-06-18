@@ -343,6 +343,21 @@ export class Agent extends Think<Env> {
               }),
           }
         : {}),
+      // Wire the Cloudflare Artifacts binding when present. The
+      // worker backend registers an `artifact` custom command in the
+      // shell backend so `exec({ command: 'artifact create ...' })`
+      // dispatches through the artifacts CLI without going out to the
+      // public network. Without the binding the command is absent and
+      // the model is not told about it (the exec tool description
+      // only mentions it when ARTIFACTS is bound).
+      ...(this.env.ARTIFACTS
+        ? {
+            artifacts: {
+              binding: this.env.ARTIFACTS,
+              sessionId: this.name,
+            },
+          }
+        : {}),
     });
     this.ctx.blockConcurrencyWhile(async () => {
       this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
@@ -1249,13 +1264,19 @@ export class Agent extends Think<Env> {
           "    file inspection, quick text transformations, `git`",
           "    (clone / status / diff / log / branch / commit), and",
           "    `assets publish <path> [<expiry>]` to share a workspace",
-          "    file as a time-limited public URL backed by R2. The",
-          "    shell registers `git` and `assets` as built-in commands",
-          "    that forward to the host workspace, so network-bound",
-          "    subcommands like `git clone` and the R2 upload in",
-          "    `assets publish` work even though the isolate has no",
-          "    public network. Cannot run npm, node, or any binary",
-          "    outside just-bash's built-in command set.",
+          "    file as a time-limited public URL backed by R2.",
+          "    `artifact create <name>` creates a Cloudflare Artifacts",
+          "    git repo, mints a write token, and registers a git remote",
+          "    in /workspace named <name>. `artifact share <name>`",
+          "    mints a read token and prints one clone-ready URL for",
+          "    sharing an existing repo. Both commands are wired into",
+          "    the shell backend — no public network required. The",
+          "    shell registers `git`, `assets`, and `artifact` as",
+          "    built-in commands that forward to the host workspace, so",
+          "    network-bound subcommands like `git clone`, `assets",
+          "    publish`, and `artifact create/share` work even though",
+          "    the isolate has no public network. Cannot run npm, node,",
+          "    or any binary outside just-bash's built-in command set.",
           '  - "container": Cloudflare Container running wsd. Full Linux',
           "    userland with a Node 24 toolchain on $PATH (node, npm,",
           "    esbuild, wrangler), public network. Cold start is much",
@@ -1815,9 +1836,14 @@ export class SubAgent extends Think<Env> {
         description: [
           "Run a shell command in the workspace (shared with the parent agent).",
           "Backends:",
-          '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot, built-in git.',
+          '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot.',
+          "    Built-in commands: git, assets (publish), artifact (create/share).",
           '  - "container": full Linux userland with Node 24. Use for npm/node/tsc/wrangler.',
           "Prefer the dedicated tools first: read/write/edit/ls/stat/mkdir/rm/find/grep.",
+          "Key shell commands:",
+          "  artifact create <name>  — create a git repo, mint a write token, register remote.",
+          "  artifact share <name>   — mint a read token, print a clone-ready URL.",
+          "  assets publish <path>   — share a workspace file as a public R2 URL.",
         ].join("\n"),
         inputSchema: z.object({
           command: z.string().describe("Shell command to run"),

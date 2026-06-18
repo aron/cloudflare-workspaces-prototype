@@ -8,6 +8,7 @@ declare namespace Cloudflare {
     AI:             Ai;
     SKILLS:         R2Bucket;
     ASSETS:         R2Bucket;
+    ARTIFACTS?:     Artifacts;
     LOADER:         WorkerLoader;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;

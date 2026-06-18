@@ -28,6 +28,16 @@
     { "binding": "ASSETS", "bucket_name": "hackspace-assets" }
   ],
 
+  // Cloudflare Artifacts binding. The workspace wires this into the
+  // worker-backend shell as an `artifact` custom command, enabling
+  // `exec({ command: 'artifact create <name>' })` and
+  // `exec({ command: 'artifact share <name>' })` without reaching
+  // the public network. Remove or comment out if the account does
+  // not have the Artifacts beta.
+  "artifacts": {
+    "binding": "ARTIFACTS"
+  },
+
   // Worker Loader binding. The Agent DO's Workspace mounts a worker
   // backend (just-bash in a Dynamic Worker) alongside the container
   // backend so cheap textual commands skip the container roundtrip;
