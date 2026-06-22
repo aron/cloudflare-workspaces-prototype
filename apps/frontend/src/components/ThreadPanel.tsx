@@ -12,7 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
-import { ArrowUp, ChevronDown, X } from "lucide-react";
+import { ArrowUp, ChevronDown, Maximize2, Minimize2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -84,11 +84,20 @@ export function ThreadPanel({
   roomId,
   threadId,
   model,
+  expanded = false,
+  onExpand,
+  onCollapse,
 }: {
-  roomId:   string;
-  threadId: string;
+  roomId:     string;
+  threadId:   string;
   /** Human-readable label for the current model. Display-only. */
-  model:    string;
+  model:      string;
+  /** Whether the thread panel is currently in full-width mode. */
+  expanded?:  boolean;
+  /** Collapse sidebar + room pane and expand thread to full width. */
+  onExpand?:  () => void;
+  /** Restore the sidebar and room pane to their normal sizes. */
+  onCollapse?: () => void;
 }) {
   const [root, setRoot] = useState<AppMessage | null>(null);
   const [input, setInput] = useState("");
@@ -408,11 +417,23 @@ export function ThreadPanel({
           </DropdownMenuContent>
         </DropdownMenu>
 
+        {(onExpand || onCollapse) && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={expanded ? "Exit full width" : "Expand to full width"}
+            onClick={expanded ? onCollapse : onExpand}
+          >
+            {expanded
+              ? <Minimize2 className="size-4" />
+              : <Maximize2 className="size-4" />}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon-sm"
           aria-label="Close thread"
-          onClick={() => navigate({ kind: "room", roomId })}
+          onClick={() => { onCollapse?.(); navigate({ kind: "room", roomId }); }}
         >
           <X className="size-4" />
         </Button>

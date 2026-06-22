@@ -11,9 +11,10 @@
  * of the thread.
  */
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Hexagon, Inbox } from "lucide-react";
 
+import type { ImperativePanelHandle } from "react-resizable-panels";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -36,10 +37,12 @@ export function RoomShell({
   roomId:    string;
   threadId?: string;
   centre:    React.ReactNode;
-  thread?:   React.ReactNode;
+  // thread receives onExpand/onCollapse so its header can toggle fullwidth.
+  thread?:   ((onExpand: () => void, onCollapse: () => void, expanded: boolean) => React.ReactNode) | React.ReactNode;
 }) {
   const threadOpen  = Boolean(threadId);
   const [unreadOpen, setUnreadOpen] = useState(false);
+  const [threadExpanded, setThreadExpanded] = useState(false);
 
   // Count unread scopes for the badge on the toggle button.
   const { tips, isUnread } = useReceipts();
@@ -55,6 +58,25 @@ export function RoomShell({
     threadOpen ? "t" : "",
     unreadOpen ? "u" : "",
   ].filter(Boolean).join("-");
+
+  const sidebarRef = useRef<ImperativePanelHandle>(null);
+  const centreRef  = useRef<ImperativePanelHandle>(null);
+
+  const handleExpand = useCallback(() => {
+    sidebarRef.current?.collapse();
+    centreRef.current?.collapse();
+    setThreadExpanded(true);
+  }, []);
+
+  const handleCollapse = useCallback(() => {
+    sidebarRef.current?.expand();
+    centreRef.current?.expand();
+    setThreadExpanded(false);
+  }, []);
+
+  const threadNode = typeof thread === "function"
+    ? thread(handleExpand, handleCollapse, threadExpanded)
+    : thread;
 
   return (
     <div className="flex h-screen w-screen flex-col bg-kumo-base text-kumo-default">
@@ -90,18 +112,29 @@ export function RoomShell({
         autoSaveId={layoutId}
         className="flex min-h-0 flex-1"
       >
-        <ResizablePanel id="rooms" order={1} defaultSize={20} minSize={14} maxSize={32} className="!overflow-visible">
+        <ResizablePanel
+          ref={sidebarRef}
+          id="rooms" order={1}
+          defaultSize={20} minSize={14} maxSize={32}
+          collapsible collapsedSize={0}
+          className="!overflow-visible"
+        >
           <RoomSidebar me={me} activeRoomId={roomId} />
         </ResizablePanel>
         <ResizableHandle />
-        <ResizablePanel id="room" order={2} defaultSize={threadOpen || unreadOpen ? 50 : 80} minSize={30}>
+        <ResizablePanel
+          ref={centreRef}
+          id="room" order={2}
+          defaultSize={threadOpen || unreadOpen ? 50 : 80} minSize={30}
+          collapsible collapsedSize={0}
+        >
           {centre}
         </ResizablePanel>
-        {threadOpen && thread && (
+        {threadOpen && threadNode && (
           <>
             <ResizableHandle />
             <ResizablePanel id="thread" order={3} defaultSize={30} minSize={20} maxSize={60}>
-              {thread}
+              {threadNode}
             </ResizablePanel>
           </>
         )}

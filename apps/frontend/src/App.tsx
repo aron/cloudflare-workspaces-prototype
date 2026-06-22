@@ -89,7 +89,7 @@ export function App() {
               roomId={route.roomId}
               threadId={route.threadId}
               centre={<RoomTimeline me={me} roomId={route.roomId} activeThreadId={route.threadId} model={me.model} />}
-              thread={
+              thread={(onExpand, onCollapse, expanded) => (
                 // `key={route.threadId}` is load-bearing. Without it,
                 // React keeps the same ThreadPanel instance across
                 // thread switches: the underlying `useAgent` socket
@@ -105,9 +105,17 @@ export function App() {
                 // idiomatic fix and survives future state being
                 // added to the component.
                 <Suspense fallback={ThreadFallback}>
-                  <ThreadPanel key={route.threadId} roomId={route.roomId} threadId={route.threadId} model={me.model} />
+                  <ThreadPanel
+                    key={route.threadId}
+                    roomId={route.roomId}
+                    threadId={route.threadId}
+                    model={me.model}
+                    expanded={expanded}
+                    onExpand={onExpand}
+                    onCollapse={onCollapse}
+                  />
                 </Suspense>
-              }
+              )}
             />
           </Suspense>
         );
