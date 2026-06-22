@@ -521,7 +521,7 @@ function TopLevelMessage({
             <span className="text-base font-semibold text-kumo-default">{name}</span>
             <span className="text-xs text-kumo-inactive tabular-nums">{relTime(message.metadata.createdAt)}</span>
           </div>
-          <div className="mt-1 whitespace-pre-wrap text-base leading-6 text-kumo-default">
+          <div className="mt-1 text-base leading-6 text-kumo-default">
             <CollapsibleText text={text} />
           </div>
           {hasThread && summary && (

@@ -429,7 +429,7 @@ export function ThreadPanel({
                 <span className="text-sm font-semibold text-kumo-default">{rootInitial.name}</span>
                 <span className="text-2xs text-kumo-inactive tabular-nums">{rootInitial.time}</span>
               </div>
-              <p className="mt-1 whitespace-pre-wrap text-sm leading-5 text-kumo-default"><MentionText text={rootInitial.text} /></p>
+              <p className="mt-1 text-sm leading-5 text-kumo-default"><MentionText text={rootInitial.text} /></p>
             </div>
           </div>
         </div>
@@ -464,7 +464,7 @@ export function ThreadPanel({
                     <Message from="user" className="ml-0 max-w-full flex-1">
                       <div className="mb-1 text-right text-2xs text-kumo-inactive">{name}</div>
                       <MessageContent>
-                        <div className="whitespace-pre-wrap"><MentionText text={text} /></div>
+                        <div><MentionText text={text} /></div>
                       </MessageContent>
                     </Message>
                   </div>

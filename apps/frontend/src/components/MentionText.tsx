@@ -11,11 +11,17 @@
  */
 import { Fragment, useMemo } from "react";
 
+import { cn } from "@/lib/utils";
 import { tokenize } from "@/lib/mentions";
 import { useMentionCandidates } from "@/lib/useMentionCandidates";
 
 
-export function MentionText({ text, className }: { text: string; className?: string }) {
+/**
+ * Render one paragraph's worth of tokens (no \n\n splits — those are
+ * handled by the outer MentionText). Returns a plain <span> so it
+ * composes into whatever block element the caller uses.
+ */
+function MentionParagraph({ text, className }: { text: string; className?: string }) {
   const { handles, refs } = useMentionCandidates();
   const runs = useMemo(() => tokenize(text, handles), [text, handles]);
   if (runs.length === 0) return null;
@@ -24,13 +30,32 @@ export function MentionText({ text, className }: { text: string; className?: str
       {runs.map((r, i) => {
         if (r.type === "text") return <Fragment key={i}>{r.text}</Fragment>;
         if (r.type === "mention") return <MentionPill key={i} handle={r.handle} raw={r.raw} />;
-        // r.type === "ref" — prefer the embedded label, fall back to the
-        // candidate pool keyed on id, then to a generic placeholder.
         const c       = refs.get(`${r.kind}:${r.id}`);
         const handle  = c?.handle ?? (r.kind === "agent" ? "agent" : r.id);
         const display = r.label || (c ? `@${c.handle}` : (r.kind === "agent" ? "@agent" : "@unknown"));
         return <MentionPill key={i} handle={handle} raw={display} />;
       })}
+    </span>
+  );
+}
+
+export function MentionText({ text, className }: { text: string; className?: string }) {
+  // Split on double-newlines to create typographic paragraphs. Single
+  // newlines within a paragraph are preserved via whitespace-pre-wrap on
+  // each <p>. The paragraph gap uses margin rather than a blank line so
+  // it follows typography conventions (~0.5em) instead of a full line-height.
+  const paragraphs = text.split(/\n\n+/);
+  if (paragraphs.length <= 1) {
+    // No paragraph breaks — single span, caller controls the block.
+    return <MentionParagraph text={text} className={className} />;
+  }
+  return (
+    <span className={className}>
+      {paragraphs.map((para, i) => (
+        <p key={i} className={cn("whitespace-pre-wrap", i > 0 && "mt-[0.55em]")}>
+          <MentionParagraph text={para} />
+        </p>
+      ))}
     </span>
   );
 }
