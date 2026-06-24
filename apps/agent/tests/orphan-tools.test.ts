@@ -50,7 +50,7 @@ describe("resolveOrphanToolCalls", () => {
           toolCallId: "c2",
           toolName: "exec",
           state: "input-available",
-          input: { command: "npm install" },
+          input: { command: "bun install" },
         },
       ]),
     ];

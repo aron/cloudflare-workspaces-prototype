@@ -6,11 +6,11 @@
 # package.json). wsd runs as PID 1 and serves the workspace RPC +
 # FUSE mount.
 #
-# Layered on top: a Node.js toolchain (node, npm, esbuild, wrangler)
-# so `exec` calls from the agent find them on PATH inside the
-# FUSE-mounted /workspace. Anything else the agent needs to build
-# can land on top of npm / npx; the image deliberately stays
-# Node-only — zig and go were dropped to keep the image lean.
+# Layered on top: a Node.js + Bun toolchain (node, npm, bun, esbuild,
+# wrangler) so `exec` calls from the agent find them on PATH inside the
+# FUSE-mounted /workspace. Anything else the agent needs to build can
+# land on top of Bun (preferred in the sandbox for speed) or npm / npx;
+# the image deliberately stays otherwise lean — zig and go were dropped.
 
 FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
 
@@ -19,7 +19,7 @@ FROM debian:stable-slim
 # Base toolchain + FUSE runtime.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl xz-utils git \
+      ca-certificates curl xz-utils git bash unzip \
       fuse3 libfuse2t64 \
       build-essential \
  && rm -rf /var/lib/apt/lists/*
@@ -28,8 +28,8 @@ RUN apt-get update \
 #
 # When the host runs behind Cloudflare WARP (or any other decrypting
 # TLS proxy), the certificates the public CA bundle trusts are
-# replaced with WARP's own roots. `curl`, `npm install`, etc. inside
-# the build then fail with "unable to get local issuer certificate"
+# replaced with WARP's own roots. `curl`, `npm install`, `bun install`,
+# etc. inside the build then fail with "unable to get local issuer certificate"
 # the first time they touch an external HTTPS endpoint.
 #
 # The fix is to drop the WARP root bundle at `apps/agent/ca/warp-ca.crt`
@@ -67,9 +67,9 @@ COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 #                          future Python add-ons or `pip` calls a
 #                          user invokes via `exec`.
 #
-# Setting all three before the Node install means the global
-# `npm install -g esbuild wrangler` below also runs through the
-# trusted bundle — npm shells out to curl for some downloads and
+# Setting all three before the Node/Bun install means the global
+# `npm install -g esbuild wrangler` and Bun bootstrap below also run
+# through the trusted bundle — npm shells out to curl for some downloads and
 # Node directly for others, so both env vars matter at install time,
 # not just at agent runtime. See apps/agent/ca/ for the file the
 # host-side WARP bundle drops into.
@@ -77,7 +77,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
-# Node.js 24 (Active LTS) + TypeScript / Cloudflare Worker toolchain.
+# Node.js 24 (Active LTS), Bun, TypeScript / Cloudflare Worker toolchain.
 # Debian's `nodejs` package version moves with the base image; install the
 # official binary tarball so shells inside the workspace consistently see
 # Node 24. 24.x ships `node:sqlite` without the --experimental-sqlite
@@ -88,7 +88,13 @@ RUN NODE_VERSION=24.16.0 && \
       https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /usr/local --strip-components=1 && \
     node --version && npm --version && \
-    npm install -g esbuild@0.25.0 wrangler@4
+    npm install -g esbuild@0.25.0 wrangler@4 && \
+    BUN_VERSION=1.2.23 && \
+    curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt https://bun.sh/install \
+      | bash -s "bun-v${BUN_VERSION}" && \
+    ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
+    ln -s /root/.bun/bin/bunx /usr/local/bin/bunx && \
+    bun --version && bunx --version
 
 # wsd configuration. PORT and MOUNT_POINT are the defaults the
 # CloudflareContainerBackend expects. FUSE_MOUNT=auto probes

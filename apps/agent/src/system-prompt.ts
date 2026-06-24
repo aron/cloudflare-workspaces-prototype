@@ -161,7 +161,7 @@ const GUIDELINES = [
   // so the model sees the steering hint in the same pass as the rest
   // of the file-tool rules.
   "Prefer grep / find / ls over exec for file exploration",
-  "exec defaults to the 'shell' backend (just-bash, instant boot, built-in git). Pass backend: 'container' when the command needs a real Node binary (npm, node, tsc, wrangler, esbuild)",
+  "exec defaults to the 'shell' backend (just-bash, instant boot, built-in git). Pass backend: 'container' when the command needs a real Node/Bun binary (bun, npm, node, tsc, wrangler, esbuild). Prefer `bun install` over `npm install` in the sandbox because it is much faster",
 
   // Hackspace-specific meta-rules.
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",

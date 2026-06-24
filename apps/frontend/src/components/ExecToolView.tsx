@@ -29,22 +29,34 @@ import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { humanizeDuration } from "@/lib/humanize-duration";
 
-interface ExecSnapshot {
+export interface ExecMetadata {
+  kind?: "exec";
+  backend?: "shell" | "container";
+  requestedBackend?: "shell" | "container" | null;
+  cwd?: string | null;
+  commandKind?: "git" | "assets" | "artifact" | "shell";
+}
+
+export interface ExecSnapshot {
   processId?: string;
   running?: boolean;
   stdout?: string;
   stderr?: string;
+  stdoutEmpty?: boolean;
+  stderrEmpty?: boolean;
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
   stdoutBinary?: boolean;
   stderrBinary?: boolean;
   exitCode?: number;
   durationMs?: number;
+  backend?: "shell" | "container";
+  metadata?: ExecMetadata;
   error?: { details?: string };
 }
 
 interface ExecToolViewProps {
-  input?: { command?: string; cwd?: string };
+  input?: { command?: string; cwd?: string; backend?: "shell" | "container" };
   output?: ExecSnapshot | null;
   errorText?: string;
   state?: string;
@@ -52,7 +64,7 @@ interface ExecToolViewProps {
   onCancel?(toolCallId: string): void;
 }
 
-function statusFor(output?: ExecSnapshot | null, errorText?: string): {
+export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
   kind: "running" | "ok" | "fail";
   label: string;
 } {
@@ -77,6 +89,16 @@ function statusFor(output?: ExecSnapshot | null, errorText?: string): {
  * If a side is flagged binary we render the literal "<binary>" once
  * for that side, in place of any content.
  */
+export function execEnvironmentLabel(input?: { backend?: "shell" | "container" }, output?: ExecSnapshot | null): string {
+  const backend = output?.metadata?.backend ?? output?.backend ?? input?.backend ?? "shell";
+  const commandKind = output?.metadata?.commandKind;
+  return commandKind && commandKind !== "shell" ? `${backend} · ${commandKind}` : backend;
+}
+
+function hasVisibleStream(snap: ExecSnapshot): boolean {
+  return Boolean(snap.stdoutBinary || snap.stderrBinary || snap.stdout || snap.stderr);
+}
+
 function renderStream(snap: ExecSnapshot): React.ReactNode {
   const lines: Array<{ stream: "out" | "err"; text: string }> = [];
   if (snap.stdoutBinary) {
@@ -107,6 +129,7 @@ export function ExecToolView({
 }: ExecToolViewProps) {
   const status = statusFor(output, errorText);
   const isRunning = status.kind === "running";
+  const envLabel = execEnvironmentLabel(input, output);
   const canCancel = isRunning && toolCallId
     && (state === "input-streaming" || state === "input-available");
 
@@ -122,6 +145,9 @@ export function ExecToolView({
         {status.kind === "fail" && <XCircle      className="size-4 text-red-400" />}
         {status.kind === "running" && <Loader2 className="size-4 animate-spin text-kumo-inactive" />}
         <span className="text-xs font-semibold uppercase tracking-wide text-kumo-default">exec</span>
+        <span className="rounded border border-kumo-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-kumo-inactive">
+          {envLabel}
+        </span>
         <code className="flex-1 truncate font-mono text-xs text-kumo-inactive">
           {input?.command ?? ""}
         </code>
@@ -137,6 +163,12 @@ export function ExecToolView({
 
       <div className="p-3">
         {renderStream(output ?? {})}
+
+        {output && !isRunning && !hasVisibleStream(output) && !output.error?.details && (
+          <p className="rounded bg-kumo-base p-3 font-mono text-xs text-kumo-inactive">
+            No stdout/stderr output captured.
+          </p>
+        )}
 
         {(output?.stdoutTruncated || output?.stderrTruncated) && (
           <p className="mt-1 text-xs text-kumo-inactive">

@@ -52,6 +52,6 @@ These conventions apply across the agent worker, the shared package, and the fro
 
 ## Dependencies
 
-- Pass `--no-audit --no-fund` to every `npm install` / `npm ci` you run via `exec`. The audit step makes an extra registry round-trip whose findings the agent can't action, and the funding banner is multi-line noise that costs tokens on the way back. Together they routinely shave seconds off a cold install.
-- For installs whose output you don't need to diagnose, add `--loglevel=error` (or `--silent`) so the resolver's per-package progress lines don't dominate the exec output buffer.
-- Example: `npm install --no-audit --no-fund --loglevel=error <pkg>`.
+- Prefer `bun install` over `npm install` / `npm ci` in the sandbox; it is significantly faster here and keeps dependency setup from dominating the turn.
+- Use `bun add <pkg>` when adding a package. If a project specifically requires npm, pass `--no-audit --no-fund` and usually `--loglevel=error` to reduce extra registry round-trips and noisy output.
+- Examples: `bun install --silent`, `bun add <pkg>`, or npm fallback `npm install --no-audit --no-fund --loglevel=error <pkg>`.

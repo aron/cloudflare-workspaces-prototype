@@ -20,7 +20,7 @@ This agent does not currently deploy or invoke Workers itself — the prior `wor
      "compatibility_date": "2026-05-21"
    }
    ```
-3. Use `exec` to run `npx wrangler deploy --dry-run` inside the sandbox if you want a build-only sanity check; the container has network access for `npm install` and friends.
+3. Use `exec` to run `wrangler deploy --dry-run` inside the sandbox if you want a build-only sanity check; the container has network access for `bun install` and friends.
 
 ## Style
 
@@ -30,4 +30,4 @@ This agent does not currently deploy or invoke Workers itself — the prior `wor
 
 ## Dependencies
 
-The sandbox container is a real Linux box with network access. Run `npm install` for packages, `git clone` to vendor a library, or curl/wget anything else. Installed packages persist across calls in the same session.
+The sandbox container is a real Linux box with network access. Prefer `bun install` for project dependencies and `bun add <pkg>` for new packages; Bun is much faster than npm in this sandbox environment. Use npm only when a project specifically requires it. You can also `git clone` to vendor a library, or curl/wget anything else. Installed packages persist across calls in the same session.

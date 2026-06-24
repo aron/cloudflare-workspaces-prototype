@@ -12,7 +12,7 @@
  *      for start-of-basename, word boundaries, consecutive characters.
  *
  * Default ignores filter `node_modules` and `.git` out of both modes
- * so an `npm install` doesn't drown the popover.
+ * so a dependency install doesn't drown the popover.
  *
  * Inputs are minimal so unit tests don't need a real VFS. The Agent's
  * onRequest handler is responsible for translating a Workspace

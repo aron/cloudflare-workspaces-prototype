@@ -541,7 +541,7 @@ export function ThreadPanel({
                           return (
                             <ExecToolView
                               key={i}
-                              input={input as { command?: string; cwd?: string } | undefined}
+                              input={input as { command?: string; cwd?: string; backend?: "shell" | "container" } | undefined}
                               // eslint-disable-next-line @typescript-eslint/no-explicit-any
                               output={output as any}
                               errorText={errorText}

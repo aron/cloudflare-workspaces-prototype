@@ -82,9 +82,10 @@ describe("buildSystemPrompt — tool list", () => {
 });
 
 describe("buildSystemPrompt — guidelines", () => {
-  it("includes the file-exploration preference and always-on bullets", () => {
+  it("includes the file-exploration preference, Bun install preference, and always-on bullets", () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/Prefer grep \/ find \/ ls over exec/);
+    expect(prompt).toMatch(/Prefer `bun install` over `npm install`/);
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
   });

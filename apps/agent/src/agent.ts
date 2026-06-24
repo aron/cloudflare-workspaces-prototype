@@ -68,6 +68,7 @@ import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
 import { splitStreamingTools } from "./streaming-tools.js";
+import { buildExecToolError, buildExecToolOutput } from "./exec-result.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { buildSystemPrompt, buildWorkerSystemPrompt, type Skill } from "./system-prompt.js";
@@ -1057,17 +1058,18 @@ export class Agent extends Think<Env> {
           return { exitCode: -1, stdout: "", stderr: String(err) };
         }
       };
-      const [node, npm, esbuild, wrangler, uname, mounts, fuse] =
+      const [node, npm, bun, esbuild, wrangler, uname, mounts, fuse] =
         await Promise.all([
           probe("node --version"),
           probe("npm --version"),
+          probe("bun --version"),
           probe("esbuild --version"),
           probe("wrangler --version"),
           probe("uname -a"),
           probe("cat /proc/mounts | grep fuse || echo no-fuse"),
           probe("ls /dev/fuse 2>&1 || echo no-dev-fuse"),
         ]);
-      return Response.json({ node, npm, esbuild, wrangler, uname, mounts, fuse });
+      return Response.json({ node, npm, bun, esbuild, wrangler, uname, mounts, fuse });
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/logs")) {
@@ -1291,10 +1293,10 @@ export class Agent extends Think<Env> {
           "    the isolate has no public network. Cannot run npm, node,",
           "    or any binary outside just-bash's built-in command set.",
           '  - "container": Cloudflare Container running wsd. Full Linux',
-          "    userland with a Node 24 toolchain on $PATH (node, npm,",
-          "    esbuild, wrangler), public network. Cold start is much",
+          "    userland with a Node 24 + Bun toolchain on $PATH (node, npm,",
+          "    bun, esbuild, wrangler), public network. Cold start is much",
           "    slower (warm-pool boot); reach for it when shell can't",
-          "    run the command \u2014 typically `npm install`, `npm test`,",
+          "    run the command \u2014 typically `bun install`, `bun test`,",
           "    `tsc`, `wrangler`, or anything else that needs a real",
           "    Linux binary. For git itself, prefer shell.",
           "",
@@ -1304,12 +1306,12 @@ export class Agent extends Think<Env> {
         ].join("\n"),
         inputSchema: z.object({
           command: z.string().describe(
-            "Shell command, e.g. 'git clone https://github.com/owner/repo /workspace/repo' or 'npm test'.",
+            "Shell command, e.g. 'git clone https://github.com/owner/repo /workspace/repo' or 'bun test'."
           ),
           cwd: z.string().optional().describe("Working directory, defaults to /workspace."),
           backend: z.enum(["shell", "container"]).optional().describe(
             "Which backend to run on. Omit for the default ('shell'). " +
-              "Set 'container' when the command needs npm / node / a real " +
+              "Set 'container' when the command needs bun / npm / node / a real " +
               "language toolchain. Keep 'shell' for git, text manipulation, " +
               "and anything the just-bash built-ins cover.",
           ),
@@ -1426,22 +1428,20 @@ export class Agent extends Think<Env> {
             backend,
           });
           const result = await handle.result();
-          return {
+          return buildExecToolOutput({
             command,
-            cwd: cwd ?? null,
-            backend: resolvedBackend,
-            exitCode: result.exitCode,
-            stdout: truncateExecStream(result.stdout),
-            stderr: truncateExecStream(result.stderr),
-          };
+            cwd,
+            requestedBackend: backend,
+            resolvedBackend,
+          }, result);
         },
         {
-          onError: (err) => ({
+          onError: (err) => buildExecToolError({
             command,
-            cwd: cwd ?? null,
-            backend: resolvedBackend,
-            error: { details: err instanceof Error ? err.message : String(err) },
-          }),
+            cwd,
+            requestedBackend: backend,
+            resolvedBackend,
+          }, err),
         },
       );
     };
@@ -1856,7 +1856,7 @@ export class SubAgent extends Think<Env> {
           "Backends:",
           '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot.',
           "    Built-in commands: git, assets (publish), artifact (create/share).",
-          '  - "container": full Linux userland with Node 24. Use for npm/node/tsc/wrangler.',
+          '  - "container": full Linux userland with Node 24 + Bun. Use for bun/npm/node/tsc/wrangler.',
           `Prefer the dedicated tools first: read/write/${editToolName}/ls/stat/mkdir/rm/find/grep.`,
           "Key shell commands:",
           "  artifact create <name>  — create a git repo, mint a write token, register remote.",
@@ -1867,7 +1867,7 @@ export class SubAgent extends Think<Env> {
           command: z.string().describe("Shell command to run"),
           cwd:     z.string().optional().describe("Working directory, defaults to /workspace"),
           backend: z.enum(["shell", "container"]).optional().describe(
-            "Backend to use. Omit for 'shell'. Set 'container' for npm/node/tsc.",
+            "Backend to use. Omit for 'shell'. Set 'container' for bun/npm/node/tsc.",
           ),
         }),
         execute: async (
@@ -1881,21 +1881,19 @@ export class SubAgent extends Think<Env> {
             const ws = await getWs();
             const handle = await ws.shell.exec(command, { cwd, encoding: "utf8", backend });
             const result = await handle.result();
-            return {
+            return buildExecToolOutput({
               command,
-              cwd: cwd ?? null,
-              backend: resolvedBackend,
-              exitCode: result.exitCode,
-              stdout: truncateExecStream(result.stdout),
-              stderr: truncateExecStream(result.stderr),
-            };
+              cwd,
+              requestedBackend: backend,
+              resolvedBackend,
+            }, result);
           } catch (err) {
-            return {
+            return buildExecToolError({
               command,
-              cwd: cwd ?? null,
-              backend: resolvedBackend,
-              error: { details: err instanceof Error ? err.message : String(err) },
-            };
+              cwd,
+              requestedBackend: backend,
+              resolvedBackend,
+            }, err);
           }
         },
       })),
@@ -2124,14 +2122,3 @@ function extractLastAssistantText(
     .trim();
 }
 
-/**
- * Soft cap on the bytes echoed back into the model's tool result for
- * exec stdout/stderr. The new `WorkspaceShellStub.exec` collects the
- * full output before returning; without this a `git log` or `npm
- * install` could spend the entire input window on a single tool reply.
- */
-function truncateExecStream(value: string, maxBytes = 64 * 1024): string {
-  if (!value) return value;
-  if (value.length <= maxBytes) return value;
-  return `${value.slice(0, maxBytes)}\n\n[truncated, ${value.length - maxBytes} more chars]`;
-}

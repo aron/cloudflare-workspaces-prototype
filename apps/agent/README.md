@@ -132,8 +132,8 @@ npm run deploy
 The `predeploy` step builds the frontend bundle. The Sandbox container
 image is built by wrangler from `apps/agent/Dockerfile` on `npm run
 deploy`; it pulls the `wsd` SEA binary out of
-`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.9` and layers
-the project toolchain on top (Node 24, npm, esbuild, wrangler).
+`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11` and layers
+the project toolchain on top (Node 24, npm, Bun, esbuild, wrangler).
 
 ## Debug endpoints
 
