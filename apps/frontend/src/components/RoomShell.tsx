@@ -11,10 +11,9 @@
  * of the thread.
  */
 
-import { useCallback, useRef, useState } from "react";
-import { Hexagon, Inbox } from "lucide-react";
+import { useCallback, useState } from "react";
+import { ChevronRight, Hexagon, Inbox } from "lucide-react";
 
-import type { ImperativePanelHandle } from "react-resizable-panels";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -59,25 +58,39 @@ export function RoomShell({
     unreadOpen ? "u" : "",
   ].filter(Boolean).join("-");
 
-  const sidebarRef = useRef<ImperativePanelHandle>(null);
-  const centreRef  = useRef<ImperativePanelHandle>(null);
-
-  const handleExpand = useCallback(() => {
-    sidebarRef.current?.collapse();
-    centreRef.current?.collapse();
-    setThreadExpanded(true);
-  }, []);
-
-  const handleCollapse = useCallback(() => {
-    sidebarRef.current?.expand();
-    centreRef.current?.expand();
-    setThreadExpanded(false);
-  }, []);
+  const handleExpand   = useCallback(() => setThreadExpanded(true),  []);
+  const handleCollapse = useCallback(() => setThreadExpanded(false), []);
 
   const threadNode = typeof thread === "function"
     ? thread(handleExpand, handleCollapse, threadExpanded)
     : thread;
 
+  // ── Thread full-width mode ────────────────────────────────────────────
+  // When expanded we bypass the resizable panel group entirely and render
+  // a plain flex row: a slim 40px strip on the left (restore chevron) and
+  // the thread filling the rest. This avoids fighting autoSaveId restoring
+  // old panel sizes and guarantees a true full-width thread.
+  if (threadExpanded && threadNode) {
+    return (
+      <div className="flex h-screen w-screen bg-kumo-base text-kumo-default">
+        {/* Slim restore strip */}
+        <button
+          type="button"
+          onClick={handleCollapse}
+          aria-label="Restore sidebar and room"
+          className="flex w-10 flex-shrink-0 flex-col items-center justify-center gap-1 border-r border-kumo-line bg-kumo-panel text-kumo-inactive transition-colors hover:bg-kumo-elevated hover:text-kumo-default"
+        >
+          <ChevronRight size={16} />
+        </button>
+        {/* Thread fills the rest */}
+        <div className="min-w-0 flex-1">
+          {threadNode}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Normal three-pane layout ──────────────────────────────────────────
   return (
     <div className="flex h-screen w-screen flex-col bg-kumo-base text-kumo-default">
       <header className="flex h-14 flex-shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base/80 px-4 backdrop-blur">
@@ -113,20 +126,16 @@ export function RoomShell({
         className="flex min-h-0 flex-1"
       >
         <ResizablePanel
-          ref={sidebarRef}
           id="rooms" order={1}
           defaultSize={20} minSize={14} maxSize={32}
-          collapsible collapsedSize={0}
           className="!overflow-visible"
         >
           <RoomSidebar me={me} activeRoomId={roomId} />
         </ResizablePanel>
         <ResizableHandle />
         <ResizablePanel
-          ref={centreRef}
           id="room" order={2}
           defaultSize={threadOpen || unreadOpen ? 50 : 80} minSize={30}
-          collapsible collapsedSize={0}
         >
           {centre}
         </ResizablePanel>
