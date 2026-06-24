@@ -50,4 +50,8 @@ export class InMemoryFileStore implements FileStore {
       mode:  opts?.mode ?? previous?.mode ?? 0o100644,
     });
   }
+
+  async delete(path: string): Promise<void> {
+    this.files.delete(path);
+  }
 }

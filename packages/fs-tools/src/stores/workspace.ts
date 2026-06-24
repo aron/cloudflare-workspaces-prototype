@@ -9,6 +9,7 @@ export interface WorkspaceLike {
   stat(path: string): Promise<{ type: "file" | "dir"; size: number; mtime: number; mode: number } | null>;
   readFile(path: string): Promise<Uint8Array | null>;
   writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void>;
+  deleteFile?(path: string): Promise<void>;
   /**
    * Optional: streaming chunk reader. When present, this is preferred over
    * `readFile` so the underlying SQLite-backed VFS can serve byte ranges
@@ -43,6 +44,11 @@ export class WorkspaceFileStore implements FileStore {
 
   async write(path: string, content: Uint8Array, opts?: { mode?: number }): Promise<void> {
     await this.ws.writeFile(path, content, opts?.mode);
+  }
+
+  async delete(path: string): Promise<void> {
+    if (!this.ws.deleteFile) throw new Error("delete is not supported by this file store");
+    await this.ws.deleteFile(path);
   }
 
   async *readChunks(

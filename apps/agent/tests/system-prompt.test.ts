@@ -54,7 +54,7 @@ describe("buildSystemPrompt — identity & shape", () => {
 });
 
 describe("buildSystemPrompt — tool list", () => {
-  it("lists every tool the agent registers, each on its own bullet", () => {
+  it("lists every default tool the agent registers, each on its own bullet", () => {
     const prompt = buildSystemPrompt({});
     const expected = [
       "read", "write", "edit",
@@ -66,6 +66,13 @@ describe("buildSystemPrompt — tool list", () => {
     for (const name of expected) {
       expect(prompt).toMatch(new RegExp(`\\n- ${name}: `));
     }
+    expect(prompt).not.toMatch(/\n- apply_patch: /);
+  });
+
+  it("lists apply_patch instead of edit for OpenAI models", () => {
+    const prompt = buildSystemPrompt({ editToolName: "apply_patch" });
+    expect(prompt).toMatch(/\n- apply_patch: /);
+    expect(prompt).not.toMatch(/\n- edit: /);
   });
 
   it("includes the custom-tools hedge sentence after the tool list", () => {
@@ -98,6 +105,14 @@ describe("buildSystemPrompt — guidelines", () => {
     expect(prompt).toMatch(/matched against the original file, not after earlier edits are applied/);
     expect(prompt).toMatch(/Do not emit overlapping or nested edits/);
     expect(prompt).toMatch(/Keep edits\[\]\.oldText as small as possible/);
+  });
+
+  it("includes apply_patch ergonomics for OpenAI models", () => {
+    const prompt = buildSystemPrompt({ editToolName: "apply_patch" });
+    expect(prompt).toMatch(/Use apply_patch for precise file changes/);
+    expect(prompt).toMatch(/create_file, update_file, and delete_file/);
+    expect(prompt).toMatch(/@@ sections with context lines/);
+    expect(prompt).not.toMatch(/edits\[\]\.oldText/);
   });
 
   it("tells the model to load the capabilities-overview skill when asked what it can do", () => {

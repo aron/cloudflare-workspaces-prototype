@@ -13,9 +13,13 @@ export { WorkspaceFileStore, type WorkspaceLike } from "./stores/workspace.js";
 export { createReadTool, type ReadToolOptions } from "./tools/read.js";
 export { createWriteTool, type WriteToolOptions } from "./tools/write.js";
 export { createEditTool, type EditToolOptions } from "./tools/edit.js";
+export { createApplyPatchTool, type ApplyPatchToolOptions } from "./tools/apply-patch.js";
 
 // Lower-level helpers, exposed for callers who want to render diffs or
 // preview an edit without invoking the tool.
+export {
+  applyV4ADiff,
+} from "./apply-diff.js";
 export {
   applyEditsToNormalizedContent,
   detectLineEnding,

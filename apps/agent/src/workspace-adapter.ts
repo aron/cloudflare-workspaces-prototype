@@ -24,6 +24,7 @@ export interface OldWorkspaceFileShape {
   ): Promise<{ type: "file" | "dir"; size: number; mtime: number; mode: number } | null>;
   readFile(path: string): Promise<Uint8Array | null>;
   writeFile(path: string, content: Uint8Array | string, mode?: number): Promise<void>;
+  deleteFile(path: string): Promise<void>;
 }
 
 /** Anything with the `fs` getter our adapter calls into. */
@@ -64,6 +65,9 @@ export function adaptForFsTools(host: FsHolder): OldWorkspaceFileShape {
       const bytes =
         typeof content === "string" ? new TextEncoder().encode(content) : content;
       await host.fs.writeFile(path, bytes, mode !== undefined ? { mode } : {});
+    },
+    async deleteFile(path) {
+      await host.fs.rm(path, { force: true });
     },
   };
 }

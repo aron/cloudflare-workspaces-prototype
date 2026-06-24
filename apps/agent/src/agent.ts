@@ -50,6 +50,7 @@ import type { Sandbox } from "./sandbox.js";
 import { adaptForFsTools } from "./workspace-adapter.js";
 
 import {
+  createApplyPatchTool,
   createEditTool,
   createReadTool,
   createWriteTool,
@@ -496,6 +497,7 @@ export class Agent extends Think<Env> {
       baseUrl:    (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "",
       originator: this.originatorFromMessages(),
       projectInstructions: this._projectInstructions ?? undefined,
+      editToolName: this.env.OPENAI_API_KEY ? "apply_patch" : "edit",
     });
   }
 
@@ -1173,11 +1175,14 @@ export class Agent extends Think<Env> {
     const self = this;
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
       ({ [name]: def });
+    const editToolName = this.env.OPENAI_API_KEY ? "apply_patch" : "edit";
 
     return {
       ...pick("read",  createReadTool({ store: makeLazyStore(getWs) })),
       ...pick("write", createWriteTool({ store: makeLazyStore(getWs) })),
-      ...pick("edit",  createEditTool({ store: makeLazyStore(getWs) })),
+      ...(this.env.OPENAI_API_KEY
+        ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStore(getWs) }))
+        : pick("edit", createEditTool({ store: makeLazyStore(getWs) }))),
       ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
       ...(this.env.BRAVE_API_KEY
         ? pick("websearch", createWebSearchTool({
@@ -1293,7 +1298,7 @@ export class Agent extends Think<Env> {
           "    `tsc`, `wrangler`, or anything else that needs a real",
           "    Linux binary. For git itself, prefer shell.",
           "",
-          "Prefer the dedicated tools first: read / write / edit / ls /",
+          `Prefer the dedicated tools first: read / write / ${editToolName} / ls /`,
           "stat / mkdir / rm / find / grep for file ops. Use exec for",
           "git plumbing, builds, tests, typechecks, formatters.",
         ].join("\n"),
@@ -1344,7 +1349,7 @@ export class Agent extends Think<Env> {
         description: [
           "Delegate a self-contained task to a named sub-agent that shares",
           "this workspace (/workspace). The sub-agent has the same file",
-          "and exec tools as this agent (read/write/edit/ls/stat/mkdir/rm/",
+          `and exec tools as this agent (read/write/${editToolName}/ls/stat/mkdir/rm/`,
           "find/grep/exec/webfetch/websearch) but cannot delegate further.",
           "",
           "Good use-cases:",
@@ -1719,7 +1724,9 @@ export class SubAgent extends Think<Env> {
   // ── Think overrides --------------------------------
 
   override getSystemPrompt(): string {
-    return buildWorkerSystemPrompt();
+    return buildWorkerSystemPrompt({
+      editToolName: this.env.OPENAI_API_KEY ? "apply_patch" : "edit",
+    });
   }
 
   override getModel() {
@@ -1757,11 +1764,14 @@ export class SubAgent extends Think<Env> {
     const getWs = () => this._getWorkspace();
     const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
       ({ [name]: def });
+    const editToolName = this.env.OPENAI_API_KEY ? "apply_patch" : "edit";
 
     return {
       ...pick("read",  createReadTool({ store: makeLazyStubStore(getWs) })),
       ...pick("write", createWriteTool({ store: makeLazyStubStore(getWs) })),
-      ...pick("edit",  createEditTool({ store: makeLazyStubStore(getWs) })),
+      ...(this.env.OPENAI_API_KEY
+        ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStubStore(getWs) }))
+        : pick("edit", createEditTool({ store: makeLazyStubStore(getWs) }))),
       ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
       ...(this.env.BRAVE_API_KEY
         ? pick("websearch", createWebSearchTool({
@@ -1847,7 +1857,7 @@ export class SubAgent extends Think<Env> {
           '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot.',
           "    Built-in commands: git, assets (publish), artifact (create/share).",
           '  - "container": full Linux userland with Node 24. Use for npm/node/tsc/wrangler.',
-          "Prefer the dedicated tools first: read/write/edit/ls/stat/mkdir/rm/find/grep.",
+          `Prefer the dedicated tools first: read/write/${editToolName}/ls/stat/mkdir/rm/find/grep.`,
           "Key shell commands:",
           "  artifact create <name>  — create a git repo, mint a write token, register remote.",
           "  artifact share <name>   — mint a read token, print a clone-ready URL.",
@@ -2040,6 +2050,11 @@ function makeLazyStore(
     async write(path, content, opts) {
       return (await get()).write(path, content, opts);
     },
+    async delete(path) {
+      const store = await get();
+      if (!store.delete) throw new Error("delete is not supported by this file store");
+      return store.delete(path);
+    },
     async *readChunks(path, off, len) {
       const store = await get();
       for await (const chunk of store.readChunks(path, off, len)) {
@@ -2078,6 +2093,11 @@ function makeLazyStubStore(
     },
     async write(path, content, opts) {
       return (await get()).write(path, content, opts);
+    },
+    async delete(path) {
+      const store = await get();
+      if (!store.delete) throw new Error("delete is not supported by this file store");
+      return store.delete(path);
     },
     async *readChunks(path, off, len) {
       const store = await get();

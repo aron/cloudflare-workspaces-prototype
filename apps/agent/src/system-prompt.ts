@@ -97,6 +97,8 @@ export interface BuildSystemPromptOptions {
    * DO. When unset or empty the block is skipped.
    */
   projectInstructions?: string;
+  /** Editing tool exposed in this runtime. OpenAI uses apply_patch. */
+  editToolName?: "edit" | "apply_patch";
 }
 
 // ── Section 1: identity ────────────────────────────────────────────
@@ -112,6 +114,7 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["read",      "read a file from the workspace"],
   ["write",     "create or overwrite a file"],
   ["edit",      "surgical edit of an existing file"],
+  ["apply_patch", "patch-style create/update/delete file operations (OpenAI models)"],
   ["ls",        "list files and directories at a path"],
   ["stat",      "metadata for a file or directory"],
   ["mkdir",     "create a directory (and parents)"],
@@ -125,9 +128,14 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
 ];
 
 /** Tool list for worker sub-agents (same as parent minus delegate). */
-const WORKER_TOOL_SNIPPETS: Array<readonly [string, string]> = TOOL_SNIPPETS.filter(
-  ([name]) => name !== "delegate",
-);
+function toolSnippetsFor(editToolName: "edit" | "apply_patch", worker = false): Array<readonly [string, string]> {
+  return TOOL_SNIPPETS.filter(([name]) => {
+    if (worker && name === "delegate") return false;
+    if (name === "edit") return editToolName === "edit";
+    if (name === "apply_patch") return editToolName === "apply_patch";
+    return true;
+  });
+}
 
 // ── Section 4: guidelines ──────────────────────────────────────────
 
@@ -144,13 +152,9 @@ const WORKER_TOOL_SNIPPETS: Array<readonly [string, string]> = TOOL_SNIPPETS.fil
 // from rewriting whole files when a surgical edit would do, and from
 // preferring `exec cat` over the dedicated `read` tool.
 const GUIDELINES = [
-  // File-tool ergonomics (pi's read/write/edit promptGuidelines).
+  // File-tool ergonomics shared by every model.
   "Use read to examine files instead of exec'ing cat or sed",
   "Use write only for new files or complete rewrites",
-  "Use edit for precise changes \u2014 each edits[].oldText must match exactly",
-  "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-  "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit",
-  "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions",
 
   // Exploration + backend selection. The exec tool's own description
   // already spells out the two backends in detail; this bullet exists
@@ -171,6 +175,22 @@ const GUIDELINES = [
   "Sub-agents share the same workspace (/workspace). Coordinate paths explicitly — prefer separate subdirectories when working in parallel (e.g. /workspace/research/, /workspace/build/)",
   "Sub-agents cannot spawn further sub-agents — you are the planner",
 ];
+
+function editingGuidelines(toolName: "edit" | "apply_patch"): string[] {
+  if (toolName === "apply_patch") {
+    return [
+      "Use apply_patch for precise file changes — prefer small V4A diffs with enough context to apply cleanly",
+      "apply_patch supports create_file, update_file, and delete_file operations; read files first when context is uncertain",
+      "For update_file, use @@ sections with context lines (' '), deletions ('-'), and additions ('+'). Keep patches focused and avoid large rewrites",
+    ];
+  }
+  return [
+    "Use edit for precise changes — each edits[].oldText must match exactly",
+    "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+    "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit",
+    "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions",
+  ];
+}
 
 const SKILLS_PREAMBLE = `\
 The following skills provide specialized instructions for specific tasks.
@@ -207,11 +227,11 @@ const WORKSPACE_LAYOUT_BLOCK = `\
 Workspace layout:
 - All files live under /workspace. Use absolute paths.`;
 
-function workspaceIgnoreBlock(pullIgnore: string[]): string {
+function workspaceIgnoreBlock(pullIgnore: string[], editToolName: "edit" | "apply_patch"): string {
   const list = pullIgnore.map((p) => `\`${p}\``).join(", ");
   return [
     "Workspace ignore rules:",
-    `- Paths matching ${list} are ignored by the post-exec sync, so they don't appear via \`read\`, \`write\`, \`edit\`, \`ls\`, \`stat\`, \`find\`, or \`grep\`. They are matched as path segments — any path containing \`/<name>/\` or ending in \`/<name>\`.`,
+    `- Paths matching ${list} are ignored by the post-exec sync, so they don't appear via \`read\`, \`write\`, \`${editToolName}\`, \`ls\`, \`stat\`, \`find\`, or \`grep\`. They are matched as path segments — any path containing \`/<name>/\` or ending in \`/<name>\`.`,
     "- The files still exist on the container side, so `exec` (and anything it runs — node, tsc, eslint, etc.) sees them normally.",
     "- `exec` *can* be used to read or grep an ignored file (e.g. `exec(\"cat /workspace/node_modules/foo/package.json\")`), but each call spawns a sandbox process and round-trips through the container — plan on hundreds of ms minimum. Reach for it only when no other tool can answer the question.",
     "- Prefer published documentation, `websearch` / `webfetch`, or the source repo's metadata over crawling installed dependencies.",
@@ -307,6 +327,7 @@ function buildProjectContext(opts: {
   pullIgnore: string[];
   originator?: { userId: string; name: string };
   projectInstructions?: string;
+  editToolName?: "edit" | "apply_patch";
 }): string {
   const sections: string[] = [];
   // AGENTS.md first — user-controlled persona / style / house rules
@@ -317,7 +338,7 @@ function buildProjectContext(opts: {
     sections.push(projectInstructionsBlock(opts.projectInstructions.trim()));
   }
   sections.push(EXECUTION_BLOCK, WORKSPACE_LAYOUT_BLOCK);
-  if (opts.pullIgnore.length > 0) sections.push(workspaceIgnoreBlock(opts.pullIgnore));
+  if (opts.pullIgnore.length > 0) sections.push(workspaceIgnoreBlock(opts.pullIgnore, opts.editToolName ?? "edit"));
   sections.push(fileServingBlock(opts.threadId, opts.baseUrl));
   if (opts.originator) {
     sections.push(originatorBlock(opts.originator, opts.baseUrl, opts.threadId, opts.roomId));
@@ -336,12 +357,14 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const baseUrl    = (opts.baseUrl ?? "").replace(/\/+$/, "");
   const roomId     = opts.roomId ?? "";
   const originator = opts.originator;
+  const editToolName = opts.editToolName ?? "edit";
 
-  const tools      = TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
-  const guidelines = GUIDELINES.map((g) => `- ${g}`).join("\n");
+  const tools      = toolSnippetsFor(editToolName).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
+  const guidelines = [...GUIDELINES, ...editingGuidelines(editToolName)].map((g) => `- ${g}`).join("\n");
   const projectContext = buildProjectContext({
     threadId, baseUrl, roomId, pullIgnore, originator,
     projectInstructions: opts.projectInstructions,
+    editToolName,
   });
 
   const parts: string[] = [
@@ -408,13 +431,14 @@ concise summary of what you did and what changed.`;
  * parent-level concerns. Includes the same tool list (minus delegate),
  * the same file-tool ergonomics guidelines, and the standard footer.
  */
-export function buildWorkerSystemPrompt(opts: { now?: Date } = {}): string {
+export function buildWorkerSystemPrompt(opts: { now?: Date; editToolName?: "edit" | "apply_patch" } = {}): string {
   const now = opts.now ?? new Date();
-  const tools = WORKER_TOOL_SNIPPETS.map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
+  const editToolName = opts.editToolName ?? "edit";
+  const tools = toolSnippetsFor(editToolName, true).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
   // Worker guidelines: file-tool ergonomics + exec backend selection.
   // Drop hackspace meta-rules and sub-agent delegation rules — workers
   // don’t use them.
-  const workerGuidelines = GUIDELINES
+  const workerGuidelines = [...GUIDELINES, ...editingGuidelines(editToolName)]
     .filter(g => !g.startsWith("When the user asks") && !g.startsWith("Use delegate") && !g.startsWith("Sub-agents") && !g.startsWith("Name sub-agents") && !g.startsWith("Give the sub-agent"))
     .map(g => `- ${g}`);
 

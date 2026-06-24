@@ -50,4 +50,10 @@ export interface FileStore {
    * do must store the value verbatim (not OR/AND with the previous mode).
    */
   write(path: string, content: Uint8Array, opts?: { mode?: number }): Promise<void>;
+
+  /**
+   * Remove a file. Optional so existing stores remain source-compatible;
+   * tools that require deletion should return a clear error when absent.
+   */
+  delete?(path: string): Promise<void>;
 }
