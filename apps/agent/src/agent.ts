@@ -737,9 +737,17 @@ export class Agent extends Think<Env> {
         console.warn("[Agent] tool duration stamping failed:", err);
       }));
       this.ctx.waitUntil(this.kickSummary());
-      this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
-        console.warn("[Agent] reflection injection failed:", err);
-      }));
+      // Only check the loop budget when the turn is still in progress
+      // (continuation === true means the model just called tools and is
+      // about to loop). When continuation is false the agent has already
+      // written its final text and stopped — injecting a reflection at
+      // that point starts an unwanted new turn instead of steering the
+      // current one.
+      if (result.continuation) {
+        this.ctx.waitUntil(this.maybeInjectReflection().catch(err => {
+          console.warn("[Agent] reflection injection failed:", err);
+        }));
+      }
       this.ctx.waitUntil(this.maybeNotifyMentions(result).catch(err => {
         log("warn", "agent mention notifications failed", { error: (err as Error).message });
       }));
