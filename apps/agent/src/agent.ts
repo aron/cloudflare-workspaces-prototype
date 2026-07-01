@@ -18,6 +18,8 @@
  * set by default - fill in per use case).
  */
 import type { ChatResponseResult, StepContext, ToolCallResultContext, TurnContext } from "@cloudflare/think";
+import type { ChatErrorClassification, ContextOverflowConfig, Session } from "@cloudflare/think";
+import { defaultContextOverflowClassifier } from "@cloudflare/think";
 import { LoopTracker } from "./loop-tracker.js";
 import { stampPartDurations } from "./stamp-tool-durations.js";
 import { APP_DO_NAME } from "./app.js";
@@ -63,6 +65,12 @@ import {
   createWebSearchTool,
 } from "@cloudflare/web-tools";
 import { currentModelId } from "./model.js";
+import {
+  COMPACT_AFTER_TOKENS,
+  PROACTIVE_HEADROOM,
+  PROACTIVE_MAX_INPUT_TOKENS,
+  createTracedCompaction,
+} from "./compaction.js";
 import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
@@ -529,6 +537,68 @@ export class Agent extends Think<Env> {
       return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })(modelId);
     }
     return createWorkersAI({ binding: this.env.AI })(modelId);
+  }
+
+  /**
+   * Register auto-compaction on the Session. Called once by Think during
+   * `onStart`.
+   *
+   *  - `onCompaction` supplies HOW to summarize — the reference compaction
+   *    function from the Session package, wrapped in an `agent.compaction`
+   *    trace span (see compaction.ts) so every compaction is observable.
+   *  - `compactAfter` supplies WHEN — a between-turns token threshold at ~80%
+   *    of the gpt-5.5 context window, checked after each appended message.
+   *
+   * The in-turn proactive guard and the reactive backstop are configured via
+   * `contextOverflow` below; all three layers reuse this one compaction fn.
+   */
+  override configureSession(session: Session): Session {
+    return session
+      .onCompaction(
+        createTracedCompaction({
+          model: () => this.getModel(),
+          threadId: this.name,
+        }),
+      )
+      .compactAfter(COMPACT_AFTER_TOKENS)
+      .onCompactionError((err) => {
+        console.warn(
+          `[Agent] auto-compaction failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+  }
+
+  /**
+   * Handle a turn that overflows the context window mid-flight.
+   *
+   *  - `proactive`: before each step, if the previous step's reported
+   *    `usage.inputTokens` crosses `maxInputTokens * headroom`, compact in
+   *    place and continue — heading off the provider rejection.
+   *  - `reactive`: if a turn still fails with a context-overflow error,
+   *    discard the partial, `session.compact()`, and re-run the turn.
+   *
+   * Both reuse the compaction fn registered in `configureSession`.
+   */
+  override contextOverflow: ContextOverflowConfig = {
+    reactive: true,
+    maxRetries: 1,
+    proactive: {
+      maxInputTokens: PROACTIVE_MAX_INPUT_TOKENS,
+      headroom: PROACTIVE_HEADROOM,
+      maxCompactions: 1,
+    },
+  };
+
+  /**
+   * Map provider errors to Think's semantic categories so `contextOverflow`
+   * can act on context-window rejections. Uses the package's default
+   * classifier, which matches the overflow error strings of the common
+   * providers (OpenAI `context_length_exceeded`, etc.).
+   */
+  override classifyChatError(error: unknown): ChatErrorClassification | void {
+    return defaultContextOverflowClassifier(error);
   }
 
   /**
