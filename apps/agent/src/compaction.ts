@@ -71,8 +71,12 @@ export interface CompactionDeps {
    * itself) so it is only constructed when a compaction actually runs —
    * `configureSession` executes at `onStart`, before any turn, and eagerly
    * building the model there would crash environments without a provider
-   * binding (e.g. the agent-suite tests that have no AI binding). Reuse the
-   * chat model.
+   * binding (e.g. the agent-suite tests that have no AI binding).
+   *
+   * Wire this to Think's `resolveModel()` rather than `getModel()`: as of
+   * @cloudflare/think 0.12.0 `getModel()` may return a bare model-id string,
+   * and `resolveModel()` is the documented way to obtain a concrete
+   * `LanguageModel` for side inference like this summarization call.
    */
   model: () => LanguageModel;
   /** Thread id, attached to spans for grouping. */

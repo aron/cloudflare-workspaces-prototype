@@ -556,7 +556,10 @@ export class Agent extends Think<Env> {
     return session
       .onCompaction(
         createTracedCompaction({
-          model: () => this.getModel(),
+          // resolveModel() (think 0.12.0+) yields a concrete LanguageModel even
+          // if getModel() returns a bare id string — the documented path for
+          // side inference like compaction's generateText call.
+          model: () => this.resolveModel(),
           threadId: this.name,
         }),
       )
@@ -1709,7 +1712,11 @@ export class Agent extends Think<Env> {
       span.set("hackspace.transcript_bytes", () => transcript.length);
 
       try {
-        const kimi = createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+        // Deliberately a cheap Workers AI model for the sidebar preview, not the
+        // chat model. resolveModel() (think 0.12.0+) routes the `@cf/...` id
+        // through the built-in provider off our AI binding, wiring
+        // sessionAffinity for prefix-cache hits — no separate provider wiring.
+        const kimi = this.resolveModel("@cf/moonshotai/kimi-k2.6");
         const { text } = await generateText({
           model: kimi,
           system:
