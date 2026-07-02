@@ -4,6 +4,8 @@
 .dev.vars.*
 !.dev.vars.example
 
+wrangler.prod.jsonc
+
 # WARP / corporate-MITM CA bundles. The agent's Dockerfile picks up any
 # `.crt` file under `apps/agent/ca/` and trusts it inside the build, so
 # `curl`/`npm install` steps can reach external HTTPS through a

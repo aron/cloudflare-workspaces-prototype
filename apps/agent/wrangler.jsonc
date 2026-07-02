@@ -27,16 +27,24 @@
     // surfacing an RPC error.
     { "binding": "ASSETS", "bucket_name": "hackspace-assets" }
   ],
-
+  "kv_namespaces": [
+    {
+      "binding": "MCP_TOKENS",
+      "id": "d9698912689e45969c74e56182536d68"
+    }
+  ],
   // Cloudflare Artifacts binding. The workspace wires this into the
   // worker-backend shell as an `artifact` custom command, enabling
   // `exec({ command: 'artifact create <name>' })` and
   // `exec({ command: 'artifact share <name>' })` without reaching
   // the public network. Remove or comment out if the account does
   // not have the Artifacts beta.
-  "artifacts": {
-    "binding": "ARTIFACTS"
-  },
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "hackspace-prototype"
+    }
+  ],
 
   // Worker Loader binding. The Agent DO's Workspace mounts a worker
   // backend (just-bash in a Dynamic Worker) alongside the container
@@ -89,7 +97,7 @@
     "WARM_POOL_TARGET": "3",
     "WARM_POOL_REFRESH_INTERVAL": "10000",
 
-    "OPENAI_MODEL": "gpt-5.5",
+    "OPENAI_MODEL": "gpt-5.5"
 
     // R2 S3 credentials for the `assets publish` shell command. The
     // R2 binding alone can't mint a presigned GET URL; the assets
@@ -104,10 +112,10 @@
     // dev sees the names declared; the empty strings are equivalent
     // to leaving them unset, and the Agent gates the assets client
     // on both creds being non-empty.
-    "R2_ACCESS_KEY_ID":     "",
-    "R2_SECRET_ACCESS_KEY": "",
-    "CLOUDFLARE_ACCOUNT_ID": "",
-    "R2_ENDPOINT":          ""
+    // "R2_ACCESS_KEY_ID": "",
+    // "R2_SECRET_ACCESS_KEY": "",
+    // "CLOUDFLARE_ACCOUNT_ID": "",
+    // "R2_ENDPOINT": ""
 
     // Public origin used to build absolute URLs in agent messages and
     // Google Chat notifications. Leave unset to fall back to the origin of
