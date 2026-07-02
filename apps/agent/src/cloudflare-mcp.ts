@@ -121,6 +121,64 @@ export function lastUserAuthorId(
   return null;
 }
 
+/**
+ * Result of the interactive connect poll loop. `phase` drives the frontend
+ * onboarding card (see CloudflareToolView) as well as the model's reading.
+ */
+export type CloudflarePollResult =
+  | { phase: "ready" }
+  | { phase: "cancelled" }
+  | { phase: "timeout"; authUrl: string | null }
+  | { phase: "failed"; error: string | null };
+
+/**
+ * Poll a user's Cloudflare connection until it becomes READY, the caller
+ * aborts (Cancel button -> cancelToolCall -> signal), or a deadline passes.
+ *
+ * Pure over its dependencies so it's unit-testable without a live DO:
+ *   - `getStatus()` returns the current connection status (READY when the
+ *     OAuth callback has written the token to KV and the connection is live).
+ *   - `sleep(ms, signal)` waits, rejecting/resolving early on abort.
+ *   - `signal` fires when the user cancels the tool call.
+ *
+ * The `await sleep(...)` between checks opens the Durable Object input gate,
+ * letting the OAuth callback run on the same instance and flip the state.
+ */
+export async function pollCloudflareReady(deps: {
+  getStatus: () => CloudflareConnStatus | Promise<CloudflareConnStatus>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  intervalMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+}): Promise<CloudflarePollResult> {
+  const intervalMs = deps.intervalMs ?? 2_000;
+  const timeoutMs = deps.timeoutMs ?? 5 * 60_000;
+  const now = deps.now ?? Date.now;
+  const start = now();
+  let lastAuthUrl: string | null = null;
+
+  for (;;) {
+    if (deps.signal?.aborted) return { phase: "cancelled" };
+
+    const status = await deps.getStatus();
+    if (status.state === "ready") return { phase: "ready" };
+    if (status.state === "failed") return { phase: "failed", error: status.error };
+    if (status.state === "authenticating") lastAuthUrl = status.authUrl;
+
+    if (now() - start >= timeoutMs) {
+      return { phase: "timeout", authUrl: lastAuthUrl };
+    }
+
+    try {
+      await deps.sleep(intervalMs, deps.signal);
+    } catch {
+      // sleep rejected due to abort
+      return { phase: "cancelled" };
+    }
+  }
+}
+
 /** Connection status the `cloudflare` tool reports back to the model. */
 export type CloudflareConnStatus =
   | { state: "disconnected" }

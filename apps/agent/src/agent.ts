@@ -89,6 +89,7 @@ import {
   describeConnection,
   gateCloudflareTools,
   lastUserAuthorId,
+  pollCloudflareReady,
 } from "./cloudflare-mcp.js";
 import { type AgentMcpOAuthProvider, normalizeServerId } from "agents";
 import { readIdentity } from "./identity.js";
@@ -1404,8 +1405,16 @@ export class Agent extends Think<Env> {
    */
   async invokeCloudflareTool(
     command: "connect" | "status" | "disconnect",
-  ): Promise<Record<string, unknown>> {
-    return this._runCloudflareTool(command);
+    opts?: { toolCallId?: string; abortSignal?: AbortSignal },
+  ): Promise<{ yields: Record<string, unknown>[]; result: Record<string, unknown> }> {
+    const gen = this._runCloudflareTool(command, opts);
+    const yields: Record<string, unknown>[] = [];
+    let next = await gen.next();
+    while (!next.done) {
+      yields.push(next.value as Record<string, unknown>);
+      next = await gen.next();
+    }
+    return { yields, result: next.value as Record<string, unknown> };
   }
 
   private buildTools() {
@@ -1677,11 +1686,20 @@ export class Agent extends Think<Env> {
   /**
    * Execute the `cloudflare` tool. Resolves the current user from the last
    * user message and dispatches connect/status/disconnect against their
-   * per-user MCP connection. Never throws for user-facing conditions.
+   * per-user MCP connection.
+   *
+   * A streaming (async generator) tool: `connect` YIELDS an interim
+   * `awaiting_auth` chunk carrying the OAuth authUrl - the frontend
+   * CloudflareToolView renders that as a Continue/Cancel card - then polls
+   * until the connection goes READY (the OAuth callback wrote the token to
+   * KV), the user cancels (Cancel -> cancelToolCall -> abort signal), or a
+   * deadline passes. `status`/`disconnect` yield a single terminal value.
+   * Never throws for user-facing conditions.
    */
-  private async _runCloudflareTool(
+  private async *_runCloudflareTool(
     command: "connect" | "status" | "disconnect",
-  ): Promise<Record<string, unknown>> {
+    opts?: { toolCallId?: string; abortSignal?: AbortSignal },
+  ): AsyncGenerator<Record<string, unknown>, Record<string, unknown>, unknown> {
     if (!this.env.MCP_TOKENS) {
       return { error: "Cloudflare access is not configured on this deployment." };
     }
@@ -1705,15 +1723,66 @@ export class Agent extends Think<Env> {
 
     // command === "connect"
     const status = await this.ensureCloudflareConnection(userId);
-    if (status.state === "authenticating") {
-      return {
-        state: "authenticating",
-        authUrl: status.authUrl,
-        message:
-          "Ask the user to open the authUrl to authorize Cloudflare access, then retry.",
-      };
+    if (status.state === "ready") {
+      return { phase: "ready" };
     }
-    return { ...status };
+    if (status.state === "failed") {
+      return { phase: "failed", error: status.error };
+    }
+
+    // Authenticating (or connecting): surface the auth card, then poll. Register
+    // an abort controller keyed by toolCallId so the Cancel button's
+    // cancelToolCall RPC aborts the wait (mirrors the exec/raceWithSignal path).
+    const authUrl =
+      status.state === "authenticating" ? status.authUrl : null;
+    yield {
+      phase: "awaiting_auth",
+      authUrl,
+      title: "Authorize Cloudflare access",
+      message:
+        "Open the authorization link to grant access to your Cloudflare account.",
+    };
+
+    const controller = new AbortController();
+    if (opts?.toolCallId) this._toolAborts.set(opts.toolCallId, controller);
+    if (opts?.abortSignal) {
+      if (opts.abortSignal.aborted) controller.abort(opts.abortSignal.reason);
+      else
+        opts.abortSignal.addEventListener("abort", () => controller.abort(opts.abortSignal?.reason), {
+          once: true,
+        });
+    }
+
+    try {
+      const result = await pollCloudflareReady({
+        getStatus: () => this.cloudflareStatusFor(userId),
+        sleep: (ms, signal) => this._sleep(ms, signal),
+        signal: controller.signal,
+      });
+      return { ...result, ...(authUrl && !("authUrl" in result) ? { authUrl } : {}) };
+    } finally {
+      if (opts?.toolCallId) this._toolAborts.delete(opts.toolCallId);
+    }
+  }
+
+  /**
+   * Sleep `ms`, resolving early (and cleanly) if `signal` aborts. Used by the
+   * Cloudflare connect poll loop; the await opens the DO input gate so the
+   * OAuth callback can run and flip the connection to READY between checks.
+   */
+  private _sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (signal?.aborted) return resolve();
+      const t = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /**

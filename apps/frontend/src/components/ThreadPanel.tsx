@@ -51,6 +51,7 @@ import { FileViewer, type FileViewerEntry } from "@/components/FileViewer";
 import { PathAutocomplete } from "@/components/PathAutocomplete";
 import { ExecToolView } from "@/components/ExecToolView";
 import { DelegateToolView } from "@/components/DelegateToolView";
+import { CloudflareToolView } from "@/components/CloudflareToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
@@ -565,6 +566,22 @@ export function ThreadPanel({
                               toolCallId={toolCallId}
                               callDurationMs={callDurationMs}
                               agent={agent}
+                            />
+                          );
+                        }
+                        // Custom chrome for cloudflare - the interactive OAuth
+                        // onboarding card (Continue opens the authUrl, Cancel
+                        // cancels the pending tool call).
+                        if (name === "cloudflare") {
+                          return (
+                            <CloudflareToolView
+                              key={i}
+                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                              output={output as any}
+                              errorText={errorText}
+                              state={part.state}
+                              toolCallId={toolCallId}
+                              onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
                             />
                           );
                         }

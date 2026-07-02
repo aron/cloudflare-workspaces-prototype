@@ -26,13 +26,12 @@ describe("Agent — cloudflare tool", () => {
 
   it("reports a clean error when MCP_TOKENS is not configured", async () => {
     // The test wrangler config has no MCP_TOKENS binding, so the tool should
-    // return a friendly error object rather than throwing.
+    // return a friendly error object rather than throwing. invokeCloudflareTool
+    // drains the generator to { yields, result }.
     const agent = await freshAgent();
-    const res = (await agent.invokeCloudflareTool("status")) as Record<
-      string,
-      unknown
-    >;
-    expect(typeof res.error).toBe("string");
-    expect(res.error).toMatch(/not configured/i);
+    const { yields, result } = await agent.invokeCloudflareTool("status");
+    expect(yields).toHaveLength(0);
+    expect(typeof result.error).toBe("string");
+    expect(result.error).toMatch(/not configured/i);
   });
 });
