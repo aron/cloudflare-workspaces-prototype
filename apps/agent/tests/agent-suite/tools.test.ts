@@ -28,6 +28,7 @@ const EXPECTED_TOOLS = [
   "exec",  // takes an optional backend: 'shell' | 'container'; 'shell' includes a built-in git command
   "webfetch", "websearch",  // websearch only because BRAVE_API_KEY is set in wrangler.test
   "delegate",  // spawn a named sub-agent that shares this workspace
+  "schedule",  // create/list/cancel one-off or recurring tasks
 ] as const;
 
 describe("Agent — getTools()", () => {

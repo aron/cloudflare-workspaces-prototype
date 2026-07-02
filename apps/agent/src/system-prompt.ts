@@ -125,6 +125,7 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["webfetch",  "fetch and summarize a URL"],
   ["websearch", "search the web for documentation or examples"],
   ["delegate",  "start a named sub-agent that shares this workspace, or poll its result"],
+  ["schedule",  "schedule a one-off or recurring task (create/list/cancel) that wakes you later; times are UTC"],
 ];
 
 /** Tool list for worker sub-agents (same as parent minus delegate). */
@@ -174,6 +175,11 @@ const GUIDELINES = [
   "Name sub-agents stably and descriptively: 'builder-1', 'researcher-auth'",
   "Sub-agents share the same workspace (/workspace). Coordinate paths explicitly — prefer separate subdirectories when working in parallel (e.g. /workspace/research/, /workspace/build/)",
   "Sub-agents cannot spawn further sub-agents — you are the planner",
+
+  // Scheduling guidelines.
+  "Use schedule to set a reminder or recurring job (e.g. 'check in 24h', 'every day at 8am summarize the backlog'). When a task fires you are woken with its prompt and run a normal turn",
+  "schedule times are UTC — convert the user's wall-clock request to UTC. Use { type: 'delay', seconds } or { type: 'at', iso } for one-offs, { type: 'cron', cron } for recurring",
+  "Use schedule command 'list' to show scheduled tasks and 'cancel' to remove one by id",
 ];
 
 function editingGuidelines(toolName: "edit" | "apply_patch"): string[] {

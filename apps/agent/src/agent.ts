@@ -71,6 +71,15 @@ import {
   PROACTIVE_MAX_INPUT_TOKENS,
   createTracedCompaction,
 } from "./compaction.js";
+import {
+  type SchedulePayload,
+  type StoredScheduleView,
+  ScheduleInputError,
+  describeSchedules,
+  frameScheduledPrompt,
+  resolveWhen,
+  scheduleToolSchema,
+} from "./schedule-tool.js";
 import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
@@ -1240,6 +1249,17 @@ export class Agent extends Think<Env> {
     return Object.keys(this.getTools());
   }
 
+  /**
+   * Introspection RPC for tests: drive the `schedule` tool's dispatch
+   * directly (the tool's `execute` is closed over inside `buildTools`).
+   * Exercises the real create/list/cancel path against durable storage.
+   */
+  async invokeScheduleTool(
+    input: import("./schedule-tool.js").ScheduleToolInput,
+  ): Promise<Record<string, unknown>> {
+    return this._runScheduleTool(input);
+  }
+
   private buildTools() {
     // Resolve the WorkspaceStub once per turn; tools below close over
     // getWs and re-await it on each call. The cache lives in
@@ -1450,7 +1470,129 @@ export class Agent extends Think<Env> {
         }),
         displayName: "Sub-agent",
       })),
+
+      ...pick("schedule", tool({
+        description: [
+          "Schedule future work for yourself: a one-off reminder or a",
+          "recurring job. When a task fires you are woken with its prompt",
+          "and run a normal turn, so write the prompt as an instruction to",
+          "act on (e.g. 'Summarize new issues in the backlog').",
+          "",
+          "Sub-commands (set `command`):",
+          "  - create: schedule a task. Provide `title`, `prompt`, and `when`.",
+          "    `when` is one of:",
+          "      - { type: 'delay', seconds }   one-off, N seconds from now",
+          "      - { type: 'at', iso }           one-off at an absolute UTC time",
+          "      - { type: 'cron', cron }        recurring, 5-field cron (UTC)",
+          "  - list: show this thread's scheduled tasks (id, title, next run).",
+          "  - cancel: remove a task by `id`.",
+          "",
+          "All times are UTC. Convert the user's wall-clock request to UTC",
+          "yourself. Examples: 'remind me in 24h' -> create delay 86400;",
+          "'every day at 8am UTC' -> create cron '0 8 * * *'.",
+        ].join("\n"),
+        inputSchema: scheduleToolSchema,
+        execute: (input) => this._runScheduleTool(input),
+      })),
     };
+  }
+
+  /**
+   * Execute the `schedule` tool. Dispatches on `command`; returns a
+   * model-friendly object (never throws for user-correctable input - those
+   * surface as `{ error }`). Framework/unexpected errors propagate to the
+   * AI SDK's tool-error path.
+   */
+  private async _runScheduleTool(
+    input: import("./schedule-tool.js").ScheduleToolInput,
+  ): Promise<Record<string, unknown>> {
+    try {
+      if (input.command === "create") {
+        if (!input.title || !input.prompt || !input.when) {
+          return { error: "create requires title, prompt, and when" };
+        }
+        const { arg, kind } = resolveWhen(input.when);
+        const payload: SchedulePayload = {
+          title: input.title,
+          prompt: input.prompt,
+          kind,
+        };
+        // Cron is idempotent (dedup by callback+payload) so re-creating an
+        // identical recurring task doesn't stack duplicate rows; one-offs are
+        // intentionally not deduped.
+        const schedule = await this.schedule(
+          arg as Date | number | string,
+          "runScheduledPrompt",
+          payload,
+          kind === "recurring" ? { idempotent: true } : undefined,
+        );
+        return {
+          created: true,
+          id: schedule.id,
+          title: payload.title,
+          kind,
+          nextRun: new Date(schedule.time * 1000).toISOString(),
+        };
+      }
+
+      if (input.command === "list") {
+        const schedules = await this.listSchedules();
+        return {
+          tasks: describeSchedules(schedules as unknown as StoredScheduleView[]),
+        };
+      }
+
+      // command === "cancel"
+      if (!input.id) {
+        return { error: "cancel requires the task id" };
+      }
+      const cancelled = await this.cancelSchedule(input.id);
+      return { cancelled, id: input.id };
+    } catch (err) {
+      if (err instanceof ScheduleInputError) {
+        return { error: err.message };
+      }
+      // Cron parse failures from the core scheduler are user-correctable too.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/cron/i.test(message)) {
+        return { error: `invalid schedule: ${message}` };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Callback fired by the durable scheduler when a task comes due. NOT
+   * `@callable` - invoked by the alarm, never by browser clients.
+   *
+   * Submits the stored prompt as a user-role turn via `submitMessages` -
+   * Think's durable, FIFO, idempotent entry point - so the model runs a fresh
+   * turn even if the DO was evicted between scheduling and firing. Existing
+   * `onChatResponse` wiring surfaces the result to the room.
+   *
+   * Idempotency key includes the scheduled second so a recurring task submits
+   * a distinct turn each firing, while an at-least-once double-fire of the
+   * SAME occurrence collapses to one turn.
+   */
+  async runScheduledPrompt(
+    payload: SchedulePayload,
+    schedule?: { id?: string; time?: number },
+  ): Promise<void> {
+    if (!payload || typeof payload.prompt !== "string") return;
+    const text = frameScheduledPrompt(payload);
+    const occurrence = schedule?.time ?? Math.floor(Date.now() / 1000);
+    const idempotencyKey = `sched:${schedule?.id ?? payload.title}:${occurrence}`;
+    await this.submitMessages(
+      [
+        {
+          id: shortId(),
+          role: "user",
+          parts: [{ type: "text", text }],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      ],
+      { idempotencyKey },
+    );
   }
 
   // ── Per-tool-call cancellation ───────────────────────────────────────
