@@ -10,6 +10,7 @@ declare namespace Cloudflare {
     ASSETS:         R2Bucket;
     ARTIFACTS?:     Artifacts;
     LOADER:         WorkerLoader;
+    MCP_TOKENS?:    KVNamespace;  // per-user Cloudflare MCP OAuth tokens (optional; absent in tests)
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
     BRAVE_API_KEY?:  string;

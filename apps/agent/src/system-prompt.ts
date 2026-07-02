@@ -126,6 +126,7 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["websearch", "search the web for documentation or examples"],
   ["delegate",  "start a named sub-agent that shares this workspace, or poll its result"],
   ["schedule",  "schedule a one-off or recurring task (create/list/cancel) that wakes you later; times are UTC"],
+  ["cloudflare", "access the current user's Cloudflare account via MCP (connect/status/disconnect); unlocks search/execute over the whole Cloudflare API"],
 ];
 
 /** Tool list for worker sub-agents (same as parent minus delegate). */
@@ -180,6 +181,11 @@ const GUIDELINES = [
   "Use schedule to set a reminder or recurring job (e.g. 'check in 24h', 'every day at 8am summarize the backlog'). When a task fires you are woken with its prompt and run a normal turn",
   "schedule times are UTC — convert the user's wall-clock request to UTC. Use { type: 'delay', seconds } or { type: 'at', iso } for one-offs, { type: 'cron', cron } for recurring",
   "Use schedule command 'list' to show scheduled tasks and 'cancel' to remove one by id",
+
+  // Cloudflare MCP guidelines.
+  "Use the cloudflare tool to act on the current user's own Cloudflare account (DNS, Workers, R2, Zero Trust, etc.). Run cloudflare command 'connect' first; if it returns an authUrl, give the user that link to authorize, then retry",
+  "Once connected, use the search/execute tools (from the Cloudflare MCP server) to explore and call any Cloudflare API endpoint",
+  "Cloudflare auth is per-user: it uses the account of whoever sent the latest message. If a connection that worked before asks to authenticate again, the authorization expired — share the new link and ask the user to re-authorize",
 ];
 
 function editingGuidelines(toolName: "edit" | "apply_patch"): string[] {

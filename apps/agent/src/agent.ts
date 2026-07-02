@@ -80,6 +80,17 @@ import {
   resolveWhen,
   scheduleToolSchema,
 } from "./schedule-tool.js";
+import {
+  CLOUDFLARE_MCP_URL,
+  type CloudflareConnStatus,
+  type McpServerView,
+  cloudflareServerId,
+  createCloudflareOAuthProvider,
+  describeConnection,
+  gateCloudflareTools,
+  lastUserAuthorId,
+} from "./cloudflare-mcp.js";
+import { type AgentMcpOAuthProvider, normalizeServerId } from "agents";
 import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
@@ -446,6 +457,23 @@ export class Agent extends Think<Env> {
   }
 
   onStart() {
+    // Configure the MCP OAuth popup callback: after the user authorizes their
+    // Cloudflare account the redirect lands here; return a tiny page that
+    // closes the popup. Failures surface as plain text.
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response(
+            "<!doctype html><script>window.close()</script>Cloudflare access authorized - you can close this window.",
+            { headers: { "content-type": "text/html" }, status: 200 },
+          );
+        }
+        return new Response(
+          `Cloudflare authorization failed: ${result.authError ?? "unknown error"}`,
+          { headers: { "content-type": "text/plain" }, status: 400 },
+        );
+      },
+    });
     // Pre-warm the container in the background. The new exec API
     // doesn't support reattach-to-running-process across DO
     // evictions, so the old _recoverInflightExecs path is gone; a
@@ -613,6 +641,68 @@ export class Agent extends Think<Env> {
     return defaultContextOverflowClassifier(error);
   }
 
+  // -- Cloudflare MCP (per-user OAuth) --------------------------------
+
+  /**
+   * Override the framework's OAuth provider factory so Cloudflare MCP tokens
+   * are stored per-user in the dedicated MCP_TOKENS KV namespace (via the split
+   * storage adapter) rather than this DO's local storage. The provider derives
+   * which user from its own serverId ("cloudflare-<userId>"), which the
+   * framework assigns right after construction - including on restore-on-wake.
+   * Transient OAuth flow state (state nonce, PKCE verifier) still lives in
+   * DO-local storage for strong consistency.
+   */
+  override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    if (this.env.MCP_TOKENS) {
+      return createCloudflareOAuthProvider({
+        kv: this.env.MCP_TOKENS,
+        local: this.ctx.storage,
+        callbackUrl,
+      });
+    }
+    return super.createMcpOAuthProvider(callbackUrl);
+  }
+
+  /**
+   * Ensure a Cloudflare MCP connection exists for `userId`, returning its
+   * status. addMcpServer is idempotent per (name, url, id): a ready server
+   * short-circuits, an authenticating one returns the existing auth URL, and a
+   * fresh call starts the OAuth flow. The per-user id means the framework
+   * persists + restores each user's connection independently and namespaces
+   * their tools, so beforeTurn can gate a turn to just this user's tools.
+   */
+  private async ensureCloudflareConnection(
+    userId: string,
+  ): Promise<CloudflareConnStatus> {
+    if (!this.env.MCP_TOKENS) return { state: "disconnected" };
+    const callbackHost = (this.env as { APP_BASE_URL?: string }).APP_BASE_URL;
+    try {
+      const res = await this.addMcpServer("cloudflare", CLOUDFLARE_MCP_URL, {
+        id: cloudflareServerId(userId),
+        ...(callbackHost ? { callbackHost } : {}),
+      });
+      if (res.state === "authenticating") {
+        return { state: "authenticating", authUrl: res.authUrl ?? null };
+      }
+      return { state: "ready" };
+    } catch (err) {
+      return {
+        state: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /** Read one user's Cloudflare connection status from the MCP snapshot. */
+  private cloudflareStatusFor(userId: string): CloudflareConnStatus {
+    const id = normalizeServerId(cloudflareServerId(userId));
+    const servers = this.getMcpServers().servers as Record<
+      string,
+      McpServerView
+    >;
+    return describeConnection(servers[id]);
+  }
+
   /**
    * Per-turn config. Two jobs:
    *  1. Pre-warm the container so `exec` calls hit a hot sandbox.
@@ -686,10 +776,38 @@ export class Agent extends Think<Env> {
       // our injected reflection itself) keep the counters so the guard
       // works across the whole logical turn.
       if (!ctx?.continuation) this._loop.reset();
+
+      // Cloudflare MCP: connect (or refresh) the last speaker's per-user
+      // connection so their `search`/`execute` tools are available this turn.
+      // Best-effort - a failure here must never block the turn; the tool's
+      // `status`/`connect` commands surface auth problems to the user.
+      const cfUserId = lastUserAuthorId(this.messages as never);
+      if (cfUserId && this.env.MCP_TOKENS) {
+        try {
+          await this.ensureCloudflareConnection(cfUserId);
+        } catch { /* non-fatal */ }
+      }
+
+      // Gate Cloudflare MCP tools to the last speaker: every authorized user's
+      // tools auto-merge into the turn, so allow only the current user's (plus
+      // all non-Cloudflare tools) via activeTools, so B can't act through A's
+      // Cloudflare account. Only set when the assembled tool set is available
+      // (ctx present) AND it actually contains Cloudflare MCP tools - otherwise
+      // an allowlist would needlessly constrain the turn (and an empty one
+      // would disable every tool).
+      const assembledToolKeys = ctx?.tools ? Object.keys(ctx.tools) : [];
+      const hasCloudflareTools = assembledToolKeys.some((k) =>
+        k.startsWith("tool_cloudflare"),
+      );
+      const activeTools = hasCloudflareTools
+        ? gateCloudflareTools(assembledToolKeys, cfUserId)
+        : undefined;
+
       return {
         // Hard ceiling well above the soft budget - the LoopTracker
         // decides when to fire a reflection.
         maxSteps: 60,
+        ...(activeTools ? { activeTools } : {}),
         providerOptions: {
           openai: {
             reasoningEffort:
@@ -1260,6 +1378,16 @@ export class Agent extends Think<Env> {
     return this._runScheduleTool(input);
   }
 
+  /**
+   * Introspection RPC for tests: drive the `cloudflare` tool's dispatch
+   * directly (its `execute` is closed over inside `buildTools`).
+   */
+  async invokeCloudflareTool(
+    command: "connect" | "status" | "disconnect",
+  ): Promise<Record<string, unknown>> {
+    return this._runCloudflareTool(command);
+  }
+
   private buildTools() {
     // Resolve the WorkspaceStub once per turn; tools below close over
     // getWs and re-await it on each call. The cache lives in
@@ -1494,7 +1622,78 @@ export class Agent extends Think<Env> {
         inputSchema: scheduleToolSchema,
         execute: (input) => this._runScheduleTool(input),
       })),
+
+      ...pick("cloudflare", tool({
+        description: [
+          "Access the Cloudflare API on behalf of the current user's own",
+          "Cloudflare account, via the official Cloudflare MCP server. Once",
+          "connected, you gain `search` and `execute` tools covering the",
+          "entire Cloudflare API (DNS, Workers, R2, Zero Trust, and more).",
+          "",
+          "Auth is per-user and uses the account of whoever sent the most",
+          "recent message. Sub-commands (set `command`):",
+          "  - connect: start (or repair) authorization for the current user.",
+          "    If they haven't authorized yet, this returns an `authUrl` - tell",
+          "    the user to open it to grant access, then try again.",
+          "  - status: report whether the current user is connected.",
+          "  - disconnect: remove the current user's Cloudflare connection.",
+          "",
+          "When status/connect reports `authenticating` with an authUrl, surface",
+          "that link to the user and wait; when `ready`, use the search/execute",
+          "tools directly. If a previously-working connection returns to",
+          "`authenticating`, the authorization expired - ask the user to",
+          "re-authorize with the new link.",
+        ].join("\n"),
+        inputSchema: z.object({
+          command: z.enum(["connect", "status", "disconnect"]).describe(
+            "connect = authorize/refresh; status = check; disconnect = remove.",
+          ),
+        }),
+        execute: (input) => this._runCloudflareTool(input.command),
+      })),
     };
+  }
+
+  /**
+   * Execute the `cloudflare` tool. Resolves the current user from the last
+   * user message and dispatches connect/status/disconnect against their
+   * per-user MCP connection. Never throws for user-facing conditions.
+   */
+  private async _runCloudflareTool(
+    command: "connect" | "status" | "disconnect",
+  ): Promise<Record<string, unknown>> {
+    if (!this.env.MCP_TOKENS) {
+      return { error: "Cloudflare access is not configured on this deployment." };
+    }
+    const userId = lastUserAuthorId(this.messages as never);
+    if (!userId) {
+      return { error: "Cannot determine the requesting user for Cloudflare auth." };
+    }
+
+    if (command === "status") {
+      return { ...this.cloudflareStatusFor(userId) };
+    }
+
+    if (command === "disconnect") {
+      try {
+        await this.removeMcpServer(normalizeServerId(cloudflareServerId(userId)));
+        return { disconnected: true };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    // command === "connect"
+    const status = await this.ensureCloudflareConnection(userId);
+    if (status.state === "authenticating") {
+      return {
+        state: "authenticating",
+        authUrl: status.authUrl,
+        message:
+          "Ask the user to open the authUrl to authorize Cloudflare access, then retry.",
+      };
+    }
+    return { ...status };
   }
 
   /**
