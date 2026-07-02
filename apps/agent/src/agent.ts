@@ -778,35 +778,55 @@ export class Agent extends Think<Env> {
       if (!ctx?.continuation) this._loop.reset();
 
       // Cloudflare MCP: connect (or refresh) the last speaker's per-user
-      // connection so their `search`/`execute` tools are available this turn.
-      // Best-effort - a failure here must never block the turn; the tool's
-      // `status`/`connect` commands surface auth problems to the user.
+      // connection, then splice their READY `search`/`execute` tools into this
+      // turn. `beforeTurn` runs AFTER Think assembles ctx.tools, so a
+      // connection that only just became READY here would otherwise miss the
+      // current turn - we inject it via the additive TurnConfig.tools instead.
+      // Best-effort: a failure must never block the turn; the `cloudflare`
+      // tool's status/connect commands surface auth problems to the user.
       const cfUserId = lastUserAuthorId(this.messages as never);
+      let cfTools: Record<string, unknown> = {};
       if (cfUserId && this.env.MCP_TOKENS) {
         try {
-          await this.ensureCloudflareConnection(cfUserId);
+          const status = await this.ensureCloudflareConnection(cfUserId);
+          if (status.state === "ready") {
+            // Only this user's server, so we never pull in another user's tools.
+            const serverId = normalizeServerId(cloudflareServerId(cfUserId));
+            cfTools = this.mcp.getAITools({ serverId }) as Record<
+              string,
+              unknown
+            >;
+          }
         } catch { /* non-fatal */ }
       }
 
-      // Gate Cloudflare MCP tools to the last speaker: every authorized user's
-      // tools auto-merge into the turn, so allow only the current user's (plus
-      // all non-Cloudflare tools) via activeTools, so B can't act through A's
-      // Cloudflare account. Only set when the assembled tool set is available
-      // (ctx present) AND it actually contains Cloudflare MCP tools - otherwise
-      // an allowlist would needlessly constrain the turn (and an empty one
-      // would disable every tool).
-      const assembledToolKeys = ctx?.tools ? Object.keys(ctx.tools) : [];
-      const hasCloudflareTools = assembledToolKeys.some((k) =>
+      // Gate Cloudflare MCP tools to the last speaker. The tool set the model
+      // sees is the assembled ctx.tools PLUS anything we inject above; every
+      // authorized user's already-connected tools also auto-merge into
+      // ctx.tools, so we allowlist only the current user's (plus all
+      // non-Cloudflare tools) via activeTools, so B can't act through A's
+      // Cloudflare account. Only set when Cloudflare tools are actually present
+      // (an empty allowlist would disable every tool).
+      const unionToolKeys = [
+        ...(ctx?.tools ? Object.keys(ctx.tools) : []),
+        ...Object.keys(cfTools),
+      ];
+      const hasCloudflareTools = unionToolKeys.some((k) =>
         k.startsWith("tool_cloudflare"),
       );
       const activeTools = hasCloudflareTools
-        ? gateCloudflareTools(assembledToolKeys, cfUserId)
+        ? gateCloudflareTools(unionToolKeys, cfUserId)
         : undefined;
 
       return {
         // Hard ceiling well above the soft budget - the LoopTracker
         // decides when to fire a reflection.
         maxSteps: 60,
+        // Additive: merged on top of the assembled tool set (Think merges
+        // config.tools over ctx.tools). Empty object is a no-op.
+        ...(Object.keys(cfTools).length > 0
+          ? { tools: cfTools as never }
+          : {}),
         ...(activeTools ? { activeTools } : {}),
         providerOptions: {
           openai: {
