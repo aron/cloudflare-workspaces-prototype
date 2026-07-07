@@ -11,6 +11,7 @@ declare namespace Cloudflare {
     ARTIFACTS?:     Artifacts;
     LOADER:         WorkerLoader;
     MCP_TOKENS?:    KVNamespace;  // per-user Cloudflare MCP OAuth tokens (optional; absent in tests)
+    BROWSER?:       BrowserRun;   // Browser Run Quick Actions (screenshot + markdown fetch; absent in tests)
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?:   string;
     BRAVE_API_KEY?:  string;

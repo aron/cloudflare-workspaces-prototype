@@ -208,6 +208,18 @@ function ok(
 export { validateFetchUrl } from "./ssrf.js";
 export { readResponseCapped } from "./read-capped.js";
 
+// --- browser run (screenshot + markdown fetch) ---
+export {
+  createBrowserScreenshotTool,
+  createBrowserFetchTool,
+  type BrowserLike,
+  type SavedImage,
+  type BrowserScreenshotToolOptions,
+  type BrowserFetchToolOptions,
+  type ScreenshotInput,
+  type BrowserFetchInput,
+} from "./browser.js";
+
 // --- web search ---
 export { createWebSearchTool, type WebSearchToolOptions } from "./search/tool.js";
 export { createBraveSearchProvider, type BraveSearchOptions } from "./search/brave.js";

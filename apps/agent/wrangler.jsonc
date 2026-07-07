@@ -53,6 +53,11 @@
   // — the deploy account needs the worker-loader feature flag.
   "worker_loaders": [{ "binding": "LOADER" }],
 
+  // Browser Run (Quick Actions) for the screenshot tool and the markdown
+  // webfetch. `quickAction` requires remote mode (not supported in non-remote
+  // local dev) and compatibility_date >= 2026-03-24 (satisfied above).
+  "browser": { "binding": "BROWSER", "remote": true },
+
   // Per-user Cloudflare MCP OAuth tokens. Keyed by user id so a user
   // authorizes their Cloudflare account once and every thread (Agent DO)
   // reuses it. Replace the placeholder id before deploy:

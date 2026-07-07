@@ -61,9 +61,9 @@ import {
 } from "@cloudflare/fs-tools";
 import {
   createBraveSearchProvider,
-  createWebFetchTool,
   createWebSearchTool,
 } from "@cloudflare/web-tools";
+import { buildBrowserTools } from "./browser-tools.js";
 import { currentModelId } from "./model.js";
 import {
   COMPACT_AFTER_TOKENS,
@@ -1435,7 +1435,16 @@ export class Agent extends Think<Env> {
       ...(this.env.OPENAI_API_KEY
         ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStore(getWs) }))
         : pick("edit", createEditTool({ store: makeLazyStore(getWs) }))),
-      ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
+      // webfetch (markdown via Browser Run, or AI fallback) + screenshot
+      // (only when BROWSER is bound). See browser-tools.ts.
+      ...buildBrowserTools({
+        browser: this.env.BROWSER as unknown as import("./browser-tools.js").BuildBrowserToolsDeps["browser"],
+        ai: this.env.AI,
+        getFs: async () => (await getWs()).fs,
+        vision: Boolean(this.env.OPENAI_API_KEY),
+        baseUrl: (this.env as { APP_BASE_URL?: string }).APP_BASE_URL,
+        threadId: this.name,
+      }),
       ...(this.env.BRAVE_API_KEY
         ? pick("websearch", createWebSearchTool({
             provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
@@ -2279,7 +2288,14 @@ export class SubAgent extends Think<Env> {
       ...(this.env.OPENAI_API_KEY
         ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStubStore(getWs) }))
         : pick("edit", createEditTool({ store: makeLazyStubStore(getWs) }))),
-      ...pick("webfetch", createWebFetchTool({ ai: this.env.AI })),
+      ...buildBrowserTools({
+        browser: this.env.BROWSER as unknown as import("./browser-tools.js").BuildBrowserToolsDeps["browser"],
+        ai: this.env.AI,
+        getFs: async () => (await getWs()).fs,
+        vision: Boolean(this.env.OPENAI_API_KEY),
+        baseUrl: (this.env as { APP_BASE_URL?: string }).APP_BASE_URL,
+        threadId: this.name,
+      }),
       ...(this.env.BRAVE_API_KEY
         ? pick("websearch", createWebSearchTool({
             provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),

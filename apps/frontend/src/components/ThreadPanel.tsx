@@ -52,6 +52,7 @@ import { PathAutocomplete } from "@/components/PathAutocomplete";
 import { ExecToolView } from "@/components/ExecToolView";
 import { DelegateToolView } from "@/components/DelegateToolView";
 import { CloudflareToolView } from "@/components/CloudflareToolView";
+import { ScreenshotToolView } from "@/components/ScreenshotToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
 import { navigate } from "@/lib/nav";
@@ -572,6 +573,20 @@ export function ThreadPanel({
                         // Custom chrome for cloudflare - the interactive OAuth
                         // onboarding card (Continue opens the authUrl, Cancel
                         // cancels the pending tool call).
+                        // Custom chrome for screenshot - inline thumbnail
+                        // loaded from the saved workspace file.
+                        if (name === "screenshot") {
+                          return (
+                            <ScreenshotToolView
+                              key={i}
+                              input={input as { url?: string } | undefined}
+                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                              output={output as any}
+                              errorText={errorText}
+                              state={part.state}
+                            />
+                          );
+                        }
                         if (name === "cloudflare") {
                           return (
                             <CloudflareToolView
