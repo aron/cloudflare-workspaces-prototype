@@ -30,8 +30,27 @@ describe("Agent — cloudflare tool", () => {
     // drains the generator to { yields, result }.
     const agent = await freshAgent();
     const { yields, result } = await agent.invokeCloudflareTool("status");
-    expect(yields).toHaveLength(0);
+    // The terminal state must be YIELDED (the SDK's executeTool uses the last
+    // yielded value as the tool output; a generator `return` is discarded).
+    expect(yields).toHaveLength(1);
     expect(typeof result.error).toBe("string");
     expect(result.error).toMatch(/not configured/i);
+  });
+
+  it("every command yields a terminal value (never null/undefined output)", async () => {
+    // Regression for the async-generator bug where terminal states were
+    // `return`ed instead of `yield`ed: the AI SDK drained the generator, saw
+    // no yields, and resolved the tool with `undefined` — so the UI spun
+    // forever and both status/connect surfaced as null. Each command must
+    // yield at least once, and `result` (the last yield) must be defined.
+    const agent = await freshAgent();
+    for (const command of ["status", "connect", "disconnect"] as const) {
+      const { yields, result } = await agent.invokeCloudflareTool(command);
+      expect(yields.length).toBeGreaterThanOrEqual(1);
+      expect(result).toBeDefined();
+      expect(result).not.toBeNull();
+      // With no MCP_TOKENS binding, every command short-circuits to the error.
+      expect(typeof result.error).toBe("string");
+    }
   });
 });

@@ -1407,14 +1407,16 @@ export class Agent extends Think<Env> {
     command: "connect" | "status" | "disconnect",
     opts?: { toolCallId?: string; abortSignal?: AbortSignal },
   ): Promise<{ yields: Record<string, unknown>[]; result: Record<string, unknown> }> {
+    // Mirror the AI SDK's executeTool: the tool's output is the LAST YIELDED
+    // value (the generator's return is void/discarded). `yields` keeps the full
+    // sequence so tests can assert interim chunks (e.g. awaiting_auth) too.
     const gen = this._runCloudflareTool(command, opts);
     const yields: Record<string, unknown>[] = [];
-    let next = await gen.next();
-    while (!next.done) {
-      yields.push(next.value as Record<string, unknown>);
-      next = await gen.next();
+    for await (const chunk of gen) {
+      yields.push(chunk as Record<string, unknown>);
     }
-    return { yields, result: next.value as Record<string, unknown> };
+    const result = yields[yields.length - 1] ?? {};
+    return { yields, result };
   }
 
   private buildTools() {
@@ -1708,35 +1710,47 @@ export class Agent extends Think<Env> {
   private async *_runCloudflareTool(
     command: "connect" | "status" | "disconnect",
     opts?: { toolCallId?: string; abortSignal?: AbortSignal },
-  ): AsyncGenerator<Record<string, unknown>, Record<string, unknown>, unknown> {
+  ): AsyncGenerator<Record<string, unknown>, void, unknown> {
+    // IMPORTANT: this is a streaming (async generator) tool. The AI SDK's
+    // executeTool drains the generator and uses the LAST YIELDED value as the
+    // tool output (a generator `return` value is discarded). So every terminal
+    // state MUST be `yield`ed, not `return`ed — otherwise the tool resolves
+    // with `undefined`/null and the UI spins forever (observed with status +
+    // connect both returning null). We `yield` then `return;` at each exit.
     if (!this.env.MCP_TOKENS) {
-      return { error: "Cloudflare access is not configured on this deployment." };
+      yield { error: "Cloudflare access is not configured on this deployment." };
+      return;
     }
     const userId = lastUserAuthorId(this.messages as never);
     if (!userId) {
-      return { error: "Cannot determine the requesting user for Cloudflare auth." };
+      yield { error: "Cannot determine the requesting user for Cloudflare auth." };
+      return;
     }
 
     if (command === "status") {
-      return { ...this.cloudflareStatusFor(userId) };
+      yield { ...this.cloudflareStatusFor(userId) };
+      return;
     }
 
     if (command === "disconnect") {
       try {
         await this.removeMcpServer(normalizeServerId(cloudflareServerId(userId)));
-        return { disconnected: true };
+        yield { disconnected: true };
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        yield { error: err instanceof Error ? err.message : String(err) };
       }
+      return;
     }
 
     // command === "connect"
     const status = await this.ensureCloudflareConnection(userId);
     if (status.state === "ready") {
-      return { phase: "ready" };
+      yield { phase: "ready" };
+      return;
     }
     if (status.state === "failed") {
-      return { phase: "failed", error: status.error };
+      yield { phase: "failed", error: status.error };
+      return;
     }
 
     // Authenticating (or connecting): surface the auth card, then poll. Register
@@ -1768,7 +1782,9 @@ export class Agent extends Think<Env> {
         sleep: (ms, signal) => this._sleep(ms, signal),
         signal: controller.signal,
       });
-      return { ...result, ...(authUrl && !("authUrl" in result) ? { authUrl } : {}) };
+      // Terminal state MUST be yielded (see note above): it becomes the tool's
+      // final output. The interim `awaiting_auth` chunk was yielded earlier.
+      yield { ...result, ...(authUrl && !("authUrl" in result) ? { authUrl } : {}) };
     } finally {
       if (opts?.toolCallId) this._toolAborts.delete(opts.toolCallId);
     }
