@@ -5,7 +5,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 /**
- * In-memory fake that matches the `@cloudflare/workspace` Workspace surface
+ * In-memory fake that matches the `@cloudflare/computer` Workspace surface
  * we depend on. Mirrors the real implementation's chunked storage so we can
  * verify that `readChunks` slices SQLite rows correctly without standing up
  * a Durable Object.

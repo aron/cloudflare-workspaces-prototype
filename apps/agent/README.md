@@ -5,7 +5,7 @@ thread, with file tools and a shell that operate on a shared
 DO-backed virtual filesystem.
 
 This is a reference consumer of
-[`@cloudflare/workspace`](https://github.com/cloudflare/workspace).
+[`@cloudflare/computer`](https://github.com/cloudflare/computer).
 The published package owns the SQLite VFS, the FUSE mount, and the
 capnweb sync. This app does only chat-shaped things: defining tools,
 picking a model, streaming the response, and rendering the chat.
@@ -24,7 +24,7 @@ picking a model, streaming the response, and rendering the chat.
 │    ├── WorkspaceStub ──────────────┼────────►│    Workspace              │
 │    │     (fs.* / shell.exec)       │         │      ├── SQLite VFS       │
 │    └── R2: SKILLS                  │         │      ├── R2 mounts        │
-└────────────────────────────────────┘         │      └── capnweb session ──► wsd container
+└────────────────────────────────────┘         │      └── capnweb session ──► computerd container
                                                │            (FUSE mount    │
                                                │             at /workspace)│
                                                └───────────────────────────┘
@@ -131,8 +131,8 @@ npm run deploy
 
 The `predeploy` step builds the frontend bundle. The Sandbox container
 image is built by wrangler from `apps/agent/Dockerfile` on `npm run
-deploy`; it pulls the `wsd` SEA binary out of
-`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11` and layers
+deploy`; it pulls the `computerd` SEA binary out of
+`ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1` and layers
 the project toolchain on top (Node 24, npm, Bun, esbuild, wrangler).
 
 ## Debug endpoints
@@ -161,7 +161,7 @@ When deployed, useful for inspecting state:
   `WorkspaceShell.exec` does emit a `ReadableStream<WorkspaceExecEvent>`,
   but the stub can't carry that across the DO RPC boundary without a
   framed transport. Tracked upstream against
-  `@cloudflare/workspace`.
+  `@cloudflare/computer`.
 - **Exec inflight recovery.** A DO eviction mid-exec leaves the tool
   part in `input-streaming`. The new workspace API has no
   `getProcess` / `streamProcessLogs` reattach, so we lean on

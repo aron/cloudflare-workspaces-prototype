@@ -1,10 +1,10 @@
 /**
- * Adapter that bridges the `@cloudflare/workspace` filesystem
+ * Adapter that bridges the `@cloudflare/computer` filesystem
  * surface (`Workspace.fs` / `WorkspaceStub.fs`) to the shape
  * vendored `@cloudflare/fs-tools.WorkspaceFileStore` expects.
  *
  * `fs-tools` was originally written against the pre-published
- * `@cloudflare/workspace` shape \u2014 a flat `stat / readFile /
+ * `@cloudflare/computer` shape \u2014 a flat `stat / readFile /
  * writeFile` API where `stat` returned the old
  * `{ type: "file" | "dir", size, mtime, mode }` and `readFile`
  * resolved to a `Uint8Array | null`. The published package
@@ -16,7 +16,7 @@
  * (RPC stub) implement the same surface, so the adapter is
  * structurally typed and accepts either.
  */
-import type { Workspace, WorkspaceStub } from "@cloudflare/workspace";
+import type { Workspace, WorkspaceStub } from "@cloudflare/computer";
 
 export interface OldWorkspaceFileShape {
   stat(

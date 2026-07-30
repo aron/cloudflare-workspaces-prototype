@@ -18,7 +18,7 @@
  * Before the workspace-next port, skills were surfaced as a Workspace
  * mount under `/workspace/.agents/skills/`; the agent then walked the
  * mount with `listFilesUnder` + `readFile`. The new
- * `@cloudflare/workspace` doesn't expose the old `R2Mount` API, so this
+ * `@cloudflare/computer` doesn't expose the old `R2Mount` API, so this
  * file now talks to the R2 binding directly. The `location` field on
  * each `Skill` keeps the VFS-style path for backward compatibility —
  * the system prompt embeds it verbatim and the model can read it once

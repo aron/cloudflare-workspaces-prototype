@@ -7,12 +7,12 @@ over FUSE — the agent's file tools and the container's `exec` see the
 same bytes without an explicit sync.
 
 The workspace primitive itself lives upstream now:
-[`@cloudflare/workspace`](https://github.com/cloudflare/workspace),
-pinned to `0.0.0-alpha.9`. The Sandbox container runs the matching
-prebuilt `wsd` daemon from
-[`ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.9`](https://github.com/cloudflare/workspace/pkgs/container/workspace-wsd-linux-x64).
-Both pins move together — see [Upgrading the workspace
-package](#upgrading-the-workspace-package) below.
+[`@cloudflare/computer`](https://github.com/cloudflare/computer),
+pinned to `0.1.0-alpha.1`. The Sandbox container runs the matching
+prebuilt `computerd` daemon from
+[`ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1`](https://github.com/cloudflare/computer/pkgs/container/computer-computerd-linux-x64).
+Both pins move together — see [Upgrading the computer
+package](#upgrading-the-computer-package) below.
 
 ## Layout
 
@@ -106,12 +106,12 @@ worker serves as static assets (configured in
   - `Room` — one per chat room; WS fanout, thread minting on
     `@mention` (`/api/rooms/:id/*`).
   - `Sandbox`, `WarmPool` — pre-warmed container fleet for `exec` and
-    `git_clone`. Each `Sandbox` DO owns a `Workspace` + a wsd container;
+    `git_clone`. Each `Sandbox` DO owns a `Workspace` + a computerd container;
     the Agent DO pulls a `WorkspaceStub` across DO RPC.
 - Container image `hackspace-prototype-sandbox` (pushed to
   `registry.cloudflare.com/<account>/hackspace-prototype-sandbox`).
-  Layers a Debian-slim base + the `wsd` SEA binary out of
-  `ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.9` + a
+  Layers a Debian-slim base + the `computerd` SEA binary out of
+  `ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1` + a
   Node 24 toolchain (node, npm, esbuild, wrangler).
 - Cron `* * * * *` — primes the warm pool every minute. Drop the
   `triggers.crons` block in `wrangler.jsonc` if you want manual priming.
@@ -141,7 +141,7 @@ Smoke tests:
 
 - **node** — ask it to write a small TypeScript or JS program and run
   it via `exec` with `backend: 'container'`. Confirms the Sandbox
-  container started and wsd is serving the FUSE-mounted workspace.
+  container started and computerd is serving the FUSE-mounted workspace.
 - **shell git** — ask it to `git clone` a small public repo, then
   `ls` / `read` the result. Exercises the worker backend's built-in
   git command and the shared SQLite VFS.
@@ -157,17 +157,17 @@ Smoke tests:
 | `failed commit on ref … manifest … EOF` at the very end | Same as above on the final manifest PUT | Single retry usually completes — all blobs already uploaded. |
 | `websearch` missing from a persona | `BRAVE_API_KEY` unset in prod | `wrangler secret put BRAVE_API_KEY`. |
 
-## Upgrading the workspace package
+## Upgrading the computer package
 
 The agent depends on two artefacts that need to move in lockstep:
 
-1. **npm:** `@cloudflare/workspace` (pinned in
+1. **npm:** `@cloudflare/computer` (pinned in
    `apps/agent/package.json`).
-2. **GHCR:** `ghcr.io/cloudflare/workspace-wsd-linux-x64:<version>`
+2. **GHCR:** `ghcr.io/cloudflare/computer-computerd-linux-x64:<version>`
    (the `FROM` line in `apps/agent/Dockerfile`).
 
-The `wsd` examples in the upstream
-[cloudflare/workspace](https://github.com/cloudflare/workspace) repo
+The `computerd` examples in the upstream
+[cloudflare/computer](https://github.com/cloudflare/computer) repo
 (particularly `examples/think`) are the source-of-truth for the
 tiered backend wiring we use — `WorkerBackend` + `WorkspaceServiceProxy`
 for the shell tier, `withWorkspaceContainer` + `CloudflareContainerBackend`
@@ -177,10 +177,10 @@ To bump:
 
 ```sh
 # 1. pin the npm package
-npm install --workspace=@app/agent @cloudflare/workspace@<version>
+npm install --workspace=@app/agent @cloudflare/computer@<version>
 
 # 2. update the GHCR tag in apps/agent/Dockerfile to match.
-#    Look for the `FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:` line.
+#    Look for the `FROM ghcr.io/cloudflare/computer-computerd-linux-x64:` line.
 
 # 3. typecheck + tests + smoke
 cd apps/agent && npx tsc --noEmit && npx vitest run

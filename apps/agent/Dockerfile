@@ -1,9 +1,9 @@
 # Sandbox container image for the agent.
 #
-# Pulls the prebuilt wsd SEA binary out of the public GHCR image
-# published by github.com/cloudflare/workspace, pinned in lockstep
-# with the `@cloudflare/workspace` npm dependency (see
-# package.json). wsd runs as PID 1 and serves the workspace RPC +
+# Pulls the prebuilt computerd SEA binary out of the public GHCR image
+# published by github.com/cloudflare/computer, pinned in lockstep
+# with the `@cloudflare/computer` npm dependency (see
+# package.json). computerd runs as PID 1 and serves the workspace RPC +
 # FUSE mount.
 #
 # Layered on top: a Node.js + Bun toolchain (node, npm, bun, esbuild,
@@ -12,7 +12,7 @@
 # land on top of Bun (preferred in the sandbox for speed) or npm / npx;
 # the image deliberately stays otherwise lean — zig and go were dropped.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
+FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1 AS computerd
 
 FROM debian:stable-slim
 
@@ -46,8 +46,8 @@ RUN if ls /opt/agent-ca/*.crt >/dev/null 2>&1; then \
     fi \
  && rm -rf /opt/agent-ca
 
-# wsd binary. Statically linked SEA, no external deps needed.
-COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
+# computerd binary. Statically linked SEA, no external deps needed.
+COPY --from=computerd /usr/local/bin/computerd /usr/local/bin/computerd
 
 # Project-specific toolchain. The agent's `exec` tool finds these
 # CLIs on PATH inside the FUSE-mounted /workspace.
@@ -96,7 +96,7 @@ RUN NODE_VERSION=24.16.0 && \
     ln -s /root/.bun/bin/bunx /usr/local/bin/bunx && \
     bun --version && bunx --version
 
-# wsd configuration. PORT and MOUNT_POINT are the defaults the
+# computerd configuration. PORT and MOUNT_POINT are the defaults the
 # CloudflareContainerBackend expects. FUSE_MOUNT=auto probes
 # /dev/fuse at startup: real FUSE under Cloudflare Containers,
 # userspace shim when /dev/fuse isn't passed through (wrangler dev
@@ -106,4 +106,4 @@ ENV MOUNT_POINT=/workspace
 ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/wsd"]
+ENTRYPOINT ["/usr/local/bin/computerd"]

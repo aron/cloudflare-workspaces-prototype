@@ -4,7 +4,7 @@
  * Inherits from `@cloudflare/think` for the agentic loop, Session-backed
  * message storage (branches, FTS5, non-destructive compaction), durable
  * chat fibers via `chatRecovery`, stream resumption, and the lifecycle
- * hooks. The custom `@cloudflare/workspace` Workspace stays put - it
+ * hooks. The custom `@cloudflare/computer` Workspace stays put - it
  * owns the SQLite VFS, the container sync, and the capnweb session.
  *
  * This file only does chat-shaped things: defining tools, picking a model,
@@ -41,11 +41,11 @@ import {
   Workspace,
   type WorkspaceBackend,
   type WorkspaceStub,
-} from "@cloudflare/workspace";
-import { createAssets } from "@cloudflare/workspace/assets";
-import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
-import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
-import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
+} from "@cloudflare/computer";
+import { createAssets } from "@cloudflare/computer/assets";
+import { CloudflareContainerBackend } from "@cloudflare/computer/backends/container";
+import { WorkerBackend } from "@cloudflare/computer/backends/worker";
+import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { tracing } from "cloudflare:workers";
 import { resolveContainerId, releaseContainer } from "./pool.js";
 import type { Sandbox } from "./sandbox.js";
@@ -149,7 +149,7 @@ export class Agent extends Think<Env> {
 
   /**
    * The Workspace lives *on this DO*, backed by `ctx.storage`.
-   * The capnweb session to wsd runs across DO RPC to a Sandbox
+   * The capnweb session to computerd runs across DO RPC to a Sandbox
    * container-host chosen by the warm pool. See `#backend` below.
    *
    * Stored as a private field; we never override Think's public
@@ -300,7 +300,7 @@ export class Agent extends Think<Env> {
         const uuid = await resolveContainerId(this.env, this.name);
         return this.env.Sandbox.get(this.env.Sandbox.idFromName(uuid));
       },
-      // Identifies *this* DO so wsd's outbound /ws upgrade dials
+      // Identifies *this* DO so computerd's outbound /ws upgrade dials
       // back here (see fetch() override below).
       workspace: { binding: "Agent", id: this.ctx.id.toString() },
     });
@@ -397,7 +397,7 @@ export class Agent extends Think<Env> {
   }
 
   /**
-   * Worker-routed fetch handler. wsd dials back into the Agent DO
+   * Worker-routed fetch handler. computerd dials back into the Agent DO
    * over the loopback `WorkspaceProxy` egress with path `/ws` to
    * upgrade the capnweb session. Forward those upgrades to the
    * backend; defer everything else to the agents/partyserver base
@@ -512,7 +512,7 @@ export class Agent extends Think<Env> {
 
   /* Removed: exec inflight recovery.
    *
-   * The old @cloudflare/workspace exposed startProcess /
+   * An earlier version of the package exposed startProcess /
    * streamProcessLogs / getProcess so a DO that died mid-exec could
    * reattach to a still-running command on the next start. The
    * next-branch WorkspaceShell only exposes a result-shaped exec
@@ -1294,7 +1294,7 @@ export class Agent extends Think<Env> {
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/logs")) {
-      // wsd's stdio log lives under /tmp inside the container. The
+      // computerd's stdio log lives under /tmp inside the container. The
       // workspace shell can `cat` it back for us; /tmp isn't part
       // of the synced workspace tree so a shell read is the right path.
       const ws = await this._localWorkspace();
@@ -1553,7 +1553,7 @@ export class Agent extends Think<Env> {
           "    publish`, and `artifact create/share` work even though",
           "    the isolate has no public network. Cannot run npm, node,",
           "    or any binary outside just-bash's built-in command set.",
-          '  - "container": Cloudflare Container running wsd. Full Linux',
+          '  - "container": Cloudflare Container running computerd. Full Linux',
           "    userland with a Node 24 + Bun toolchain on $PATH (node, npm,",
           "    bun, esbuild, wrangler), public network. Cold start is much",
           "    slower (warm-pool boot); reach for it when shell can't",
@@ -1924,7 +1924,7 @@ export class Agent extends Think<Env> {
   /**
    * Build the (non-streaming) exec tool execute function.
    *
-   * The new @cloudflare/workspace exec surface returns a stream
+   * The new @cloudflare/computer exec surface returns a stream
    * client-side, but only the result() shape survives the Workers
    * RPC boundary between the Agent DO and the Sandbox DO. Until a
    * byte-framed streaming exec lands on WorkspaceShellStub, the

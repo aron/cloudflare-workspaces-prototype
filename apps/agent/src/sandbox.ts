@@ -4,7 +4,7 @@
  * that container.
  *
  * Wiring: cross-DO. The *Agent* DO owns the `Workspace` instance
- * and the `CloudflareContainerBackend` that drives wsd. The backend's
+ * and the `CloudflareContainerBackend` that drives computerd. The backend's
  * `container: () => ...` factory returns a stub to one of these
  * Sandboxes; the backend then calls `getWorkspaceContainer()` over
  * Workers RPC to reach the runtime container handle.
@@ -18,7 +18,7 @@
  *     this DO.
  *
  *   - `WorkspaceProxy` is re-exported at the worker entrypoint
- *     (not here \u2014 it's a top-level export in `index.ts`) so wsd's
+ *     (not here \u2014 it's a top-level export in `index.ts`) so computerd's
  *     `/ws` callback can route back into the Agent DO that owns
  *     the workspace.
  *
@@ -35,7 +35,7 @@
  * the Agent DO where the Workspace now lives.
  */
 
-import { withWorkspaceContainer } from "@cloudflare/workspace/backends/container";
+import { withWorkspaceContainer } from "@cloudflare/computer/backends/container";
 import { DurableObject } from "cloudflare:workers";
 
 /**
@@ -72,22 +72,22 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
     // The deploy pattern: every Sandbox DO isolate restarts under a
     // platform that may keep the underlying container alive across
     // the deploy. The new isolate's module-level WeakMap (used by
-    // @cloudflare/workspace's container-lifecycle.ts) is empty.
+    // @cloudflare/computer's container-lifecycle.ts) is empty.
     // Crucially the platform-level egress intercept rules installed
     // by a prior isolate's `ctx.container.interceptOutboundHttp(...)`
-    // do not survive that restart either — wsd's already-bound
+    // do not survive that restart either — computerd's already-bound
     // network stack is in a state we can't re-steer, and the
     // Agent's next dial sees:
     //   CloudflareContainerBackend(container) [stage=connect]:
     //     POST /connect returned 502: upstream /health unreachable
-    // when wsd's fetch("http://workspace.internal/...") trips on
+    // when computerd's fetch("http://workspace.internal/...") trips on
     // unresolved DNS.
     //
     // Detection: at constructor time we haven't started anything
     // yet, so `ctx.container.running === true` is unambiguous — it's
     // a leftover container we inherited. Destroy + recreate it
     // through the upstream API so the next dial's interceptOutboundHttp
-    // applies to a fresh wsd. Failures are swallowed so a flaky
+    // applies to a fresh computerd. Failures are swallowed so a flaky
     // platform restart never prevents the isolate from booting; the
     // Agent's backend has its own restart-on-readiness budget and
     // will surface a wedged container that way instead.
@@ -141,7 +141,7 @@ export class Sandbox extends withWorkspaceContainer(SandboxBase) {
    * started this container" from "this isolate inherited a running
    * container from a previous incarnation."
    *
-   * We don't probe the wsd port from here — that's the backend's
+   * We don't probe the computerd port from here — that's the backend's
    * job in the Agent DO's `connect()` path. This call only buys the
    * container-image pull + VM start time.
    */

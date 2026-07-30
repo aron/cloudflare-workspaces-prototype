@@ -6,17 +6,17 @@ import { Sandbox } from "./sandbox.js";
 // worker entrypoint so the runtime can build the loopback Fetchers
 // the backends use:
 //
-//   - WorkspaceProxy  carries the wsd-side `/ws` upgrade back into
+//   - WorkspaceProxy  carries the computerd-side `/ws` upgrade back into
 //                    the Agent DO. Used by the container backend.
 //   - WorkspaceServiceProxy is the Fetcher the worker backend hands
 //                    into its Dynamic Worker so the in-isolate shell
 //                    can reach back to getWorkspace().
 //
-// Both classes live in `@cloudflare/workspace`; importing them here
+// Both classes live in `@cloudflare/computer`; importing them here
 // just puts them in the worker's top-level module graph so
 // `ctx.exports.WorkspaceProxy(...)` / `ctx.exports.WorkspaceServiceProxy(...)`
 // resolve at runtime.
-import { WorkspaceProxy, WorkspaceServiceProxy } from "@cloudflare/workspace";
+import { WorkspaceProxy, WorkspaceServiceProxy } from "@cloudflare/computer";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";

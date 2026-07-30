@@ -3,8 +3,8 @@
   "name": "hackspace-prototype",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
-  // `enable_abortsignal_rpc` is experimental but required: alpha.9's
-  // CloudflareContainerBackend health probe (`probeWsdHealth`) passes
+  // `enable_abortsignal_rpc` is experimental but required: the
+  // CloudflareContainerBackend health probe (`probeComputerdHealth`) passes
   // an AbortSignal into `host.fetchPort(...)`, and our cross-DO
   // topology means that call crosses Workers RPC. Without the flag
   // workerd rejects the call with "AbortSignal serialization is not

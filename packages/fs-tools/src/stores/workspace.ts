@@ -1,9 +1,9 @@
 import type { FileStat, FileStore } from "./types.js";
 
 /**
- * Structural subset of `@cloudflare/workspace`'s `Workspace` class that
+ * Structural subset of `@cloudflare/computer`'s `Workspace` class that
  * fs-tools depends on. Declared here so this package has no runtime or
- * type-time dependency on `@cloudflare/workspace`.
+ * type-time dependency on `@cloudflare/computer`.
  */
 export interface WorkspaceLike {
   stat(path: string): Promise<{ type: "file" | "dir"; size: number; mtime: number; mode: number } | null>;

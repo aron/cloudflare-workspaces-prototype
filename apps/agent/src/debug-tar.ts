@@ -13,13 +13,13 @@
  *
  * Workspace integration: this used to call `workspace.vfs.snapshot()`
  * on the vendored Workspace, which returned a single async iterator of
- * entries-with-streams. The published `@cloudflare/workspace` exposes
+ * entries-with-streams. The published `@cloudflare/computer` exposes
  * the VFS only through the stub's `fs.find` / `fs.stat` / `fs.readFile`
  * surface, so we walk the tree explicitly here. Same output shape; the
  * cost is one round-trip per file rather than a single snapshot stream.
  */
 
-import type { Workspace, WorkspaceStub } from "@cloudflare/workspace";
+import type { Workspace, WorkspaceStub } from "@cloudflare/computer";
 
 /**
  * Anything with the `fs` getter our walker calls. Both
