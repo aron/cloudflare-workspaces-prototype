@@ -57,22 +57,22 @@ describe("buildSystemPrompt — tool list", () => {
   it("lists every default tool the agent registers, each on its own bullet", () => {
     const prompt = buildSystemPrompt({});
     const expected = [
-      "read", "write", "edit",
-      "ls", "stat", "mkdir", "rm",
-      "find", "grep",
+      "read", "ls", "write", "edit",
       "exec",
       "webfetch", "websearch",
     ];
     for (const name of expected) {
       expect(prompt).toMatch(new RegExp(`\\n- ${name}: `));
     }
-    expect(prompt).not.toMatch(/\n- apply_patch: /);
+    // Retired in the createAITools adoption.
+    for (const gone of ["apply_patch", "stat", "mkdir", "rm", "find", "grep"]) {
+      expect(prompt).not.toMatch(new RegExp(`\\n- ${gone}: `));
+    }
   });
 
-  it("lists apply_patch instead of edit for OpenAI models", () => {
-    const prompt = buildSystemPrompt({ editToolName: "apply_patch" });
-    expect(prompt).toMatch(/\n- apply_patch: /);
-    expect(prompt).not.toMatch(/\n- edit: /);
+  it("only advertises publish when the assets client is configured", () => {
+    expect(buildSystemPrompt({})).not.toMatch(/\n- publish: /);
+    expect(buildSystemPrompt({ publish: true })).toMatch(/\n- publish: /);
   });
 
   it("includes the custom-tools hedge sentence after the tool list", () => {
@@ -84,7 +84,7 @@ describe("buildSystemPrompt — tool list", () => {
 describe("buildSystemPrompt — guidelines", () => {
   it("includes the file-exploration preference, Bun install preference, and always-on bullets", () => {
     const prompt = buildSystemPrompt({});
-    expect(prompt).toMatch(/Prefer grep \/ find \/ ls over exec/);
+    expect(prompt).toMatch(/Prefer read \/ ls over exec for inspecting known paths/);
     expect(prompt).toMatch(/Prefer `bun install` over `npm install`/);
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
@@ -106,14 +106,6 @@ describe("buildSystemPrompt — guidelines", () => {
     expect(prompt).toMatch(/matched against the original file, not after earlier edits are applied/);
     expect(prompt).toMatch(/Do not emit overlapping or nested edits/);
     expect(prompt).toMatch(/Keep edits\[\]\.oldText as small as possible/);
-  });
-
-  it("includes apply_patch ergonomics for OpenAI models", () => {
-    const prompt = buildSystemPrompt({ editToolName: "apply_patch" });
-    expect(prompt).toMatch(/Use apply_patch for precise file changes/);
-    expect(prompt).toMatch(/create_file, update_file, and delete_file/);
-    expect(prompt).toMatch(/@@ sections with context lines/);
-    expect(prompt).not.toMatch(/edits\[\]\.oldText/);
   });
 
   it("tells the model to load the capabilities-overview skill when asked what it can do", () => {
@@ -283,7 +275,7 @@ describe("buildSystemPrompt — project_context: workspace ignore", () => {
   it("explains that ignored paths don't appear via the file tools", () => {
     const prompt = buildSystemPrompt({ pullIgnore: ["node_modules"] });
     expect(prompt).toMatch(/don't appear via/);
-    for (const name of ["read", "write", "edit", "ls", "stat", "find", "grep"]) {
+    for (const name of ["read", "ls", "write", "edit"]) {
       expect(prompt).toMatch(new RegExp(`\\\`${name}\\\``));
     }
   });

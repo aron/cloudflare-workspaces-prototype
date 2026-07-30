@@ -18,7 +18,6 @@ package](#upgrading-the-computer-package) below.
 
 | Path | Package | Description |
 |---|---|---|
-| [packages/fs-tools](./packages/fs-tools)   | `@cloudflare/fs-tools`  | `read` / `write` / `edit` tools over a pluggable file store. |
 | [packages/web-tools](./packages/web-tools) | `@cloudflare/web-tools` | `webfetch` / `websearch` (Brave) tools. |
 | [packages/shared](./packages/shared)       | `@app/shared`           | Wire types shared between agent and frontend. |
 | [apps/agent](./apps/agent)                 | `@app/agent`            | The Worker: Agent / SubAgent / App / Room / Sandbox / WarmPool DOs. |

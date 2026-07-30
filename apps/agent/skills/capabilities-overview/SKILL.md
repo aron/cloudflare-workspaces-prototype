@@ -23,7 +23,7 @@ Lead with **what you build** (Cloudflare Workers, Agents, Sandbox SDK projects i
 ### The typical workflow
 
 1. **Bring code in.** Use `exec` on the `shell` backend to `git clone` a public GitHub repo into `/workspace` (the shell isolate's built-in `git` command forwards to the host, so `https://` URLs work even though the isolate itself has no public network). Or start fresh by writing files directly.
-2. **Explore and edit.** Use `find`, `grep`, `ls`, and `read` to understand the code, then `edit` / `write` to change it. Prefer surgical edits.
+2. **Explore and edit.** Use `ls` and `read` to understand the code, and `exec` on the cheap `shell` backend for `grep` / `find` sweeps, then `edit` / `write` to change it. Prefer surgical edits.
 3. **Build and run.** `exec` with `backend: 'container'` for anything that needs a real Node.js/Bun toolchain (`bun install`, `bun run build`, `tsc`, `wrangler deploy --dry-run`, `bunx vitest run`, ...). The container ships with Node 24 and Bun (node, npm, bun, esbuild, wrangler) on `$PATH`, has network access, and a FUSE-mounted view of `/workspace`, so anything written through the file tools (or through a shell-backend command) is immediately visible. Prefer `bun install` over `npm install` because it is much faster in the sandbox. For pure text / git work stay on the default `shell` backend — it boots in tens of ms and skips the container roundtrip entirely.
 4. **Hand the result back.** Show the user the final diff inline, or serve produced artifacts via `/api/threads/<threadId>/files/<absolute-path>` — see "Things you can also do" below.
 

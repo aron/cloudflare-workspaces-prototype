@@ -28,7 +28,6 @@ import type { Workspace, WorkspaceStub } from "@cloudflare/computer";
  * so we accept either.
  */
 type WorkspaceFsHolder = Pick<Workspace, "fs"> | Pick<WorkspaceStub, "fs">;
-import { drain } from "./workspace-adapter.js";
 
 const BLOCK = 512;
 
@@ -223,4 +222,31 @@ export async function buildSessionTar(inputs: SessionTarInputs): Promise<Uint8Ar
   }
 
   return buildTar(entries);
+}
+
+/** Read a `fs.readFile` stream to a single buffer. */
+async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        parts.push(value);
+        total += value.byteLength;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (parts.length === 1) return parts[0];
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return out;
 }

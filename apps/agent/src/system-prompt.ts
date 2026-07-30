@@ -97,8 +97,12 @@ export interface BuildSystemPromptOptions {
    * DO. When unset or empty the block is skipped.
    */
   projectInstructions?: string;
-  /** Editing tool exposed in this runtime. OpenAI uses apply_patch. */
-  editToolName?: "edit" | "apply_patch";
+  /**
+   * Whether the `publish` tool is registered. It only exists when the
+   * workspace was built with an assets client (R2 credentials set), so
+   * the prompt must not advertise it otherwise.
+   */
+  publish?: boolean;
 }
 
 // ── Section 1: identity ────────────────────────────────────────────
@@ -110,18 +114,16 @@ and exercise Workers from inside a Durable-Object-backed chat session.`;
 
 // ── Section 2: tools ───────────────────────────────────────────────
 
+// Mirrors the set `createAITools` registers plus this app's own
+// additions. `publish` is conditional on the assets client, `delegate`
+// on being the parent agent.
 const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["read",      "read a file from the workspace"],
+  ["ls",        "list files and directories at a path"],
   ["write",     "create or overwrite a file"],
   ["edit",      "surgical edit of an existing file"],
-  ["apply_patch", "patch-style create/update/delete file operations (OpenAI models)"],
-  ["ls",        "list files and directories at a path"],
-  ["stat",      "metadata for a file or directory"],
-  ["mkdir",     "create a directory (and parents)"],
-  ["rm",        "remove a file or directory recursively"],
-  ["find",      "locate files by name substring"],
-  ["grep",      "search file contents for a pattern"],
   ["exec",      "run a shell command on the 'shell' (default) or 'container' backend"],
+  ["publish",   "publish a workspace file and get a time-limited public URL"],
   ["webfetch",  "fetch a URL as Markdown (rendered in a real browser, so JS-heavy pages work)"],
   ["screenshot", "render a webpage in a headless browser and capture a screenshot (png/jpeg/webp, fullPage, selector, viewport)"],
   ["websearch", "search the web for documentation or examples"],
@@ -130,12 +132,13 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["cloudflare", "access the current user's Cloudflare account via MCP (connect/status/disconnect); unlocks search/execute over the whole Cloudflare API"],
 ];
 
-/** Tool list for worker sub-agents (same as parent minus delegate). */
-function toolSnippetsFor(editToolName: "edit" | "apply_patch", worker = false): Array<readonly [string, string]> {
+/** Tool list for the parent agent, or for worker sub-agents (no delegate). */
+function toolSnippetsFor(
+  opts: { publish?: boolean; worker?: boolean } = {},
+): Array<readonly [string, string]> {
   return TOOL_SNIPPETS.filter(([name]) => {
-    if (worker && name === "delegate") return false;
-    if (name === "edit") return editToolName === "edit";
-    if (name === "apply_patch") return editToolName === "apply_patch";
+    if (name === "delegate") return opts.worker !== true;
+    if (name === "publish") return opts.publish === true;
     return true;
   });
 }
@@ -163,7 +166,7 @@ const GUIDELINES = [
   // already spells out the two backends in detail; this bullet exists
   // so the model sees the steering hint in the same pass as the rest
   // of the file-tool rules.
-  "Prefer grep / find / ls over exec for file exploration",
+  "Prefer read / ls over exec for inspecting known paths; use exec on the default 'shell' backend for grep / find / sed sweeps — it is just-bash in an isolate, so those are cheap",
   "exec defaults to the 'shell' backend (just-bash, instant boot, built-in git). Pass backend: 'container' when the command needs a real Node/Bun binary (bun, npm, node, tsc, wrangler, esbuild). Prefer `bun install` over `npm install` in the sandbox because it is much faster",
 
   // Hackspace-specific meta-rules.
@@ -187,23 +190,13 @@ const GUIDELINES = [
   "Use the cloudflare tool to act on the current user's own Cloudflare account (DNS, Workers, R2, Zero Trust, etc.). Run cloudflare command 'connect' first; if it returns an authUrl, give the user that link to authorize, then retry",
   "Once connected, use the search/execute tools (from the Cloudflare MCP server) to explore and call any Cloudflare API endpoint",
   "Cloudflare auth is per-user: it uses the account of whoever sent the latest message. If a connection that worked before asks to authenticate again, the authorization expired — share the new link and ask the user to re-authorize",
-];
 
-function editingGuidelines(toolName: "edit" | "apply_patch"): string[] {
-  if (toolName === "apply_patch") {
-    return [
-      "Use apply_patch for precise file changes — prefer small V4A diffs with enough context to apply cleanly",
-      "apply_patch supports create_file, update_file, and delete_file operations; read files first when context is uncertain",
-      "For update_file, use @@ sections with context lines (' '), deletions ('-'), and additions ('+'). Keep patches focused and avoid large rewrites",
-    ];
-  }
-  return [
-    "Use edit for precise changes — each edits[].oldText must match exactly",
-    "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-    "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit",
-    "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions",
-  ];
-}
+  // Editing ergonomics for the package's `edit` tool.
+  "Use edit for precise changes — each edits[].oldText must match exactly",
+  "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+  "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit",
+  "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions",
+];
 
 const SKILLS_PREAMBLE = `\
 The following skills provide specialized instructions for specific tasks.
@@ -226,8 +219,8 @@ Execution environment — two planes the agent operates across:
   edge. Owns the conversation history and the workspace VFS
   (SQLite-backed inside the DO). All tools dispatch from here.
 - Sandbox container: a companion container assigned to this session.
-  \`exec\` runs inside it. The file tools (\`read\`/\`write\`/\`edit\`/\`ls\`/
-  \`stat\`/\`mkdir\`/\`rm\`/\`find\`/\`grep\`) operate on the DO's VFS
+  \`exec\` runs inside it when \`backend: 'container'\` is set. The file
+  tools (\`read\`/\`ls\`/\`write\`/\`edit\`) operate on the DO's VFS
   directly; the container mounts that VFS over FUSE so \`exec\` sees
   the same files without an explicit sync step.
 
@@ -240,11 +233,11 @@ const WORKSPACE_LAYOUT_BLOCK = `\
 Workspace layout:
 - All files live under /workspace. Use absolute paths.`;
 
-function workspaceIgnoreBlock(pullIgnore: string[], editToolName: "edit" | "apply_patch"): string {
+function workspaceIgnoreBlock(pullIgnore: string[]): string {
   const list = pullIgnore.map((p) => `\`${p}\``).join(", ");
   return [
     "Workspace ignore rules:",
-    `- Paths matching ${list} are ignored by the post-exec sync, so they don't appear via \`read\`, \`write\`, \`${editToolName}\`, \`ls\`, \`stat\`, \`find\`, or \`grep\`. They are matched as path segments — any path containing \`/<name>/\` or ending in \`/<name>\`.`,
+    `- Paths matching ${list} are ignored by the post-exec sync, so they don't appear via \`read\`, \`ls\`, \`write\`, or \`edit\`. They are matched as path segments — any path containing \`/<name>/\` or ending in \`/<name>\`.`,
     "- The files still exist on the container side, so `exec` (and anything it runs — node, tsc, eslint, etc.) sees them normally.",
     "- `exec` *can* be used to read or grep an ignored file (e.g. `exec(\"cat /workspace/node_modules/foo/package.json\")`), but each call spawns a sandbox process and round-trips through the container — plan on hundreds of ms minimum. Reach for it only when no other tool can answer the question.",
     "- Prefer published documentation, `websearch` / `webfetch`, or the source repo's metadata over crawling installed dependencies.",
@@ -340,7 +333,6 @@ function buildProjectContext(opts: {
   pullIgnore: string[];
   originator?: { userId: string; name: string };
   projectInstructions?: string;
-  editToolName?: "edit" | "apply_patch";
 }): string {
   const sections: string[] = [];
   // AGENTS.md first — user-controlled persona / style / house rules
@@ -351,7 +343,7 @@ function buildProjectContext(opts: {
     sections.push(projectInstructionsBlock(opts.projectInstructions.trim()));
   }
   sections.push(EXECUTION_BLOCK, WORKSPACE_LAYOUT_BLOCK);
-  if (opts.pullIgnore.length > 0) sections.push(workspaceIgnoreBlock(opts.pullIgnore, opts.editToolName ?? "edit"));
+  if (opts.pullIgnore.length > 0) sections.push(workspaceIgnoreBlock(opts.pullIgnore));
   sections.push(fileServingBlock(opts.threadId, opts.baseUrl));
   if (opts.originator) {
     sections.push(originatorBlock(opts.originator, opts.baseUrl, opts.threadId, opts.roomId));
@@ -370,14 +362,12 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions = {}): string {
   const baseUrl    = (opts.baseUrl ?? "").replace(/\/+$/, "");
   const roomId     = opts.roomId ?? "";
   const originator = opts.originator;
-  const editToolName = opts.editToolName ?? "edit";
 
-  const tools      = toolSnippetsFor(editToolName).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
-  const guidelines = [...GUIDELINES, ...editingGuidelines(editToolName)].map((g) => `- ${g}`).join("\n");
+  const tools      = toolSnippetsFor({ publish: opts.publish }).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
+  const guidelines = GUIDELINES.map((g) => `- ${g}`).join("\n");
   const projectContext = buildProjectContext({
     threadId, baseUrl, roomId, pullIgnore, originator,
     projectInstructions: opts.projectInstructions,
-    editToolName,
   });
 
   const parts: string[] = [
@@ -444,14 +434,13 @@ concise summary of what you did and what changed.`;
  * parent-level concerns. Includes the same tool list (minus delegate),
  * the same file-tool ergonomics guidelines, and the standard footer.
  */
-export function buildWorkerSystemPrompt(opts: { now?: Date; editToolName?: "edit" | "apply_patch" } = {}): string {
+export function buildWorkerSystemPrompt(opts: { now?: Date; publish?: boolean } = {}): string {
   const now = opts.now ?? new Date();
-  const editToolName = opts.editToolName ?? "edit";
-  const tools = toolSnippetsFor(editToolName, true).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
+  const tools = toolSnippetsFor({ publish: opts.publish, worker: true }).map(([name, desc]) => `- ${name}: ${desc}`).join("\n");
   // Worker guidelines: file-tool ergonomics + exec backend selection.
   // Drop hackspace meta-rules and sub-agent delegation rules — workers
   // don’t use them.
-  const workerGuidelines = [...GUIDELINES, ...editingGuidelines(editToolName)]
+  const workerGuidelines = [...GUIDELINES]
     .filter(g => !g.startsWith("When the user asks") && !g.startsWith("Use delegate") && !g.startsWith("Sub-agents") && !g.startsWith("Name sub-agents") && !g.startsWith("Give the sub-agent"))
     .map(g => `- ${g}`);
 

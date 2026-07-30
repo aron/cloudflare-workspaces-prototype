@@ -2,66 +2,65 @@
  * Renders a `tool-exec` part with terminal-style chrome.
  *
  * Drop-in replacement for the generic <Tool> branch in ThreadPanel
- * when the part's tool name is "exec". Reads cumulative ExecSnapshot
- * shapes the agent's streaming generator yields:
+ * when the part's tool name is "exec". Reads the output shape the
+ * package's exec tool returns:
  *
- *   {
- *     processId, running,
- *     stdout, stderr,
- *     stdoutTruncated?, stderrTruncated?,
- *     stdoutBinary?,    stderrBinary?,
- *     exitCode?, durationMs?,
- *     error?: { details }
- *   }
+ *   { command, cwd, backend, exitCode, stdout, stderr }
+ *   { command, cwd, backend, error }                     // failed call
+ *
+ * The agent additionally wraps every tool for per-call cancellation,
+ * which reports failures as `{ error: { details } }`.
  *
  * Render modes:
- *   running        -> neutral chrome, "running…" badge, optional cancel
+ *   no output yet  -> neutral chrome, "running…" badge, optional cancel
  *   exit zero      -> green chrome, "exit 0"
  *   non-zero exit  -> red chrome, "exit <n>"
- *   error          -> red chrome, "aborted" / "process lost" / etc.
+ *   error          -> red chrome, the error message
  *
- * Backward compat: old persisted parts had the blocking shape
- * `{ stdout, stderr, exitCode }` with no processId. We render those
- * the same way as a final exec snapshot.
+ * Backward compat: parts persisted by the pre-package exec tool carry
+ * `running` / `durationMs` / `metadata` fields, so those are still
+ * read when present.
  */
 
 import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { humanizeDuration } from "@/lib/humanize-duration";
 
+/** Legacy metadata block, only present on pre-package persisted parts. */
 export interface ExecMetadata {
-  kind?: "exec";
-  backend?: "shell" | "container";
-  requestedBackend?: "shell" | "container" | null;
-  cwd?: string | null;
+  backend?: string;
   commandKind?: "git" | "assets" | "artifact" | "shell";
 }
 
 export interface ExecSnapshot {
-  processId?: string;
-  running?: boolean;
+  command?: string;
+  cwd?: string | null;
+  backend?: string;
+  exitCode?: number;
   stdout?: string;
   stderr?: string;
-  stdoutEmpty?: boolean;
-  stderrEmpty?: boolean;
-  stdoutTruncated?: boolean;
-  stderrTruncated?: boolean;
-  stdoutBinary?: boolean;
-  stderrBinary?: boolean;
-  exitCode?: number;
+  /** A string from the package's exec tool, `{ details }` from the agent's wrapper. */
+  error?: string | { details?: string };
+  running?: boolean;
   durationMs?: number;
-  backend?: "shell" | "container";
   metadata?: ExecMetadata;
-  error?: { details?: string };
 }
 
 interface ExecToolViewProps {
-  input?: { command?: string; cwd?: string; backend?: "shell" | "container" };
+  input?: { command?: string; cwd?: string; backend?: string };
   output?: ExecSnapshot | null;
   errorText?: string;
   state?: string;
   toolCallId?: string;
   onCancel?(toolCallId: string): void;
+}
+
+/** Normalise both error encodings to a message, or undefined. */
+export function execErrorMessage(output?: ExecSnapshot | null): string | undefined {
+  const err = output?.error;
+  if (!err) return undefined;
+  if (typeof err === "string") return err;
+  return err.details ?? undefined;
 }
 
 export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
@@ -70,9 +69,8 @@ export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
 } {
   if (errorText) return { kind: "fail", label: errorText };
   if (!output) return { kind: "running", label: "running…" };
-  if (output.error?.details) {
-    return { kind: "fail", label: output.error.details };
-  }
+  const message = execErrorMessage(output);
+  if (message) return { kind: "fail", label: message };
   if (output.running) return { kind: "running", label: "running…" };
   if (output.exitCode === undefined) return { kind: "running", label: "running…" };
   return output.exitCode === 0
@@ -80,37 +78,25 @@ export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
     : { kind: "fail", label: `exit ${output.exitCode}` };
 }
 
-
-/**
- * Render stdout and stderr in arrival order. With cumulative snapshots
- * the agent already produces them as full strings — we just concatenate
- * with a hairline visual cue for stderr.
- *
- * If a side is flagged binary we render the literal "<binary>" once
- * for that side, in place of any content.
- */
-export function execEnvironmentLabel(input?: { backend?: "shell" | "container" }, output?: ExecSnapshot | null): string {
-  const backend = output?.metadata?.backend ?? output?.backend ?? input?.backend ?? "shell";
+export function execEnvironmentLabel(input?: { backend?: string }, output?: ExecSnapshot | null): string {
+  const backend = output?.backend ?? output?.metadata?.backend ?? input?.backend ?? "shell";
   const commandKind = output?.metadata?.commandKind;
   return commandKind && commandKind !== "shell" ? `${backend} · ${commandKind}` : backend;
 }
 
 function hasVisibleStream(snap: ExecSnapshot): boolean {
-  return Boolean(snap.stdoutBinary || snap.stderrBinary || snap.stdout || snap.stderr);
+  return Boolean(snap.stdout || snap.stderr);
 }
 
+/**
+ * Render stdout and stderr in arrival order, with a hairline visual
+ * cue for stderr. Both arrive as complete strings (the package's exec
+ * tool truncates them itself).
+ */
 function renderStream(snap: ExecSnapshot): React.ReactNode {
   const lines: Array<{ stream: "out" | "err"; text: string }> = [];
-  if (snap.stdoutBinary) {
-    lines.push({ stream: "out", text: "<binary>" });
-  } else if (snap.stdout) {
-    lines.push({ stream: "out", text: snap.stdout });
-  }
-  if (snap.stderrBinary) {
-    lines.push({ stream: "err", text: "<binary>" });
-  } else if (snap.stderr) {
-    lines.push({ stream: "err", text: snap.stderr });
-  }
+  if (snap.stdout) lines.push({ stream: "out", text: snap.stdout });
+  if (snap.stderr) lines.push({ stream: "err", text: snap.stderr });
   if (lines.length === 0) return null;
 
   return (
@@ -128,6 +114,7 @@ export function ExecToolView({
   input, output, errorText, state, toolCallId, onCancel,
 }: ExecToolViewProps) {
   const status = statusFor(output, errorText);
+  const errorMessage = execErrorMessage(output);
   const isRunning = status.kind === "running";
   const envLabel = execEnvironmentLabel(input, output);
   const canCancel = isRunning && toolCallId
@@ -164,24 +151,18 @@ export function ExecToolView({
       <div className="p-3">
         {renderStream(output ?? {})}
 
-        {output && !isRunning && !hasVisibleStream(output) && !output.error?.details && (
+        {output && !isRunning && !hasVisibleStream(output) && !errorMessage && (
           <p className="rounded bg-kumo-base p-3 font-mono text-xs text-kumo-inactive">
             No stdout/stderr output captured.
           </p>
         )}
 
-        {(output?.stdoutTruncated || output?.stderrTruncated) && (
-          <p className="mt-1 text-xs text-kumo-inactive">
-            Output truncated at 2 MiB per stream.
-          </p>
-        )}
-
-        {output?.error?.details && (
+        {errorMessage && (
           <div className="mt-2 border-t border-red-500/20 pt-2 text-xs text-red-400">
-            Error: {output.error.details}
+            Error: {errorMessage}
           </div>
         )}
-        {errorText && !output?.error?.details && (
+        {errorText && !errorMessage && (
           <div className="mt-2 border-t border-red-500/20 pt-2 text-xs text-red-400">
             Error: {errorText}
           </div>

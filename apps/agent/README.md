@@ -6,9 +6,18 @@ DO-backed virtual filesystem.
 
 This is a reference consumer of
 [`@cloudflare/computer`](https://github.com/cloudflare/computer).
-The published package owns the SQLite VFS, the FUSE mount, and the
-capnweb sync. This app does only chat-shaped things: defining tools,
+The published package owns the SQLite VFS, the FUSE mount, the capnweb
+sync, and the model-facing `read` / `ls` / `write` / `edit` / `exec` /
+`publish` tools (`createAITools` from `@cloudflare/computer/tools`).
+This app does only chat-shaped things: the web and delegation tools,
 picking a model, streaming the response, and rendering the chat.
+
+Wiring follows the package's `examples/think`: the Workspace is Think's
+`workspace` field (constructed with `useThink: true`, which adds the
+filesystem surface Think expects), sub-agents reach it with
+`getWorkspace(await this.parentAgent(Agent))` against the parent's
+`__getWorkspaceStub()`, and Think's built-in bash is disabled
+(`workspaceBash = false`) in favour of the package's `exec` tool.
 
 ## Architecture
 
@@ -20,20 +29,22 @@ picking a model, streaming the response, and rendering the chat.
                  ▼
 ┌────────────────────────────────────┐         ┌───────────────────────────┐
 │  Agent DO  (one per thread)        │         │  Sandbox DO (1:1 w/ a     │
-│    Think + tools                   │── RPC ──┤  warm pool slot)          │
-│    ├── WorkspaceStub ──────────────┼────────►│    Workspace              │
-│    │     (fs.* / shell.exec)       │         │      ├── SQLite VFS       │
-│    └── R2: SKILLS                  │         │      ├── R2 mounts        │
-└────────────────────────────────────┘         │      └── capnweb session ──► computerd container
-                                               │            (FUSE mount    │
-                                               │             at /workspace)│
-                                               └───────────────────────────┘
+│    Think + tools                   │         │  warm pool slot)          │
+│    ├── Workspace                   │── RPC ──┤    ctx.container          │
+│    │     ├── SQLite VFS (storage)  │         │      └── capnweb session ──► computerd container
+│    │     ├── R2 mounts             │         │            (FUSE mount    │
+│    │     ├── WorkerBackend         │         │             at /workspace)│
+│    │     └── ContainerBackend ─────┘         └───────────────────────────┘
+│    └── R2: SKILLS                  │
+└────────────────────────────────────┘
 ```
 
-Same-DO constraint of `CloudflareContainerBackend`: the Workspace
-lives inside the Sandbox DO because `ctx.container` can't cross
-isolates. The Agent DO holds only a `WorkspaceStub` — a thin RPC
-target that proxies `fs.*` / `shell.exec` back into the Sandbox.
+The Workspace lives in the Agent DO, backed by its own `ctx.storage`.
+`CloudflareContainerBackend` can't own `ctx.container` from here, so the
+container half runs in a Sandbox DO picked by the warm pool and the
+capnweb session to `computerd` is carried over DO RPC. Sub-agents and
+the `WorkerBackend`'s shell isolate reach the same Workspace as a
+`WorkspaceStub` through `__getWorkspaceStub()`.
 
 ## Setup
 
@@ -155,15 +166,20 @@ When deployed, useful for inspecting state:
 
 ## Known gaps
 
-- **Streaming exec.** `WorkspaceShellStub.exec` returns a fully-buffered
-  `{ stdout, stderr, exitCode }` shape; the chat UI no longer shows
-  live stdout/stderr from long-running commands. The underlying
-  `WorkspaceShell.exec` does emit a `ReadableStream<WorkspaceExecEvent>`,
-  but the stub can't carry that across the DO RPC boundary without a
-  framed transport. Tracked upstream against
-  `@cloudflare/computer`.
+- **Streaming exec.** The package's `exec` tool awaits
+  `handle.result()` and returns one final
+  `{ command, cwd, backend, exitCode, stdout, stderr }`, so the chat UI
+  shows a command's output only once it finishes. The transport for
+  live output now exists — an `ExecHandle` is a
+  `ReadableStream<WorkspaceExecEvent>` and survives DO RPC as framed
+  JSONL — so streaming is a matter of driving the handle here instead
+  of using the package's tool, at the cost of re-owning that tool.
 - **Exec inflight recovery.** A DO eviction mid-exec leaves the tool
-  part in `input-streaming`. The new workspace API has no
-  `getProcess` / `streamProcessLogs` reattach, so we lean on
-  `resolveOrphanToolCalls` in `beforeTurn` to mark the call cancelled
-  on the next turn.
+  part in `input-streaming`, and `resolveOrphanToolCalls` in
+  `beforeTurn` marks it cancelled on the next turn. `shell.get(id,
+  { resume })` can reattach to the still-running command instead, but
+  the package's `exec` tool doesn't surface the exec id to persist.
+- **Per-call cancellation doesn't kill the process.** `cancelToolCall`
+  unblocks the model loop through `runCancellable`; the command itself
+  drains in the background. `handle.kill(signal)` would end it, and
+  needs the same exec-id plumbing as reattach.

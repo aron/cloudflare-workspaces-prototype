@@ -57,7 +57,7 @@ describe("SubAgent — reachable via parent", () => {
     expect(childToolNames.has("read")).toBe(true);
     expect(childToolNames.has("write")).toBe(true);
     expect(childToolNames.has("exec")).toBe(true);
-    expect(childToolNames.has("find")).toBe(true);
+    expect(childToolNames.has("ls")).toBe(true);
     // delegate is absent — workers cannot delegate.
     expect(childToolNames.has("delegate")).toBe(false);
   });

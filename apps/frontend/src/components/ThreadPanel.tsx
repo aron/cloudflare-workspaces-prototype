@@ -49,7 +49,7 @@ import { deleteThread, fetchRoomMessages } from "@/lib/api";
 import type { AppMessage } from "@/lib/api";
 import { FileViewer, type FileViewerEntry } from "@/components/FileViewer";
 import { PathAutocomplete } from "@/components/PathAutocomplete";
-import { ExecToolView } from "@/components/ExecToolView";
+import { ExecToolView, type ExecSnapshot } from "@/components/ExecToolView";
 import { DelegateToolView } from "@/components/DelegateToolView";
 import { CloudflareToolView } from "@/components/CloudflareToolView";
 import { ScreenshotToolView } from "@/components/ScreenshotToolView";
@@ -537,15 +537,15 @@ export function ThreadPanel({
                           (part as { callDurationMs?: number }).callDurationMs
                           ?? (output as { durationMs?: number } | null)?.durationMs;
 
-                        // Custom chrome for exec — streams stdout/stderr live,
-                        // colours green on exit 0, red on non-zero or error.
+                        // Custom chrome for exec — terminal-style
+                        // stdout/stderr, green on exit 0, red on non-zero
+                        // or error.
                         if (name === "exec") {
                           return (
                             <ExecToolView
                               key={i}
-                              input={input as { command?: string; cwd?: string; backend?: "shell" | "container" } | undefined}
-                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                              output={output as any}
+                              input={input as { command?: string; cwd?: string; backend?: string } | undefined}
+                              output={output as ExecSnapshot | null}
                               errorText={errorText}
                               state={part.state}
                               toolCallId={toolCallId}

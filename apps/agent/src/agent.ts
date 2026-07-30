@@ -32,33 +32,29 @@ import {
 import { Think } from "@cloudflare/think";
 import { agentTool } from "agents/agent-tools";
 import { callable } from "agents";
-import { generateText, tool } from "ai";
+import { generateText, tool, type Tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 import {
   type DurableObjectStorageLike,
+  getWorkspace,
+  type ThinkWorkspaceCompatibility,
   Workspace,
   type WorkspaceBackend,
+  type WorkspaceClient,
+  type WorkspaceHandle,
   type WorkspaceStub,
 } from "@cloudflare/computer";
 import { createAssets } from "@cloudflare/computer/assets";
 import { CloudflareContainerBackend } from "@cloudflare/computer/backends/container";
 import { WorkerBackend } from "@cloudflare/computer/backends/worker";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
+import { createAITools } from "@cloudflare/computer/tools";
 import { tracing } from "cloudflare:workers";
 import { resolveContainerId, releaseContainer } from "./pool.js";
 import type { Sandbox } from "./sandbox.js";
-import { adaptForFsTools } from "./workspace-adapter.js";
 
-import {
-  createApplyPatchTool,
-  createEditTool,
-  createReadTool,
-  createWriteTool,
-  WorkspaceFileStore,
-  type FileStore,
-} from "@cloudflare/fs-tools";
 import {
   createBraveSearchProvider,
   createWebSearchTool,
@@ -96,8 +92,7 @@ import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
-import { splitStreamingTools } from "./streaming-tools.js";
-import { buildExecToolError, buildExecToolOutput } from "./exec-result.js";
+import { execBackends, defaultExecBackend } from "./exec-backends.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { buildSystemPrompt, buildWorkerSystemPrompt, type Skill } from "./system-prompt.js";
@@ -129,7 +124,7 @@ const WORKSPACE_IGNORE = ["node_modules"];
  * ships them as empty strings so the names are visible to dev, and
  * the deployment overrides them with secrets.
  *
- * Mirrors the same gate `examples/think` uses for its `share` tool.
+ * Mirrors the same gate `examples/think` uses for its `publish` tool.
  */
 function hasAssetsConfig(env: Env): boolean {
   return Boolean(
@@ -147,20 +142,22 @@ export class Agent extends Think<Env> {
   /** Max tool-call rounds per turn (preserves stepCountIs(20) from old impl). */
   override maxSteps = 20;
 
+  /** We ship a dedicated `exec` tool; skip Think's built-in bash. */
+  override workspaceBash = false;
+
   /**
    * The Workspace lives *on this DO*, backed by `ctx.storage`.
    * The capnweb session to computerd runs across DO RPC to a Sandbox
    * container-host chosen by the warm pool. See `#backend` below.
    *
-   * Stored as a private field; we never override Think's public
-   * `workspace` slot because Think types it against its own
-   * `WorkspaceLike` shape (the @cloudflare/shell one) which is a
-   * different surface. The Think default tools that consult it
-   * are inert here - `getTools()` doesn't include any of them and
-   * `workspaceBash` is off - so nothing in the Think baseline
-   * actually reads `.workspace`.
+   * Owned outright as Think's `workspace` slot, the way
+   * `examples/think` does it: `useThink: true` adds the string-based
+   * filesystem surface Think types that slot against, so the
+   * Workspace can be assigned directly instead of through an adapter.
+   * Assigned in the constructor because the backend list depends on
+   * `env`.
    */
-  readonly #workspace: Workspace;
+  declare workspace: Workspace & ThinkWorkspaceCompatibility;
 
   /**
    * The Cloudflare container backend. Its `container: () => ...`
@@ -209,22 +206,9 @@ export class Agent extends Think<Env> {
 
   /** Tools that read state but never mutate it - free in the budget. */
   private static readonly READ_ONLY_TOOLS = new Set<string>([
-    "read", "ls", "stat", "find", "grep",
+    "read", "ls",
     "webfetch", "websearch",
   ]);
-
-  /**
-   * Tools whose `execute` returns an AsyncIterable that the AI SDK must
-   * see *unwrapped* so preliminary chunks reach the UI message stream.
-   * Think's default `_wrapToolsWithDecision` awaits the execute, detects
-   * AsyncIterable, and drains it down to the last value (so it can run
-   * `beforeToolCall` first). That collapses streaming. We override the
-   * wrap below to pass these tools through untouched.
-   *
-   * Trade-off: `beforeToolCall` doesn't fire for streaming tools. We
-   * don't use it for anything in this agent.
-   */
-  private static readonly STREAMING_TOOLS = new Set<string>(["exec"]);
 
   /**
    * Per-turn reflection budget + duplicate-call tracker. Think's flat
@@ -264,18 +248,6 @@ export class Agent extends Think<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
-    // Patch Think's tool-wrapper to pass streaming tools through without
-    // collapsing their AsyncIterable execute. Done as an instance-level
-    // monkey patch (rather than a subclass override) because the method
-    // is declared private in Think's .d.ts and TypeScript blocks both
-    // override and super-call. The runtime function lives on the
-    // prototype with a leading underscore; splitStreamingTools wraps
-    // the parent implementation in a tool-set splitter that's unit-
-    // tested in isolation.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const self = this as any;
-    const original = self._wrapToolsWithDecision.bind(this);
-    self._wrapToolsWithDecision = splitStreamingTools(Agent.STREAMING_TOOLS, original);
     // Workspace lives in this Agent DO; the backend dials a warm-pool
     // Sandbox DO that owns only ctx.container, and reaches it across
     // Workers RPC through the Sandbox's `getWorkspaceContainer()`
@@ -336,12 +308,16 @@ export class Agent extends Think<Env> {
       );
     }
     backends.push(this.#backend);
-    this.#workspace = new Workspace({
+    this.workspace = new Workspace({
       // ctx.storage.sql.exec returns a narrower row type than
       // DurableObjectStorageLike declares; the runtime shape
       // matches. Cast through unknown to bypass invariance.
       storage: this.ctx.storage as unknown as DurableObjectStorageLike,
       backends,
+      // Attach the string-based filesystem methods Think's `workspace`
+      // slot is typed against (readFile / writeFile / readDir / ...).
+      // Without this the slot needs a hand-written adapter.
+      useThink: true,
       // Route every workspace op through the Workers Observability
       // user-tracing surface. With `observability.traces.enabled:
       // true` in wrangler.jsonc, spans land in the dashboard
@@ -389,7 +365,7 @@ export class Agent extends Think<Env> {
             },
           }
         : {}),
-    });
+    }) as Workspace & ThinkWorkspaceCompatibility;
     this.ctx.blockConcurrencyWhile(async () => {
       this._roomId   = (await this.ctx.storage.get<string>(Agent.ROOM_ID_STORAGE_KEY))   ?? null;
       this._roomName = (await this.ctx.storage.get<string>(Agent.ROOM_NAME_STORAGE_KEY)) ?? null;
@@ -418,33 +394,29 @@ export class Agent extends Think<Env> {
    *
    * Returns the local Workspace, not a stub: the Agent owns the
    * instance directly, so fs / shell calls are in-isolate (no
-   * DO RPC hop). The `fs` and `shell` getters are the same shape
-   * the old `WorkspaceStub` exposed, so existing call sites work
-   * unchanged.
-   *
-   * Private because the public RPC method below (`getWorkspace`)
-   * returns the stub shape that WorkspaceServiceProxy expects -
-   * we don't want callers reaching across the RPC boundary to grab
-   * the live Workspace and accidentally serializing it.
+   * DO RPC hop).
    */
   private async _localWorkspace(): Promise<Workspace> {
-    await this.#workspace.ready();
-    return this.#workspace;
+    await this.workspace.ready();
+    return this.workspace;
   }
 
   /**
-   * Public RPC entry point reachable through WorkspaceServiceProxy.
-   * The worker backend's shell isolate calls
-   * `env.HOST.getWorkspace()` per exec; the proxy resolves it to
-   * `this.env.Agent.get(thisId).getWorkspace()` on the host side,
-   * lands inside this DO's own request context, and returns a
+   * The door `getWorkspace(stub)` knocks on, and the one the package's
+   * proxies dispatch to: the worker backend's shell isolate calls
+   * `env.HOST.getWorkspace()`, which resolves to
+   * `env.Agent.get(thisId).__getWorkspaceStub()` on the host side and
+   * lands inside this DO's own request context. Returns a
    * `WorkspaceStub` whose `.fs` / `.shell` calls are normal Workers
-   * RPC. Returning the live Workspace instance here would fail with
+   * RPC; returning the live Workspace instance would fail with
    * "Could not serialize object of type Workspace" on the way out.
+   *
+   * Sub-agents reach the same workspace through it via
+   * `getWorkspace(await this.parentAgent(Agent))`.
    */
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.workspace.ready();
+    return this.workspace.stub();
   }
 
   /**
@@ -544,7 +516,7 @@ export class Agent extends Think<Env> {
       baseUrl:    (this.env as { APP_BASE_URL?: string }).APP_BASE_URL ?? "",
       originator: this.originatorFromMessages(),
       projectInstructions: this._projectInstructions ?? undefined,
-      editToolName: this.env.OPENAI_API_KEY ? "apply_patch" : "edit",
+      publish: hasAssetsConfig(this.env),
     });
   }
 
@@ -1419,24 +1391,42 @@ export class Agent extends Think<Env> {
     return { yields, result };
   }
 
-  private buildTools() {
-    // Resolve the WorkspaceStub once per turn; tools below close over
-    // getWs and re-await it on each call. The cache lives in
-    // this._workspaceStub so the underlying RPC handshake only runs
-    // on first contact.
+  private buildTools(): ToolSet {
+    // The browser tools still need direct filesystem access to persist
+    // screenshots, so they get the local Workspace; everything else
+    // goes through the package's tool factories.
     const getWs = () => this._localWorkspace();
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
-    const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
-      ({ [name]: def });
-    const editToolName = this.env.OPENAI_API_KEY ? "apply_patch" : "edit";
+
+    // The shared model-facing tool set: read / ls / write / edit,
+    // `exec` (because `shell` is passed), and `publish` when the
+    // workspace has an assets client. The package owns the schemas,
+    // byte caps, structured errors, and UTF-8-safe truncation; this
+    // app only owns the per-backend prose in exec-backends.ts.
+    const tools: ToolSet = createAITools({
+      workspace: this.workspace,
+      shell: {
+        defaultBackend: defaultExecBackend(this.env),
+        backends: execBackends(this.env),
+      },
+    });
 
     return {
-      ...pick("read",  createReadTool({ store: makeLazyStore(getWs) })),
-      ...pick("write", createWriteTool({ store: makeLazyStore(getWs) })),
-      ...(this.env.OPENAI_API_KEY
-        ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStore(getWs) }))
-        : pick("edit", createEditTool({ store: makeLazyStore(getWs) }))),
+      // Wrapped so a single wedged call can be failed from the UI
+      // without nuking the turn. `schedule`, `cloudflare` and
+      // `delegate` stay unwrapped below: they own their own abort
+      // paths, and wrapping an async generator would collapse its
+      // interim chunks into the last one.
+      ...this.cancellable({
+        ...tools,
+        ...(this.env.BRAVE_API_KEY
+          ? {
+              websearch: createWebSearchTool({
+                provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
+              }),
+            }
+          : {}),
+      }),
+
       // webfetch (markdown via Browser Run, or AI fallback) + screenshot
       // (only when BROWSER is bound). See browser-tools.ts.
       ...buildBrowserTools({
@@ -1447,138 +1437,6 @@ export class Agent extends Think<Env> {
         baseUrl: (this.env as { APP_BASE_URL?: string }).APP_BASE_URL,
         threadId: this.name,
       }),
-      ...(this.env.BRAVE_API_KEY
-        ? pick("websearch", createWebSearchTool({
-            provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
-          }))
-        : {}),
-
-      ...pick("ls", tool({
-        description: "List files and directories at a path",
-        inputSchema: z.object({ path: z.string().describe("Absolute directory path, e.g. /workspace") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          return { path, entries: await ws.fs.readdir(path) };
-        },
-      })),
-
-      ...pick("stat", tool({
-        description: "Get metadata for a file or directory: type, size, mtime",
-        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          try {
-            const s = await ws.fs.stat(path);
-            return { path, type: s.isDirectory ? "dir" : "file", size: s.size, mtime: s.mtime, mode: s.mode };
-          } catch {
-            return { error: `Not found: ${path}` };
-          }
-        },
-      })),
-
-      ...pick("mkdir", tool({
-        description: "Create a directory (including parent directories)",
-        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          await ws.fs.mkdir(path, { recursive: true });
-          return { path, created: true };
-        },
-      })),
-
-      ...pick("rm", tool({
-        description: "Delete a file or directory (recursive)",
-        inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          await ws.fs.rm(path, { recursive: true, force: true });
-          return { path, deleted: true };
-        },
-      })),
-
-      ...pick("find", tool({
-        description: "Search for files matching a pattern under a directory",
-        inputSchema: z.object({
-          directory: z.string().describe("Directory to search under, e.g. /workspace"),
-          pattern:   z.string().optional().describe("Substring to match against filename, e.g. '.zig' or '.go'"),
-        }),
-        execute: async ({ directory, pattern }) => {
-          const ws = await getWs();
-          // Pass `pattern` through verbatim - the workspace's `find`
-          // treats `undefined` as "no filter". Coercing to `""` here
-          // would compile to `^$` and zero-out the result set.
-          return { directory, pattern, matches: await ws.fs.find(directory, pattern) };
-        },
-      })),
-
-      ...pick("grep", tool({
-        description: "Search file contents for a string pattern. Returns matching lines.",
-        inputSchema: z.object({
-          pattern:    z.string().describe("String to search for"),
-          path:       z.string().describe("File or directory to search"),
-          ignoreCase: z.boolean().optional().describe("Case-insensitive search"),
-        }),
-        execute: async ({ pattern, path, ignoreCase }) => {
-          const ws = await getWs();
-          return {
-            pattern, path,
-            matches: await ws.fs.grep(pattern, path, ignoreCase ? { ignoreCase } : {}),
-          };
-        },
-      })),
-
-      ...pick("exec", tool({
-        description: [
-          "Run a shell command in the workspace. The workspace exposes",
-          "two backends with different capabilities; pick the cheapest",
-          "one that can run the command.",
-          "",
-          "Backends:",
-          '  - "shell" (default): just-bash in a Dynamic Worker. Cold-',
-          "    start instant, no container, no public network. Good for",
-          "    cat / grep / sed / awk / jq / head / tail / sort / find /",
-          "    file inspection, quick text transformations, `git`",
-          "    (clone / status / diff / log / branch / commit), and",
-          "    `assets publish <path> [<expiry>]` to share a workspace",
-          "    file as a time-limited public URL backed by R2.",
-          "    `artifact create <name>` creates a Cloudflare Artifacts",
-          "    git repo, mints a write token, and registers a git remote",
-          "    in /workspace named <name>. `artifact share <name>`",
-          "    mints a read token and prints one clone-ready URL for",
-          "    sharing an existing repo. Both commands are wired into",
-          "    the shell backend — no public network required. The",
-          "    shell registers `git`, `assets`, and `artifact` as",
-          "    built-in commands that forward to the host workspace, so",
-          "    network-bound subcommands like `git clone`, `assets",
-          "    publish`, and `artifact create/share` work even though",
-          "    the isolate has no public network. Cannot run npm, node,",
-          "    or any binary outside just-bash's built-in command set.",
-          '  - "container": Cloudflare Container running computerd. Full Linux',
-          "    userland with a Node 24 + Bun toolchain on $PATH (node, npm,",
-          "    bun, esbuild, wrangler), public network. Cold start is much",
-          "    slower (warm-pool boot); reach for it when shell can't",
-          "    run the command \u2014 typically `bun install`, `bun test`,",
-          "    `tsc`, `wrangler`, or anything else that needs a real",
-          "    Linux binary. For git itself, prefer shell.",
-          "",
-          `Prefer the dedicated tools first: read / write / ${editToolName} / ls /`,
-          "stat / mkdir / rm / find / grep for file ops. Use exec for",
-          "git plumbing, builds, tests, typechecks, formatters.",
-        ].join("\n"),
-        inputSchema: z.object({
-          command: z.string().describe(
-            "Shell command, e.g. 'git clone https://github.com/owner/repo /workspace/repo' or 'bun test'."
-          ),
-          cwd: z.string().optional().describe("Working directory, defaults to /workspace."),
-          backend: z.enum(["shell", "container"]).optional().describe(
-            "Which backend to run on. Omit for the default ('shell'). " +
-              "Set 'container' when the command needs bun / npm / node / a real " +
-              "language toolchain. Keep 'shell' for git, text manipulation, " +
-              "and anything the just-bash built-ins cover.",
-          ),
-        }),
-        execute: this._execTool(),
-      })),
 
       // git_clone retired in the workspace-next port: the shell
       // backend registers a built-in `git` command that forwards
@@ -1601,19 +1459,19 @@ export class Agent extends Think<Env> {
       //      turn is recovered transparently by the fiber infrastructure.
       //
       // The child DO name is derived from the `runId` the parent passes.
-      // The child resolves `this.parentAgent(Agent)` → `getWorkspace()`
-      // to obtain the shared workspace stub.
+      // The child reaches the shared workspace with
+      // `getWorkspace(await this.parentAgent(Agent))`.
       //
       // `name` is the stable model-visible identifier for the child.
       // We encode it into `runId` so re-invoking the same name in a
       // later tool call re-uses the same child facet and its durable
       // history, enabling multi-turn conversations with a child.
-      ...pick("delegate", agentTool(SubAgent, {
+      delegate: agentTool(SubAgent, {
         description: [
           "Delegate a self-contained task to a named sub-agent that shares",
           "this workspace (/workspace). The sub-agent has the same file",
-          `and exec tools as this agent (read/write/${editToolName}/ls/stat/mkdir/rm/`,
-          "find/grep/exec/webfetch/websearch) but cannot delegate further.",
+          "and exec tools as this agent (read/ls/write/edit/exec/webfetch/",
+          "websearch) but cannot delegate further.",
           "",
           "Good use-cases:",
           "  \u2022 Fan out parallel work: start several children with distinct",
@@ -1637,9 +1495,9 @@ export class Agent extends Think<Env> {
             .describe("Full task description. Be explicit - the sub-agent has no conversation context beyond what you send here."),
         }),
         displayName: "Sub-agent",
-      })),
+      }),
 
-      ...pick("schedule", tool({
+      schedule: tool({
         description: [
           "Schedule future work for yourself: a one-off reminder or a",
           "recurring job. When a task fires you are woken with its prompt",
@@ -1661,9 +1519,9 @@ export class Agent extends Think<Env> {
         ].join("\n"),
         inputSchema: scheduleToolSchema,
         execute: (input) => this._runScheduleTool(input),
-      })),
+      }),
 
-      ...pick("cloudflare", tool({
+      cloudflare: tool({
         description: [
           "Access the Cloudflare API on behalf of the current user's own",
           "Cloudflare account, via the official Cloudflare MCP server. Once",
@@ -1690,7 +1548,7 @@ export class Agent extends Think<Env> {
           ),
         }),
         execute: (input) => this._runCloudflareTool(input.command),
-      })),
+      }),
     };
   }
 
@@ -1921,60 +1779,42 @@ export class Agent extends Think<Env> {
   // sees a terminal answer and the queue drains.
 
   /**
-  /**
-   * Build the (non-streaming) exec tool execute function.
+   * Re-wrap a tool set so every call runs under `runCancellable`.
    *
-   * The new @cloudflare/computer exec surface returns a stream
-   * client-side, but only the result() shape survives the Workers
-   * RPC boundary between the Agent DO and the Sandbox DO. Until a
-   * byte-framed streaming exec lands on WorkspaceShellStub, the
-   * agent runs commands to completion and emits a single tool
-   * result. This drops live-output streaming in the UI for long
-   * builds; turn-level Stop still cancels via runCancellable.
+   * The tools themselves come from the package, so this is the one
+   * place cancellation is bolted on: the wrapper keeps the tool's
+   * schema and description untouched and only swaps `execute` for one
+   * that registers the call's AbortController before awaiting it.
    */
-  private _execTool() {
-    const self = this;
-    return async (
-      {
-        command,
-        cwd,
-        backend,
-      }: { command: string; cwd?: string; backend?: "shell" | "container" },
-      opts: { toolCallId: string; abortSignal?: AbortSignal },
-    ) => {
-      // Resolve the backend the workspace will actually run against
-      // *now*, before kicking off runCancellable, so error reports
-      // name the right backend even when the model omitted it.
-      const resolvedBackend = backend ?? (self.env.LOADER ? "shell" : "container");
-      return self.runCancellable(
-        opts,
-        async () => {
-          const ws = await self._localWorkspace();
-          const handle = await ws.shell.exec(command, {
-            cwd,
-            encoding: "utf8",
-            backend,
-          });
-          const result = await handle.result();
-          return buildExecToolOutput({
-            command,
-            cwd,
-            requestedBackend: backend,
-            resolvedBackend,
-          }, result);
-        },
-        {
-          onError: (err) => buildExecToolError({
-            command,
-            cwd,
-            requestedBackend: backend,
-            resolvedBackend,
-          }, err),
-        },
-      );
-    };
+  private cancellable(tools: ToolSet): ToolSet {
+    const wrapped: ToolSet = {};
+    for (const [name, def] of Object.entries(tools)) {
+      const execute = (def as unknown as {
+        execute?: (input: unknown, opts: unknown) => unknown;
+      }).execute;
+      if (typeof execute !== "function") {
+        wrapped[name] = def;
+        continue;
+      }
+      wrapped[name] = {
+        ...def,
+        execute: (
+          input: unknown,
+          opts: { toolCallId?: string; abortSignal?: AbortSignal },
+        ) =>
+          this.runCancellable(
+            opts,
+            async () => execute(input, opts),
+            {
+              onError: (err) => ({
+                error: { details: err instanceof Error ? err.message : String(err) },
+              }),
+            },
+          ),
+      } as Tool;
+    }
+    return wrapped;
   }
-
 
   /**
    * Wrap a tool's work so it observes both the turn-level abort signal and a
@@ -2010,13 +1850,12 @@ export class Agent extends Think<Env> {
 
   /**
    * Cancel a specific in-flight tool call by id. No-op when the id has
-   * already settled or was never registered (e.g. a fast tool like `read`
-   * that doesn't go through `runCancellable`). The matching tool resolves
+   * already settled or was never registered. The matching tool resolves
    * with `{ aborted: true }` shortly after, the model loop sees a terminal
    * answer for that call, and the turn proceeds.
    *
-   * The underlying workspace promise is *not* killed - the workspace SDK
-   * doesn't accept abort signals - it's allowed to drain in the background.
+   * The underlying workspace promise is *not* killed - it's allowed to
+   * drain in the background.
    */
   @callable()
   async cancelToolCall(toolCallId: string): Promise<{ cancelled: boolean }> {
@@ -2227,37 +2066,31 @@ export class SubAgent extends Think<Env> {
   // ── Workspace access ---------------------------------
 
   /**
-   * Cache of the workspace stub fetched from the parent Agent DO.
-   * The stub is an RpcTarget that wraps the parent's live Workspace,
-   * so every fs/shell call crosses the DO-RPC boundary but operates
-   * on the same underlying VFS.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _ws: any = null;
-
-  /**
-   * Fetch the parent's WorkspaceStub via Workers RPC.
+   * Cached client over the parent Agent's Workspace.
    *
-   * The parent DO exposes `getWorkspace()` as a public RPC so both
-   * the worker backend's shell isolate and this sub-agent can reach
-   * the same workspace without owning it. The RPC returns a
-   * `Stub<WorkspaceStub>` (not a `WorkspaceStub` directly) because
-   * Workers RPC wraps all `RpcTarget` return values in `Stub<T>`.
-   * The stub surface (`fs`, `shell`) is identical at runtime.
+   * `getWorkspace(stub)` calls the parent's `__getWorkspaceStub()` and
+   * wraps what comes back, so `fs` / `shell` calls cross the DO-RPC
+   * boundary but operate on the same underlying VFS - and `shell.exec`
+   * gets the same handle surface (result / stream / kill) the parent
+   * has in-isolate.
    */
-  private async _getWorkspace(): Promise<WorkspaceStub> {
-    if (this._ws) return this._ws as WorkspaceStub;
+  private _ws: WorkspaceClient | null = null;
+
+  private async _getWorkspace(): Promise<WorkspaceClient> {
+    if (this._ws) return this._ws;
     const parent = await this.parentAgent(Agent);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    this._ws = await (parent as any).getWorkspace();
-    return this._ws as WorkspaceStub;
+    // Workers RPC wraps RpcTarget returns in `Stub<T>`, so the stub's
+    // `__getWorkspaceStub()` signature is a shade off the host shape
+    // `getWorkspace` declares. Identical at runtime.
+    this._ws = await getWorkspace(parent as unknown as WorkspaceHandle);
+    return this._ws;
   }
 
   // ── Think overrides --------------------------------
 
   override getSystemPrompt(): string {
     return buildWorkerSystemPrompt({
-      editToolName: this.env.OPENAI_API_KEY ? "apply_patch" : "edit",
+      publish: false,
     });
   }
 
@@ -2291,152 +2124,56 @@ export class SubAgent extends Think<Env> {
     };
   }
 
-  override getTools() {
-    // Close over _getWorkspace so every tool lazily resolves the stub.
-    const getWs = () => this._getWorkspace();
-    const pick = <T extends Record<string, unknown>>(name: string, def: T) =>
-      ({ [name]: def });
-    const editToolName = this.env.OPENAI_API_KEY ? "apply_patch" : "edit";
-
+  override getTools(): ToolSet {
+    // Same package tool set as the parent, over the parent's workspace
+    // instead of a locally-owned one. No `delegate`: children don't
+    // spawn further children.
     return {
-      ...pick("read",  createReadTool({ store: makeLazyStubStore(getWs) })),
-      ...pick("write", createWriteTool({ store: makeLazyStubStore(getWs) })),
-      ...(this.env.OPENAI_API_KEY
-        ? pick("apply_patch", createApplyPatchTool({ store: makeLazyStubStore(getWs) }))
-        : pick("edit", createEditTool({ store: makeLazyStubStore(getWs) }))),
+      ...createAITools({
+        workspace: this._lazyWorkspace(),
+        shell: {
+          defaultBackend: defaultExecBackend(this.env),
+          backends: execBackends(this.env),
+        },
+      }),
       ...buildBrowserTools({
         browser: this.env.BROWSER as unknown as import("./browser-tools.js").BuildBrowserToolsDeps["browser"],
         ai: this.env.AI,
-        getFs: async () => (await getWs()).fs,
+        getFs: async () => (await this._getWorkspace()).fs,
         vision: Boolean(this.env.OPENAI_API_KEY),
         baseUrl: (this.env as { APP_BASE_URL?: string }).APP_BASE_URL,
         threadId: this.name,
       }),
       ...(this.env.BRAVE_API_KEY
-        ? pick("websearch", createWebSearchTool({
-            provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
-          }))
+        ? {
+            websearch: createWebSearchTool({
+              provider: createBraveSearchProvider({ apiKey: this.env.BRAVE_API_KEY }),
+            }),
+          }
         : {}),
-
-      ...pick("ls", tool({
-        description: "List files and directories at a path",
-        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          return { path, entries: await ws.fs.readdir(path) };
-        },
-      })),
-
-      ...pick("stat", tool({
-        description: "Get metadata for a file or directory: type, size, mtime",
-        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          try {
-            const s = await ws.fs.stat(path);
-            return { path, type: s.isDirectory ? "dir" : "file", size: s.size, mtime: s.mtime, mode: s.mode };
-          } catch {
-            return { error: `Not found: ${path}` };
-          }
-        },
-      })),
-
-      ...pick("mkdir", tool({
-        description: "Create a directory (including parent directories)",
-        inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          await ws.fs.mkdir(path, { recursive: true });
-          return { path, created: true };
-        },
-      })),
-
-      ...pick("rm", tool({
-        description: "Delete a file or directory (recursive)",
-        inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
-        execute: async ({ path }) => {
-          const ws = await getWs();
-          await ws.fs.rm(path, { recursive: true, force: true });
-          return { path, deleted: true };
-        },
-      })),
-
-      ...pick("find", tool({
-        description: "Search for files matching a pattern under a directory",
-        inputSchema: z.object({
-          directory: z.string().describe("Directory to search under"),
-          pattern:   z.string().optional().describe("Substring to match against filename"),
-        }),
-        execute: async ({ directory, pattern }) => {
-          const ws = await getWs();
-          return { directory, pattern, matches: await ws.fs.find(directory, pattern) };
-        },
-      })),
-
-      ...pick("grep", tool({
-        description: "Search file contents for a string pattern. Returns matching lines.",
-        inputSchema: z.object({
-          pattern:    z.string().describe("String to search for"),
-          path:       z.string().describe("File or directory to search"),
-          ignoreCase: z.boolean().optional().describe("Case-insensitive search"),
-        }),
-        execute: async ({ pattern, path, ignoreCase }) => {
-          const ws = await getWs();
-          return {
-            pattern, path,
-            matches: await ws.fs.grep(pattern, path, ignoreCase ? { ignoreCase } : {}),
-          };
-        },
-      })),
-
-      ...pick("exec", tool({
-        description: [
-          "Run a shell command in the workspace (shared with the parent agent).",
-          "Backends:",
-          '  - "shell" (default): just-bash in a Dynamic Worker. Instant boot.',
-          "    Built-in commands: git, assets (publish), artifact (create/share).",
-          '  - "container": full Linux userland with Node 24 + Bun. Use for bun/npm/node/tsc/wrangler.',
-          `Prefer the dedicated tools first: read/write/${editToolName}/ls/stat/mkdir/rm/find/grep.`,
-          "Key shell commands:",
-          "  artifact create <name>  — create a git repo, mint a write token, register remote.",
-          "  artifact share <name>   — mint a read token, print a clone-ready URL.",
-          "  assets publish <path>   — share a workspace file as a public R2 URL.",
-        ].join("\n"),
-        inputSchema: z.object({
-          command: z.string().describe("Shell command to run"),
-          cwd:     z.string().optional().describe("Working directory, defaults to /workspace"),
-          backend: z.enum(["shell", "container"]).optional().describe(
-            "Backend to use. Omit for 'shell'. Set 'container' for bun/npm/node/tsc.",
-          ),
-        }),
-        execute: async (
-          { command, cwd, backend },
-          opts: { toolCallId: string; abortSignal?: AbortSignal },
-        ) => {
-          const resolvedBackend = backend ?? (this.env.LOADER ? "shell" : "container");
-          // Route exec through the parent's workspace shell so it runs
-          // in the container attached to the parent's session.
-          try {
-            const ws = await getWs();
-            const handle = await ws.shell.exec(command, { cwd, encoding: "utf8", backend });
-            const result = await handle.result();
-            return buildExecToolOutput({
-              command,
-              cwd,
-              requestedBackend: backend,
-              resolvedBackend,
-            }, result);
-          } catch (err) {
-            return buildExecToolError({
-              command,
-              cwd,
-              requestedBackend: backend,
-              resolvedBackend,
-            }, err);
-          }
-        },
-      })),
     };
+  }
+
+  /**
+   * A `WorkspaceClient`-shaped façade that resolves the parent's client
+   * on first call rather than at tool-construction time. `getTools()`
+   * is synchronous but the parent stub is fetched over RPC, so every
+   * `fs` / `shell` method forwards through the promise.
+   */
+  private _lazyWorkspace(): WorkspaceClient {
+    const surface = (key: "fs" | "shell") =>
+      new Proxy(
+        {},
+        {
+          get: (_target, method: string) =>
+            (...args: unknown[]) =>
+              this._getWorkspace().then((ws) => {
+                const target = ws[key] as Record<string, (...a: unknown[]) => unknown>;
+                return target[method](...args);
+              }),
+        },
+      );
+    return { fs: surface("fs"), shell: surface("shell") } as unknown as WorkspaceClient;
   }
 
   // ── Agent-tool output --------------------------------
@@ -2551,98 +2288,6 @@ export function renderTranscriptForSummary(
     lines.push(`${speaker}: ${text}`);
   }
   return lines.join("\n");
-}
-
-// ── helpers for the buildTools rewrite ──────────────────────────
-
-/**
- * Build a `FileStore` that lazily resolves the underlying
- * `WorkspaceFileStore` per call. Lets the fs-tools (`read` /
- * `write` / `edit`) close over a getter rather than a stub fixed at
- * tool-construction time - important because the agent's Workspace
- * stub is resolved asynchronously through the warm pool and the
- * cache can drop on a Sandbox cycle.
- */
-function makeLazyStore(
-  getWs: () => Promise<Workspace>,
-): FileStore {
-  // Build the inner store on first use, but rebuild if the
-  // Workspace identity changes (a future workspace recycle or a
-  // thread reset that swaps the instance).
-  let cached: { ws: Workspace; store: FileStore } | null = null;
-  const get = async (): Promise<FileStore> => {
-    const ws = await getWs();
-    if (!cached || cached.ws !== ws) {
-      cached = { ws, store: new WorkspaceFileStore(adaptForFsTools(ws)) };
-    }
-    return cached.store;
-  };
-  return {
-    async stat(path) {
-      return (await get()).stat(path);
-    },
-    async readAll(path) {
-      return (await get()).readAll(path);
-    },
-    async write(path, content, opts) {
-      return (await get()).write(path, content, opts);
-    },
-    async delete(path) {
-      const store = await get();
-      if (!store.delete) throw new Error("delete is not supported by this file store");
-      return store.delete(path);
-    },
-    async *readChunks(path, off, len) {
-      const store = await get();
-      for await (const chunk of store.readChunks(path, off, len)) {
-        yield chunk;
-      }
-    },
-  };
-}
-
-/**
- * Like `makeLazyStore` but for a `WorkspaceStub` (used by SubAgent
- * whose workspace comes from the parent via RPC rather than being
- * owned locally).
- *
- * The cache key is the stub reference itself. A new stub object from
- * a reconnect will rebuild the inner FileStore, same as the Workspace
- * variant does.
- */
-function makeLazyStubStore(
-  getStub: () => Promise<WorkspaceStub>,
-): FileStore {
-  let cached: { stub: WorkspaceStub; store: FileStore } | null = null;
-  const get = async (): Promise<FileStore> => {
-    const stub = await getStub();
-    if (!cached || cached.stub !== stub) {
-      cached = { stub, store: new WorkspaceFileStore(adaptForFsTools(stub)) };
-    }
-    return cached.store;
-  };
-  return {
-    async stat(path) {
-      return (await get()).stat(path);
-    },
-    async readAll(path) {
-      return (await get()).readAll(path);
-    },
-    async write(path, content, opts) {
-      return (await get()).write(path, content, opts);
-    },
-    async delete(path) {
-      const store = await get();
-      if (!store.delete) throw new Error("delete is not supported by this file store");
-      return store.delete(path);
-    },
-    async *readChunks(path, off, len) {
-      const store = await get();
-      for await (const chunk of store.readChunks(path, off, len)) {
-        yield chunk;
-      }
-    },
-  };
 }
 
 /**
