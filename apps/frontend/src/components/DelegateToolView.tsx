@@ -87,11 +87,14 @@ interface DelegateToolViewProps {
 
 type StatusKind = "running" | "ok" | "fail";
 
+/** Run state whose child parts are AI SDK UI parts, as the agent emits them. */
+type ChildRunState = AgentToolRunState<UIMessage["parts"][number]>;
+
 function resolveStatus(
   state?: string,
   output?: unknown,
   errorText?: string,
-  run?: AgentToolRunState
+  run?: ChildRunState
 ): { kind: StatusKind; label: string } {
   if (errorText) return { kind: "fail", label: errorText };
 
@@ -224,7 +227,7 @@ export function DelegateToolView({
   const { getRunsForToolCall } = useAgentToolEvents({ agent: safeAgent as Parameters<typeof useAgentToolEvents>[0]["agent"] });
   const runs = toolCallId ? getRunsForToolCall(toolCallId) : [];
   // There should be exactly one run per delegate call — take the first.
-  const run = runs[0] as AgentToolRunState | undefined;
+  const run = runs[0] as ChildRunState | undefined;
 
   const status = resolveStatus(state, output, errorText, run);
   const isRunning = status.kind === "running";
