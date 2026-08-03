@@ -35,12 +35,14 @@ const JAVASCRIPT_DESCRIPTION = [
   "but it runs JavaScript, not bash - a lightweight alternative to",
   "'shell' that is faster and cheaper than 'container' at the price of",
   "writing real code. The `command` field is the module source; export",
-  "a default function (or value) - its return value comes back as JSON",
-  "in the result's `value`, and an optional JSON `input` is passed to",
-  "the default function as its argument. Interact with the workspace",
-  "filesystem through `node:fs/promises` (readFile / writeFile /",
-  "readdir / mkdir / ...) and make network requests with `fetch()` -",
-  "the isolate has open outbound network. `console.log` / `console.error`",
+  "a default function (or value) - its return value comes back as the",
+  "JSON `result`, and an optional JSON `input` is passed to the default",
+  "function as its argument. Pass `env` to set per-execution",
+  "environment variables, exposed through `process.env`. Interact with",
+  "the workspace filesystem through `node:fs/promises` (readFile /",
+  "writeFile / readdir / mkdir / ...) and make network requests with",
+  "`fetch()` - the isolate has open outbound network. `console.log` /",
+  "`console.error`",
   "are captured as stdout / stderr. No shell, no binaries, no process",
   "spawning: reach for 'shell' for text plumbing (grep / sed / git) and",
   "'container' when you need a real Node/Bun toolchain. Prefer this",
@@ -82,7 +84,7 @@ export function defaultExecBackend(env: Env): ExecBackend {
 
 /**
  * Backends that carry structured JSON across the boundary — they
- * accept an `input` argument and return a `value`. Only the module
+ * accept an `input` argument and return a `result`. Only the module
  * backend ('javascript') does; the command backends ('shell',
  * 'container') run a command line and never set a result value.
  */

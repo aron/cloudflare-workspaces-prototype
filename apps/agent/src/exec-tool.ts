@@ -2,23 +2,25 @@
  * Enhanced `exec` tool.
  *
  * The package's built-in `createExecTool` only sends `command` / `cwd`
- * / `backend` and returns `stdout` / `stderr` / `exitCode`. That is
- * exactly right for the command backends ('shell', 'container'), but
- * the 'javascript' backend also carries structured JSON across the
- * boundary:
+ * / `backend` and returns `stdout` / `stderr` / `exitCode`. This
+ * app-owned superset also threads:
  *
- *   - `input`  — an optional JSON value handed to the module's default
- *                export as its argument (`runtime.exec`'s `input`
- *                option). Command backends ignore it.
- *   - `value`  — the module's JSON return value, surfaced from the
- *                execution result. Command backends never set it.
+ *   - `env`    — per-execution environment variables, accepted by
+ *                every backend: command backends inherit them for the
+ *                spawned command, and the JavaScript backend exposes
+ *                them through `process.env`. This execution only.
+ *   - `input`  — an optional JSON value handed to the JavaScript
+ *                module's default export as its argument
+ *                (`runtime.exec`'s `input` option). Command backends
+ *                ignore it.
+ *   - `result` — the JavaScript module's JSON return value, surfaced
+ *                from the execution result when present. Command
+ *                backends never set it.
  *
- * This app-owned tool is a thin superset of the built-in: same schema
- * for `command` / `cwd` / `backend`, same UTF-8-safe truncation for
- * stdout / stderr, plus the `input` field and the `value` in the
- * result. It replaces `tools.exec` after `createAITools` runs so the
- * rest of the package's tool surface (read / write / edit / ...) is
- * untouched.
+ * Same schema otherwise (`command` / `cwd` / `backend`) and the same
+ * UTF-8-safe truncation for stdout / stderr. It replaces `tools.exec`
+ * after `createAITools` runs so the rest of the package's tool surface
+ * (read / write / edit / ...) is untouched.
  */
 
 import { tool, type Tool } from "ai";
@@ -36,6 +38,7 @@ interface ExecWorkspaceLike {
         cwd?: string;
         encoding: "utf8";
         backend?: string;
+        env?: Record<string, string>;
         input?: WorkspaceRuntimeValue;
       },
     ): Promise<{
@@ -53,7 +56,7 @@ export interface ExecToolOptions {
   workspace: ExecWorkspaceLike;
   backends: Record<string, { description: string }>;
   defaultBackend: string;
-  /** Backends that accept/return structured JSON (input + value). */
+  /** Backends that accept/return structured JSON (input + result). */
   jsonBackends?: readonly string[];
   maxBytes?: number;
 }
@@ -98,8 +101,9 @@ export function createExecTool(options: ExecToolOptions): Tool {
     "",
     `Default backend: ${JSON.stringify(options.defaultBackend)}. Try this first for any command you're not sure about.`,
     jsonBackends.length > 0
-      ? `For ${jsonBackends.map((id) => JSON.stringify(id)).join(" / ")}, the \`command\` is ES module source: export a default function or value. Pass \`input\` to hand a JSON argument to that function; its JSON return value comes back as \`value\`.`
+      ? `For ${jsonBackends.map((id) => JSON.stringify(id)).join(" / ")}, the \`command\` is ES module source: export a default function or value. Pass \`input\` to hand a JSON argument to that function; its JSON return value comes back as \`result\`.`
       : "",
+    "Pass `env` to set per-execution environment variables (inherited by the command, or exposed through process.env on the JavaScript backend); they apply to this call only.",
     "Prefer the dedicated read, write, and edit tools for file operations. Long output is truncated to keep tool replies small.",
   ]
     .filter(Boolean)
@@ -126,6 +130,12 @@ export function createExecTool(options: ExecToolOptions): Tool {
         ),
       cwd: z.string().optional().describe("Working directory. Defaults to the workspace root."),
       backend: backendSchema,
+      env: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          "Optional environment variables for this execution only. Command backends inherit them; the JavaScript backend exposes them through process.env.",
+        ),
       input: z
         .unknown()
         .optional()
@@ -133,7 +143,7 @@ export function createExecTool(options: ExecToolOptions): Tool {
           "Optional JSON value passed to a JavaScript module's default export as its argument. Ignored by command backends.",
         ),
     }),
-    execute: async ({ command, cwd, backend, input }) => {
+    execute: async ({ command, cwd, backend, env, input }) => {
       const selectedBackend = backend ?? options.defaultBackend;
       const acceptsJson = jsonBackends.includes(selectedBackend);
       try {
@@ -141,6 +151,7 @@ export function createExecTool(options: ExecToolOptions): Tool {
           cwd,
           encoding: "utf8",
           backend: selectedBackend,
+          ...(env !== undefined ? { env } : {}),
           ...(acceptsJson && input !== undefined
             ? { input: input as WorkspaceRuntimeValue }
             : {}),
@@ -153,7 +164,7 @@ export function createExecTool(options: ExecToolOptions): Tool {
           exitCode: result.exitCode,
           stdout: truncate(result.stdout, maxBytes),
           stderr: truncate(result.stderr, maxBytes),
-          ...(acceptsJson && result.value !== undefined ? { value: result.value } : {}),
+          ...(result.value !== undefined ? { result: result.value } : {}),
         };
       } catch (err) {
         return {
