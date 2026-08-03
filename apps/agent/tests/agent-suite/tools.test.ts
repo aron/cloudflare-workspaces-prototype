@@ -27,7 +27,7 @@ const EXPECTED_TOOLS = [
   // no R2 credentials, so the workspace is built without an assets
   // client.
   "read", "ls", "write", "edit",
-  "exec",  // takes an optional backend: 'shell' | 'container'; 'shell' includes a built-in git command
+  "exec",  // takes an optional backend: 'shell' | 'javascript' | 'container'; 'shell' includes a built-in git command, 'javascript' evaluates an ES module with JSON input/value
   "webfetch", "websearch",  // websearch only because BRAVE_API_KEY is set in wrangler.test
   "delegate",  // spawn a named sub-agent that shares this workspace
   "schedule",  // create/list/cancel one-off or recurring tasks

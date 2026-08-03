@@ -12,7 +12,7 @@
  * container takes the default slot.
  */
 
-export type ExecBackend = "shell" | "container";
+export type ExecBackend = "shell" | "javascript" | "container";
 
 const SHELL_DESCRIPTION = [
   "just-bash in a Dynamic Worker. Cold-start instant, no container,",
@@ -27,6 +27,25 @@ const SHELL_DESCRIPTION = [
   "create a Cloudflare Artifacts git repo with a registered remote or",
   "mint a clone-ready read URL. Cannot run npm, node, bun, or any",
   "binary outside just-bash's built-in command set.",
+].join(" ");
+
+const JAVASCRIPT_DESCRIPTION = [
+  "Evaluates an ES module in a Dynamic Worker instead of running a",
+  "shell command. Same instant cold-start and low cost as 'shell',",
+  "but it runs JavaScript, not bash - a lightweight alternative to",
+  "'shell' that is faster and cheaper than 'container' at the price of",
+  "writing real code. The `command` field is the module source; export",
+  "a default function (or value) - its return value comes back as JSON",
+  "in the result's `value`, and an optional JSON `input` is passed to",
+  "the default function as its argument. Interact with the workspace",
+  "filesystem through `node:fs/promises` (readFile / writeFile /",
+  "readdir / mkdir / ...) and make network requests with `fetch()` -",
+  "the isolate has open outbound network. `console.log` / `console.error`",
+  "are captured as stdout / stderr. No shell, no binaries, no process",
+  "spawning: reach for 'shell' for text plumbing (grep / sed / git) and",
+  "'container' when you need a real Node/Bun toolchain. Prefer this",
+  "plane over 'container' whenever the work fits a self-contained",
+  "script - a fetch-and-transform, a JSON rewrite, a filesystem walk.",
 ].join(" ");
 
 const CONTAINER_DESCRIPTION = [
@@ -46,7 +65,12 @@ const CONTAINER_DESCRIPTION = [
  */
 export function execBackends(env: Env): Record<string, { description: string }> {
   return {
-    ...(env.LOADER ? { shell: { description: SHELL_DESCRIPTION } } : {}),
+    ...(env.LOADER
+      ? {
+          shell: { description: SHELL_DESCRIPTION },
+          javascript: { description: JAVASCRIPT_DESCRIPTION },
+        }
+      : {}),
     container: { description: CONTAINER_DESCRIPTION },
   };
 }
@@ -54,4 +78,14 @@ export function execBackends(env: Env): Record<string, { description: string }> 
 /** The backend an `exec` call without an explicit `backend` runs on. */
 export function defaultExecBackend(env: Env): ExecBackend {
   return env.LOADER ? "shell" : "container";
+}
+
+/**
+ * Backends that carry structured JSON across the boundary — they
+ * accept an `input` argument and return a `value`. Only the module
+ * backend ('javascript') does; the command backends ('shell',
+ * 'container') run a command line and never set a result value.
+ */
+export function jsonExecBackends(env: Env): ExecBackend[] {
+  return env.LOADER ? ["javascript"] : [];
 }

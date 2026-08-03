@@ -122,7 +122,7 @@ const TOOL_SNIPPETS: Array<readonly [string, string]> = [
   ["ls",        "list files and directories at a path"],
   ["write",     "create or overwrite a file"],
   ["edit",      "surgical edit of an existing file"],
-  ["exec",      "run a shell command on the 'shell' (default) or 'container' backend"],
+  ["exec",      "run a command on the 'shell' (default, just-bash), 'javascript' (evaluate an ES module; JSON input/value; node:fs/promises + fetch), or 'container' (full Node/Bun toolchain) backend"],
   ["publish",   "publish a workspace file and get a time-limited public URL"],
   ["webfetch",  "fetch a URL as Markdown (rendered in a real browser, so JS-heavy pages work)"],
   ["screenshot", "render a webpage in a headless browser and capture a screenshot (png/jpeg/webp, fullPage, selector, viewport)"],
@@ -167,7 +167,10 @@ const GUIDELINES = [
   // so the model sees the steering hint in the same pass as the rest
   // of the file-tool rules.
   "Prefer read / ls over exec for inspecting known paths; use exec on the default 'shell' backend for grep / find / sed sweeps — it is just-bash in an isolate, so those are cheap",
-  "exec defaults to the 'shell' backend (just-bash, instant boot, built-in git). Pass backend: 'container' when the command needs a real Node/Bun binary (bun, npm, node, tsc, wrangler, esbuild). Prefer `bun install` over `npm install` in the sandbox because it is much faster",
+  "exec has three backends. 'shell' (default): just-bash in an isolate, instant boot, built-in git — use for text plumbing (grep / find / sed) and git. 'javascript': evaluates an ES module in the same kind of cheap isolate — a lightweight alternative to 'container' that is faster and cheaper but needs real code; export a default function, pass a JSON `input`, get a JSON `value` back, and use node:fs/promises for files and fetch() for network. 'container': full Node/Bun toolchain (bun, npm, node, tsc, wrangler, esbuild) — reach for it only when the work needs a real binary",
+  "Prefer the 'javascript' backend over 'container' whenever the task fits a self-contained script — a fetch-and-transform, a JSON rewrite, a filesystem walk — because the isolate boots in tens of ms while the container can be a cold-start away. Drop to 'container' when you genuinely need npm/bun/node or another Linux binary; prefer `bun install` over `npm install` there because it is much faster",
+  "'javascript' backend shape: `command` is ES module source that must `export default`. Export a value or a function; a function receives the JSON `input` as its argument and its return value comes back as the result's JSON `value`. Read/write the workspace with node:fs/promises (paths are absolute under /workspace, or relative to `cwd`), and call fetch() for network. Example — read a file: `import { readFile } from 'node:fs/promises'; export default async () => await readFile('/workspace/hello.js', 'utf-8');`. Example — fetch + transform with input: `export default async ({ url }) => { const r = await fetch(url); return { status: r.status, body: await r.text() }; };` run with input `{ \"url\": \"https://example.com\" }`",
+  "To run a longer script on the 'javascript' backend, write it to the workspace first with the write tool, then exec a one-line module that re-exports it: `export { default } from './myscript.js';` (path relative to `cwd`, or absolute under /workspace). This keeps large code in a real file you can read/edit/version rather than inlining it in every exec call, and lets several exec calls re-run the same script",
 
   // Hackspace-specific meta-rules.
   "When the user asks what you can do, how to get started, or how to use this agent, read the capabilities-overview skill and answer from it",
@@ -213,11 +216,17 @@ When a skill file references a relative path, resolve it against the skill direc
 // then how do I behave in it".
 
 const EXECUTION_BLOCK = `\
-Execution environment — two planes the agent operates across:
+Execution environment — the agent operates across a few planes:
 
 - Agent (this conversation): a Durable Object running on Cloudflare's
   edge. Owns the conversation history and the workspace VFS
   (SQLite-backed inside the DO). All tools dispatch from here.
+- Isolate backends ('shell' and 'javascript'): Dynamic Workers booted
+  next to the DO. \`exec\` runs here for those backends. Instant
+  cold-start, cheap, no separate container. 'shell' is just-bash;
+  'javascript' evaluates an ES module that touches the workspace via
+  node:fs/promises and reaches the network via fetch(). Both see the
+  DO's VFS directly.
 - Sandbox container: a companion container assigned to this session.
   \`exec\` runs inside it when \`backend: 'container'\` is set. The file
   tools (\`read\`/\`ls\`/\`write\`/\`edit\`) operate on the DO's VFS
@@ -226,8 +235,9 @@ Execution environment — two planes the agent operates across:
 
 Latency tiers (useful when picking a tool):
 - File tools touch the DO-local VFS — single-digit ms.
-- \`exec\` round-trips through the container — tens of ms warm,
-  hundreds when the container is cold.`;
+- \`exec\` on 'shell' / 'javascript' boots an isolate — tens of ms.
+- \`exec\` on 'container' round-trips through the container — tens of
+  ms warm, hundreds when the container is cold.`;
 
 const WORKSPACE_LAYOUT_BLOCK = `\
 Workspace layout:

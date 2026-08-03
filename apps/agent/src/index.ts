@@ -17,6 +17,11 @@ import { Sandbox } from "./sandbox.js";
 // `ctx.exports.WorkspaceProxy(...)` / `ctx.exports.WorkspaceServiceProxy(...)`
 // resolve at runtime.
 import { WorkspaceProxy, WorkspaceServiceProxy } from "@cloudflare/computer";
+// OutboundProxy is the open-internet Fetcher the `javascript` exec
+// backend hands its Dynamic Worker as `globalOutbound`, so in-isolate
+// `fetch()` reaches the public network. Exported here so the
+// `ctx.exports.OutboundProxy()` loopback binding resolves at runtime.
+import { OutboundProxy } from "./outbound.js";
 import { WarmPool } from "./warm-pool.js";
 import { resolveContainerId, poolStats, primePool } from "./pool.js";
 import { App, APP_DO_NAME } from "./app.js";
@@ -28,7 +33,7 @@ import {
 } from "./identity.js";
 import { resolveBaseUrl, withBaseUrl } from "./base-url.js";
 
-export { Agent, SubAgent, App, Room, Sandbox, WarmPool, WorkspaceProxy, WorkspaceServiceProxy };
+export { Agent, SubAgent, App, Room, Sandbox, WarmPool, WorkspaceProxy, WorkspaceServiceProxy, OutboundProxy };
 
 type Variables = { identity: AccessIdentity; baseUrl: string };
 

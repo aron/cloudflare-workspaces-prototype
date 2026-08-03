@@ -42,6 +42,7 @@ import {
   type ThinkWorkspaceCompatibility,
   Workspace,
   type WorkspaceBackend,
+  type WorkspaceRegisteredBackend,
   type WorkspaceClient,
   type WorkspaceHandle,
   type WorkspaceStub,
@@ -49,6 +50,7 @@ import {
 import { createAssets } from "@cloudflare/computer/assets";
 import { CloudflareContainerBackend } from "@cloudflare/computer/backends/container";
 import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { createAITools } from "@cloudflare/computer/tools";
 import { tracing } from "cloudflare:workers";
@@ -285,18 +287,27 @@ export class Agent extends Think<Env> {
     // toolchains the model explicitly opts into via `backend:
     // 'container'`.
     //
-    //   [0]  WorkerBackend             id: 'shell'      (default)
-    //   [1]  CloudflareContainerBackend id: 'container'  (warm pool)
+    //   [0]  WorkerShellBackend         id: 'shell'      (default)
+    //   [1]  WorkerJavaScriptBackend    id: 'javascript' (lightweight)
+    //   [2]  CloudflareContainerBackend id: 'container'  (warm pool)
+    //
+    // The 'javascript' plane is a second isolate backend: same instant
+    // cold-start and cost profile as 'shell', but instead of a bash
+    // command line it evaluates an ES module. User code reads and
+    // writes the workspace through node:fs/promises and reaches the
+    // public network through fetch() (wired via the OutboundProxy
+    // loopback below). It's the cheap plane for anything expressible as
+    // a small script; 'container' stays reserved for real binaries.
     //
     // env.LOADER is optional at construction time because the agent-
     // suite vitest fixtures run against a stripped wrangler config
     // without a `worker_loaders` binding (the private-beta binding
     // isn't surfaced by vitest-pool-workers, and tests never exec).
-    // When the loader binding isn't there, the shell backend isn't
+    // When the loader binding isn't there, neither isolate backend is
     // constructed and the container takes the default slot so the
     // workspace still boots; in prod LOADER is present and the
     // shell takes the lead.
-    const backends: WorkspaceBackend[] = [];
+    const backends: WorkspaceRegisteredBackend[] = [];
     if (this.env.LOADER) {
       backends.push(
         new WorkerShellBackend({
@@ -304,6 +315,26 @@ export class Agent extends Think<Env> {
           loader: this.env.LOADER,
           workspace: { binding: "Agent", id: this.ctx.id.toString() },
           ctx: this.ctx,
+        }),
+      );
+      backends.push(
+        new WorkerJavaScriptBackend({
+          id: "javascript",
+          loader: this.env.LOADER,
+          // read-write so in-isolate node:fs/promises can mutate the
+          // workspace, matching what the shell plane can do.
+          access: "read-write",
+          // Open outbound so in-isolate fetch() reaches the public
+          // network, matching the container plane's posture. The
+          // Fetcher is the self-referential OutboundProxy loopback.
+          // `ctx.exports` (the loopback-binding accessor) isn't on the
+          // stable workers-types DurableObjectState surface yet, so we
+          // reach it through a narrow cast.
+          globalOutbound: (
+            this.ctx as unknown as {
+              exports: { OutboundProxy(): Fetcher };
+            }
+          ).exports.OutboundProxy(),
         }),
       );
     }
@@ -1232,7 +1263,7 @@ export class Agent extends Think<Env> {
 
     if (request.method === "POST" && url.pathname.endsWith("/exec")) {
       const { command, cwd, backend } = (await request.json().catch(() => ({}))) as {
-        command?: string; cwd?: string; backend?: "shell" | "container";
+        command?: string; cwd?: string; backend?: "shell" | "javascript" | "container";
       };
       if (!command) return Response.json({ error: "missing command" }, { status: 400 });
       const ws = await this._localWorkspace();

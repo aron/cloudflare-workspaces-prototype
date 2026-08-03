@@ -85,9 +85,20 @@ describe("buildSystemPrompt — guidelines", () => {
   it("includes the file-exploration preference, Bun install preference, and always-on bullets", () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toMatch(/Prefer read \/ ls over exec for inspecting known paths/);
-    expect(prompt).toMatch(/Prefer `bun install` over `npm install`/);
+    expect(prompt).toMatch(/prefer `bun install` over `npm install`/i);
     expect(prompt).toMatch(/- Be concise/);
     expect(prompt).toMatch(/- Show file paths clearly/);
+  });
+
+  it("describes the three exec backends including the javascript module plane", () => {
+    const prompt = buildSystemPrompt({});
+    // The lightweight JS plane is positioned against shell and container.
+    expect(prompt).toMatch(/'javascript'/);
+    expect(prompt).toMatch(/node:fs\/promises/);
+    expect(prompt).toMatch(/fetch\(\)/);
+    // Concrete examples the model can copy: default export + re-export.
+    expect(prompt).toMatch(/export default/);
+    expect(prompt).toMatch(/export \{ default \} from/);
   });
 
   // Per-tool ergonomics guidelines lifted from pi's buildSystemPrompt.
