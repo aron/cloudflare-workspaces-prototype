@@ -332,6 +332,10 @@ export class Agent extends Think<Env> {
           // Each execution is a cheap isolate; a small bound restores
           // parity without risking unbounded Dynamic Worker growth.
           maxConcurrentExecutions: 25,
+          // Allow the in-isolate ws:git capability to perform host-side
+          // network operations (clone / fetch / push over https), matching
+          // the git reach the shell plane already has.
+          allowGitNetwork: true,
           // Open outbound so in-isolate fetch() reaches the public
           // network, matching the container plane's posture. The
           // Fetcher is the self-referential OutboundProxy loopback.
