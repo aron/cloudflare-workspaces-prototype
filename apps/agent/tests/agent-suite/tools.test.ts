@@ -41,6 +41,16 @@ describe("Agent — getTools()", () => {
     expect(names).toEqual(new Set<string>(EXPECTED_TOOLS));
   });
 
+  it("exposes the superset exec schema with env and input, not just the built-in", async () => {
+    const agent = await freshAgent();
+    const keys = new Set(await agent.toolInputKeys("exec"));
+    // Built-in exec is {command, cwd, backend}; our superset adds these.
+    expect(keys.has("command")).toBe(true);
+    expect(keys.has("backend")).toBe(true);
+    expect(keys.has("env")).toBe(true);
+    expect(keys.has("input")).toBe(true);
+  });
+
   it("does not include the deprecated 'run' WASM tool", async () => {
     const agent = await freshAgent();
     const names = new Set(await agent.activeToolNames());
