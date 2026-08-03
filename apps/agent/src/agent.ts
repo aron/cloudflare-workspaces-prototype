@@ -327,14 +327,14 @@ export class Agent extends Think<Env> {
           // Open outbound so in-isolate fetch() reaches the public
           // network, matching the container plane's posture. The
           // Fetcher is the self-referential OutboundProxy loopback.
-          // `ctx.exports` (the loopback-binding accessor) isn't on the
-          // stable workers-types DurableObjectState surface yet, so we
-          // reach it through a narrow cast.
+          // `ctx.exports.OutboundProxy` is the loopback binding for the
+          // OutboundProxy entrypoint; the stub is itself a Fetcher, so
+          // it's used directly (calling it would require an options
+          // object). `ctx.exports` isn't on the stable workers-types
+          // DurableObjectState surface yet, so reach it via a cast.
           globalOutbound: (
-            this.ctx as unknown as {
-              exports: { OutboundProxy(): Fetcher };
-            }
-          ).exports.OutboundProxy(),
+            this.ctx as unknown as { exports: { OutboundProxy: Fetcher } }
+          ).exports.OutboundProxy,
         }),
       );
     }
