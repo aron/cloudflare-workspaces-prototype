@@ -17,7 +17,7 @@
     "@ai-sdk/openai": "^3.0.64",
     "@app/shared": "*",
     "@cloudflare/ai-chat": "^0.10.1",
-    "@cloudflare/computer": "0.1.0-alpha.1",
+    "@cloudflare/computer": "https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@39",
     "@cloudflare/containers": "^0.3.4",
     "@cloudflare/shell": "^0.3.8",
     "@cloudflare/think": "^0.15.1",

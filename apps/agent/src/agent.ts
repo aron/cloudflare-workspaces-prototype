@@ -48,7 +48,7 @@ import {
 } from "@cloudflare/computer";
 import { createAssets } from "@cloudflare/computer/assets";
 import { CloudflareContainerBackend } from "@cloudflare/computer/backends/container";
-import { WorkerBackend } from "@cloudflare/computer/backends/worker";
+import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { createAITools } from "@cloudflare/computer/tools";
 import { tracing } from "cloudflare:workers";
@@ -299,7 +299,7 @@ export class Agent extends Think<Env> {
     const backends: WorkspaceBackend[] = [];
     if (this.env.LOADER) {
       backends.push(
-        new WorkerBackend({
+        new WorkerShellBackend({
           id: "shell",
           loader: this.env.LOADER,
           workspace: { binding: "Agent", id: this.ctx.id.toString() },
@@ -1236,7 +1236,7 @@ export class Agent extends Think<Env> {
       };
       if (!command) return Response.json({ error: "missing command" }, { status: 400 });
       const ws = await this._localWorkspace();
-      const handle = await ws.shell.exec(command, { cwd, encoding: "utf8", backend });
+      const handle = await ws.runtime.exec(command, { cwd, encoding: "utf8", backend });
       const result = await handle.result();
       return Response.json(result);
     }
@@ -1245,7 +1245,7 @@ export class Agent extends Think<Env> {
       const ws = await this._localWorkspace();
       const probe = async (command: string) => {
         try {
-          const handle = await ws.shell.exec(command, { encoding: "utf8" });
+          const handle = await ws.runtime.exec(command, { encoding: "utf8" });
           return await handle.result();
         } catch (err) {
           return { exitCode: -1, stdout: "", stderr: String(err) };
@@ -1270,7 +1270,7 @@ export class Agent extends Think<Env> {
       // workspace shell can `cat` it back for us; /tmp isn't part
       // of the synced workspace tree so a shell read is the right path.
       const ws = await this._localWorkspace();
-      const handle = await ws.shell.exec("cat /tmp/server.log || true", { encoding: "utf8" });
+      const handle = await ws.runtime.exec("cat /tmp/server.log || true", { encoding: "utf8" });
       const result = await handle.result();
       return new Response(result.stdout || "(no log file yet)", {
         headers: { "content-type": "text/plain" },
@@ -2161,19 +2161,19 @@ export class SubAgent extends Think<Env> {
    * `fs` / `shell` method forwards through the promise.
    */
   private _lazyWorkspace(): WorkspaceClient {
-    const surface = (key: "fs" | "shell") =>
+    const surface = (key: "fs" | "runtime") =>
       new Proxy(
         {},
         {
           get: (_target, method: string) =>
             (...args: unknown[]) =>
               this._getWorkspace().then((ws) => {
-                const target = ws[key] as Record<string, (...a: unknown[]) => unknown>;
+                const target = ws[key] as unknown as Record<string, (...a: unknown[]) => unknown>;
                 return target[method](...args);
               }),
         },
       );
-    return { fs: surface("fs"), shell: surface("shell") } as unknown as WorkspaceClient;
+    return { fs: surface("fs"), runtime: surface("runtime") } as unknown as WorkspaceClient;
   }
 
   // ── Agent-tool output --------------------------------
