@@ -324,6 +324,14 @@ export class Agent extends Think<Env> {
           // read-write so in-isolate node:fs/promises can mutate the
           // workspace, matching what the shell plane can do.
           access: "read-write",
+          // Admit several executions at once. The backend defaults to
+          // 1 (a concurrent start throws EEXEC_BUSY), but the shell and
+          // container planes have no such cap, so a model that fires
+          // parallel exec calls — or a sub-agent running one while the
+          // parent runs another over this shared workspace — trips it.
+          // Each execution is a cheap isolate; a small bound restores
+          // parity without risking unbounded Dynamic Worker growth.
+          maxConcurrentExecutions: 25,
           // Open outbound so in-isolate fetch() reaches the public
           // network, matching the container plane's posture. The
           // Fetcher is the self-referential OutboundProxy loopback.
