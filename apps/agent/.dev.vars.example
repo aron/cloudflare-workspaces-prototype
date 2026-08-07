@@ -15,6 +15,25 @@ OPENAI_API_KEY=sk-...
 # Optional: enables the websearch tool. Get a key at https://api-dashboard.search.brave.com/
 # BRAVE_API_KEY=
 
+# --- GitHub MCP (per-user OAuth) ---
+# Optional: enables the `github` tool so each user can authorize their own
+# GitHub account and the agent can read/maintain their repositories.
+#
+# GitHub's remote MCP server does NOT support OAuth Dynamic Client Registration,
+# so you must register a GitHub OAuth App up front and paste its credentials
+# here (both required together; absent either, the `github` tool reports "not
+# configured"). Requires the MCP_TOKENS KV namespace (see wrangler.jsonc).
+#
+# Register at https://github.com/settings/developers -> New OAuth App:
+#   - Homepage URL:               your APP_BASE_URL (e.g. http://localhost:8787)
+#   - Authorization callback URL: <APP_BASE_URL>/agents/agent/<any>/callback
+#     (the agents framework routes any /agents/agent/*/callback back to the DO
+#      that started the flow; GitHub only checks the host + path prefix match.)
+# Then put the client secret on the deploy via `wrangler secret put
+# GITHUB_MCP_CLIENT_SECRET` (keep it out of wrangler.jsonc vars).
+# GITHUB_MCP_CLIENT_ID=Iv1....
+# GITHUB_MCP_CLIENT_SECRET=....
+
 # --- identity (local dev) ---
 # When Access is not configured (ACCESS_TEAM_DOMAIN / ACCESS_AUD unset), the
 # worker falls back to this dev identity so `wrangler dev` keeps working.

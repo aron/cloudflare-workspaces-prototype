@@ -130,6 +130,15 @@
     // "CLOUDFLARE_ACCOUNT_ID": "",
     // "R2_ENDPOINT": ""
 
+    // GitHub MCP OAuth App. The `github` tool (per-user GitHub read/maintain
+    // access) is enabled only when BOTH the client id and secret resolve to
+    // non-empty strings and MCP_TOKENS is bound. GitHub has no Dynamic Client
+    // Registration, so a pre-registered OAuth App is required; register one at
+    // https://github.com/settings/developers. Keep the SECRET out of vars —
+    // ship it via `wrangler secret put GITHUB_MCP_CLIENT_SECRET`. The client id
+    // may live here as a plain var.
+    // "GITHUB_MCP_CLIENT_ID": ""
+
     // Public origin used to build absolute URLs in agent messages and
     // Google Chat notifications. Leave unset to fall back to the origin of
     // the inbound request (forwarded as `x-app-base-url` from the worker).
