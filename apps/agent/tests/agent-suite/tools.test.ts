@@ -32,6 +32,7 @@ const EXPECTED_TOOLS = [
   "delegate",  // spawn a named sub-agent that shares this workspace
   "schedule",  // create/list/cancel one-off or recurring tasks
   "cloudflare",  // per-user Cloudflare MCP access (connect/status/disconnect)
+  "github",  // per-user GitHub MCP access (connect/status/disconnect)
 ] as const;
 
 describe("Agent — getTools()", () => {
