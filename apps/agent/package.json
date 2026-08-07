@@ -14,34 +14,33 @@
     "skills:sync:local": "node scripts/sync-skills.mjs --local"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.64",
+    "@ai-sdk/openai": "^4.0.34",
     "@app/shared": "*",
     "@cloudflare/ai-chat": "^0.10.1",
-    "@cloudflare/computer": "https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@39",
-    "@cloudflare/containers": "^0.3.4",
-    "@cloudflare/shell": "^0.3.8",
+    "@cloudflare/computer": "https://pkg.pr.new/cloudflare/computer/@cloudflare/computer@13b4eb1",
+    "@cloudflare/containers": "^0.3.7",
+    "@cloudflare/shell": "^0.4.3",
     "@cloudflare/think": "^0.15.1",
     "@cloudflare/web-tools": "*",
-    "@cloudflare/worker-bundler": "^0.2.0",
+    "@cloudflare/worker-bundler": "^0.2.2",
     "@platformatic/vfs": "^0.4.0",
     "acorn": "^8.16.0",
     "agents": "^0.20.1",
-    "ai": "^6.0.188",
+    "ai": "^7.0.56",
     "capnweb": "^0.8.0",
     "hono": "^4.12.22",
     "isomorphic-git": "^1.38.3",
     "jose": "^6.2.3",
-    "workers-ai-provider": "^3.3.0",
+    "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.18.1",
-    "@cloudflare/workers-types": "^4.20260702.1",
+    "@cloudflare/vitest-pool-workers": "^0.20.2",
     "@types/ws": "^8.18.1",
     "rolldown": "^1.0.2",
     "typescript": "^5.7.0",
     "vitest": "^4.1.7",
-    "wrangler": "4.107.1",
+    "wrangler": "^4.119.0",
     "ws": "^8.21.0"
   }
 }

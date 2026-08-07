@@ -257,9 +257,15 @@ export function createBrowserScreenshotTool(opts: BrowserScreenshotToolOptions) 
       const where = r.path
         ? ` Saved to ${r.path}${r.fileUrl ? ` (${r.fileUrl})` : ""}.`
         : "";
+      // ai v7 replaced the tool-output `media` content part with the tagged
+      // `file` part: image bytes ride in `data: { type: "data", data: <base64> }`.
       const value: Array<
         | { type: "text"; text: string }
-        | { type: "media"; data: string; mediaType: string }
+        | {
+            type: "file";
+            data: { type: "data"; data: string };
+            mediaType: string;
+          }
       > = [
         {
           type: "text",
@@ -267,7 +273,11 @@ export function createBrowserScreenshotTool(opts: BrowserScreenshotToolOptions) 
         },
       ];
       if (r.vision && r.base64 && r.mediaType) {
-        value.push({ type: "media", data: r.base64, mediaType: r.mediaType });
+        value.push({
+          type: "file",
+          data: { type: "data", data: r.base64 },
+          mediaType: r.mediaType,
+        });
       }
       return { type: "content" as const, value };
     },

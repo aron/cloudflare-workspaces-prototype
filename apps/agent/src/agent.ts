@@ -358,11 +358,6 @@ export class Agent extends Think<Env> {
       // matches. Cast through unknown to bypass invariance.
       storage: this.ctx.storage as unknown as DurableObjectStorageLike,
       backends,
-      // The 'javascript' module backend drains its live output stream
-      // on a background task that must outlive the evaluate() RPC, so
-      // the Workspace requires ctx.waitUntil when a module backend is
-      // registered. Bind it from the DO context.
-      waitUntil: this.ctx.waitUntil.bind(this.ctx),
       // Attach the string-based filesystem methods Think's `workspace`
       // slot is typed against (readFile / writeFile / readDir / ...).
       // Without this the slot needs a hand-written adapter.

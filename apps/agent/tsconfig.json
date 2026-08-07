@@ -1,8 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2023", "ESNext.Disposable", "DOM"],
-    "types": ["@cloudflare/workers-types"]
+    "lib": ["ES2023", "ESNext.Disposable", "DOM"]
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
+  "include": ["src/**/*.ts", "worker-configuration.d.ts", "env.augment.d.ts"]
 }
