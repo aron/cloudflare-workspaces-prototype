@@ -9,6 +9,10 @@
 // generates as `interface Env extends __BaseEnv_Env {}`). Merge directly into
 // that global interface so `this.env.*` sees these members.
 interface Env {
+    // GitHub OAuth App credentials (enable the GitHub MCP tool). Secret.
+    GITHUB_MCP_CLIENT_ID?: string;
+    GITHUB_MCP_CLIENT_SECRET?: string;
+
     // Model + provider credentials. Secret / optional overrides.
     OPENAI_API_KEY?: string;
     BRAVE_API_KEY?: string;

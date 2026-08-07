@@ -83,12 +83,17 @@ import {
   type CloudflareConnStatus,
   type McpServerView,
   cloudflareServerId,
-  createCloudflareOAuthProvider,
   describeConnection,
   gateCloudflareTools,
   lastUserAuthorId,
   pollCloudflareReady,
 } from "./cloudflare-mcp.js";
+import {
+  GITHUB_MCP,
+  createHackspaceOAuthProvider,
+  gateGithubTools,
+  githubServerId,
+} from "./github-mcp.js";
 import { type AgentMcpOAuthProvider, normalizeServerId } from "agents";
 import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
@@ -671,13 +676,40 @@ export class Agent extends Think<Env> {
    */
   override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     if (this.env.MCP_TOKENS) {
-      return createCloudflareOAuthProvider({
+      return createHackspaceOAuthProvider({
         kv: this.env.MCP_TOKENS,
         local: this.ctx.storage,
         callbackUrl,
+        github: this.githubMcpCreds(),
       });
     }
     return super.createMcpOAuthProvider(callbackUrl);
+  }
+
+  /**
+   * The GitHub OAuth App credentials, or undefined when the deployment has not
+   * configured a GitHub OAuth App. GitHub's remote MCP server does not support
+   * Dynamic Client Registration, so these must be provided for the GitHub
+   * per-user OAuth flow to work; absent them the `github` tool reports that
+   * GitHub access is not configured (mirroring the Cloudflare MCP_TOKENS gate).
+   */
+  private githubMcpCreds():
+    | { client_id: string; client_secret: string }
+    | undefined {
+    // Read via a local cast so this compiles whether or not the deployment's
+    // generated env types declare these (they are secrets/optional vars).
+    const env = this.env as {
+      GITHUB_MCP_CLIENT_ID?: string;
+      GITHUB_MCP_CLIENT_SECRET?: string;
+    };
+    const id = env.GITHUB_MCP_CLIENT_ID;
+    const secret = env.GITHUB_MCP_CLIENT_SECRET;
+    return id && secret ? { client_id: id, client_secret: secret } : undefined;
+  }
+
+  /** True when both MCP_TOKENS and the GitHub OAuth App creds are present. */
+  private githubEnabled(): boolean {
+    return Boolean(this.env.MCP_TOKENS && this.githubMcpCreds());
   }
 
   /**
@@ -713,6 +745,54 @@ export class Agent extends Think<Env> {
   /** Read one user's Cloudflare connection status from the MCP snapshot. */
   private cloudflareStatusFor(userId: string): CloudflareConnStatus {
     const id = normalizeServerId(cloudflareServerId(userId));
+    const servers = this.getMcpServers().servers as Record<
+      string,
+      McpServerView
+    >;
+    return describeConnection(servers[id]);
+  }
+
+  // -- GitHub MCP (per-user OAuth) -----------------------------------
+  //
+  // Same shape as the Cloudflare path above, over a separate per-user
+  // connection (`github-<userId>`). The one wrinkle - GitHub has no Dynamic
+  // Client Registration, so a pre-registered GitHub OAuth App is required - is
+  // handled entirely inside `createHackspaceOAuthProvider`; from here it looks
+  // identical to Cloudflare.
+
+  /**
+   * Ensure a GitHub MCP connection exists for `userId`, returning its status.
+   * Idempotent per (name, url, id): a ready server short-circuits, an
+   * authenticating one returns the existing auth URL, a fresh call starts the
+   * OAuth flow. The read-only header on `GITHUB_MCP` is applied here so the
+   * connection can never expose a code-push tool.
+   */
+  private async ensureGithubConnection(
+    userId: string,
+  ): Promise<CloudflareConnStatus> {
+    if (!this.githubEnabled()) return { state: "disconnected" };
+    const callbackHost = (this.env as { APP_BASE_URL?: string }).APP_BASE_URL;
+    try {
+      const res = await this.addMcpServer("github", GITHUB_MCP.url, {
+        id: githubServerId(userId),
+        transport: { headers: GITHUB_MCP.headers },
+        ...(callbackHost ? { callbackHost } : {}),
+      });
+      if (res.state === "authenticating") {
+        return { state: "authenticating", authUrl: res.authUrl ?? null };
+      }
+      return { state: "ready" };
+    } catch (err) {
+      return {
+        state: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /** Read one user's GitHub connection status from the MCP snapshot. */
+  private githubStatusFor(userId: string): CloudflareConnStatus {
+    const id = normalizeServerId(githubServerId(userId));
     const servers = this.getMcpServers().servers as Record<
       string,
       McpServerView
@@ -801,14 +881,14 @@ export class Agent extends Think<Env> {
       // current turn - we inject it via the additive TurnConfig.tools instead.
       // Best-effort: a failure must never block the turn; the `cloudflare`
       // tool's status/connect commands surface auth problems to the user.
-      const cfUserId = lastUserAuthorId(this.messages as never);
+      const mcpUserId = lastUserAuthorId(this.messages as never);
       let cfTools: Record<string, unknown> = {};
-      if (cfUserId && this.env.MCP_TOKENS) {
+      if (mcpUserId && this.env.MCP_TOKENS) {
         try {
-          const status = await this.ensureCloudflareConnection(cfUserId);
+          const status = await this.ensureCloudflareConnection(mcpUserId);
           if (status.state === "ready") {
             // Only this user's server, so we never pull in another user's tools.
-            const serverId = normalizeServerId(cloudflareServerId(cfUserId));
+            const serverId = normalizeServerId(cloudflareServerId(mcpUserId));
             cfTools = this.mcp.getAITools({ serverId }) as Record<
               string,
               unknown
@@ -817,23 +897,48 @@ export class Agent extends Think<Env> {
         } catch { /* non-fatal */ }
       }
 
-      // Gate Cloudflare MCP tools to the last speaker. The tool set the model
+      // GitHub MCP: same per-user connect+inject as Cloudflare, over the
+      // separate `github-<userId>` connection. Best-effort; the `github` tool
+      // surfaces auth problems to the user.
+      let ghTools: Record<string, unknown> = {};
+      if (mcpUserId && this.githubEnabled()) {
+        try {
+          const status = await this.ensureGithubConnection(mcpUserId);
+          if (status.state === "ready") {
+            const serverId = normalizeServerId(githubServerId(mcpUserId));
+            ghTools = this.mcp.getAITools({ serverId }) as Record<
+              string,
+              unknown
+            >;
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      // Gate per-user MCP tools to the last speaker. The tool set the model
       // sees is the assembled ctx.tools PLUS anything we inject above; every
-      // authorized user's already-connected tools also auto-merge into
-      // ctx.tools, so we allowlist only the current user's (plus all
-      // non-Cloudflare tools) via activeTools, so B can't act through A's
-      // Cloudflare account. Only set when Cloudflare tools are actually present
-      // (an empty allowlist would disable every tool).
+      // authorized user's already-connected Cloudflare/GitHub tools also
+      // auto-merge into ctx.tools, so we allowlist only the current user's
+      // (plus all non-MCP tools) via activeTools, so B can't act through A's
+      // Cloudflare/GitHub account. The two gate functions compose: each drops
+      // only its own provider's other-user tools and passes everything else
+      // through. Only set when such tools are actually present (an empty
+      // allowlist would disable every tool).
+      const injectedTools = { ...cfTools, ...ghTools };
       const unionToolKeys = [
         ...(ctx?.tools ? Object.keys(ctx.tools) : []),
-        ...Object.keys(cfTools),
+        ...Object.keys(injectedTools),
       ];
       const hasCloudflareTools = unionToolKeys.some((k) =>
         k.startsWith("tool_cloudflare"),
       );
-      const activeTools = hasCloudflareTools
-        ? gateCloudflareTools(unionToolKeys, cfUserId)
-        : undefined;
+      const hasGithubTools = unionToolKeys.some((k) =>
+        k.startsWith("tool_github"),
+      );
+      let gatedKeys = unionToolKeys;
+      if (hasCloudflareTools) gatedKeys = gateCloudflareTools(gatedKeys, mcpUserId);
+      if (hasGithubTools) gatedKeys = gateGithubTools(gatedKeys, mcpUserId);
+      const activeTools =
+        hasCloudflareTools || hasGithubTools ? gatedKeys : undefined;
 
       return {
         // Hard ceiling well above the soft budget - the LoopTracker
@@ -841,8 +946,8 @@ export class Agent extends Think<Env> {
         maxSteps: 60,
         // Additive: merged on top of the assembled tool set (Think merges
         // config.tools over ctx.tools). Empty object is a no-op.
-        ...(Object.keys(cfTools).length > 0
-          ? { tools: cfTools as never }
+        ...(Object.keys(injectedTools).length > 0
+          ? { tools: injectedTools as never }
           : {}),
         ...(activeTools ? { activeTools } : {}),
         providerOptions: {
@@ -1449,6 +1554,23 @@ export class Agent extends Think<Env> {
     return { yields, result };
   }
 
+  /**
+   * Introspection RPC for tests: drive the `github` tool's dispatch directly.
+   * Same contract as `invokeCloudflareTool`.
+   */
+  async invokeGithubTool(
+    command: "connect" | "status" | "disconnect",
+    opts?: { toolCallId?: string; abortSignal?: AbortSignal },
+  ): Promise<{ yields: Record<string, unknown>[]; result: Record<string, unknown> }> {
+    const gen = this._runGithubTool(command, opts);
+    const yields: Record<string, unknown>[] = [];
+    for await (const chunk of gen) {
+      yields.push(chunk as Record<string, unknown>);
+    }
+    const result = yields[yields.length - 1] ?? {};
+    return { yields, result };
+  }
+
   private buildTools(): ToolSet {
     // The browser tools still need direct filesystem access to persist
     // screenshots, so they get the local Workspace; everything else
@@ -1617,6 +1739,40 @@ export class Agent extends Think<Env> {
         }),
         execute: (input) => this._runCloudflareTool(input.command),
       }),
+
+      github: tool({
+        description: [
+          "Read and maintain the current user's own GitHub repositories via",
+          "the official GitHub MCP server. Once connected you gain GitHub tools",
+          "for reading repos, files, commits, branches, issues, pull requests,",
+          "CI runs, and security alerts.",
+          "",
+          "This connection is READ-ONLY: it can inspect and help maintain",
+          "repositories but CANNOT push code, merge, or otherwise write to a",
+          "repository. Do not promise to commit or push - offer to draft",
+          "changes the user applies themselves.",
+          "",
+          "Auth is per-user and uses the GitHub account of whoever sent the most",
+          "recent message. Sub-commands (set `command`):",
+          "  - connect: start (or repair) authorization for the current user.",
+          "    If they haven't authorized yet, this returns an `authUrl` - tell",
+          "    the user to open it to grant access, then try again.",
+          "  - status: report whether the current user is connected.",
+          "  - disconnect: remove the current user's GitHub connection.",
+          "",
+          "When status/connect reports `authenticating` with an authUrl, surface",
+          "that link to the user and wait; when `ready`, use the GitHub tools",
+          "directly. If a previously-working connection returns to",
+          "`authenticating`, the authorization expired - ask the user to",
+          "re-authorize with the new link.",
+        ].join("\n"),
+        inputSchema: z.object({
+          command: z.enum(["connect", "status", "disconnect"]).describe(
+            "connect = authorize/refresh; status = check; disconnect = remove.",
+          ),
+        }),
+        execute: (input) => this._runGithubTool(input.command),
+      }),
     };
   }
 
@@ -1710,6 +1866,84 @@ export class Agent extends Think<Env> {
       });
       // Terminal state MUST be yielded (see note above): it becomes the tool's
       // final output. The interim `awaiting_auth` chunk was yielded earlier.
+      yield { ...result, ...(authUrl && !("authUrl" in result) ? { authUrl } : {}) };
+    } finally {
+      if (opts?.toolCallId) this._toolAborts.delete(opts.toolCallId);
+    }
+  }
+
+  /**
+   * Execute the `github` tool. Structurally identical to `_runCloudflareTool`
+   * (same streaming contract: every terminal state is `yield`ed, never
+   * `return`ed, so the AI SDK uses it as the tool output) but over the
+   * per-user GitHub connection. The connection is pinned read-only at
+   * `ensureGithubConnection`, so the tools it exposes can never push code.
+   */
+  private async *_runGithubTool(
+    command: "connect" | "status" | "disconnect",
+    opts?: { toolCallId?: string; abortSignal?: AbortSignal },
+  ): AsyncGenerator<Record<string, unknown>, void, unknown> {
+    if (!this.githubEnabled()) {
+      yield { error: "GitHub access is not configured on this deployment." };
+      return;
+    }
+    const userId = lastUserAuthorId(this.messages as never);
+    if (!userId) {
+      yield { error: "Cannot determine the requesting user for GitHub auth." };
+      return;
+    }
+
+    if (command === "status") {
+      yield { ...this.githubStatusFor(userId) };
+      return;
+    }
+
+    if (command === "disconnect") {
+      try {
+        await this.removeMcpServer(normalizeServerId(githubServerId(userId)));
+        yield { disconnected: true };
+      } catch (err) {
+        yield { error: err instanceof Error ? err.message : String(err) };
+      }
+      return;
+    }
+
+    // command === "connect"
+    const status = await this.ensureGithubConnection(userId);
+    if (status.state === "ready") {
+      yield { phase: "ready" };
+      return;
+    }
+    if (status.state === "failed") {
+      yield { phase: "failed", error: status.error };
+      return;
+    }
+
+    const authUrl = status.state === "authenticating" ? status.authUrl : null;
+    yield {
+      phase: "awaiting_auth",
+      authUrl,
+      title: "Authorize GitHub access",
+      message:
+        "Open the authorization link to grant read/maintain access to your GitHub account.",
+    };
+
+    const controller = new AbortController();
+    if (opts?.toolCallId) this._toolAborts.set(opts.toolCallId, controller);
+    if (opts?.abortSignal) {
+      if (opts.abortSignal.aborted) controller.abort(opts.abortSignal.reason);
+      else
+        opts.abortSignal.addEventListener("abort", () => controller.abort(opts.abortSignal?.reason), {
+          once: true,
+        });
+    }
+
+    try {
+      const result = await pollCloudflareReady({
+        getStatus: () => this.githubStatusFor(userId),
+        sleep: (ms, signal) => this._sleep(ms, signal),
+        signal: controller.signal,
+      });
       yield { ...result, ...(authUrl && !("authUrl" in result) ? { authUrl } : {}) };
     } finally {
       if (opts?.toolCallId) this._toolAborts.delete(opts.toolCallId);
@@ -2241,12 +2475,33 @@ export class SubAgent extends Think<Env> {
       new Proxy(
         {},
         {
-          get: (_target, method: string) =>
-            (...args: unknown[]) =>
+          get: (_target, method: string | symbol) => {
+            // Report absence (return `undefined`) rather than a callable for
+            // properties that aren't asynchronous RPC methods on the real
+            // client. Two cases matter:
+            //
+            //   - `then` / symbols (e.g. Symbol.dispose): returning a function
+            //     would make JS treat this proxy as a thenable and await it,
+            //     invoking a non-existent `then` on the client and rejecting.
+            //   - `isCallable`: `createAITools` feature-probes it via
+            //     `runtime.isCallable?.(id)`. It's a *synchronous* host-only
+            //     method absent from the RPC `WorkspaceRuntimeClient`, so a
+            //     sub-agent must present it as absent. Advertising it as a
+            //     function defeats the `?.` guard and floats a rejected
+            //     promise when the client method is missing.
+            if (
+              method === "then" ||
+              method === "isCallable" ||
+              typeof method === "symbol"
+            ) {
+              return undefined;
+            }
+            return (...args: unknown[]) =>
               this._getWorkspace().then((ws) => {
                 const target = ws[key] as unknown as Record<string, (...a: unknown[]) => unknown>;
                 return target[method](...args);
-              }),
+              });
+          },
         },
       );
     return { fs: surface("fs"), runtime: surface("runtime") } as unknown as WorkspaceClient;
