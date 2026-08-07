@@ -45,6 +45,21 @@ describe("ExecToolView helpers", () => {
       kind: "running",
       label: "running…",
     });
+    expect(statusFor({ exit: null, stdout: "partial" })).toEqual({
+      kind: "running",
+      label: "running…",
+    });
+  });
+
+  it("accepts the legacy/live exit field when the current field is absent", () => {
+    expect(statusFor({ exit: 0, stdout: "done" })).toEqual({
+      kind: "ok",
+      label: "exit 0",
+    });
+    expect(statusFor({ exit: 3, stderr: "boom" })).toEqual({
+      kind: "fail",
+      label: "exit 3",
+    });
   });
 
   it("accepts both error encodings", () => {

@@ -40,6 +40,8 @@ export interface ExecSnapshot {
   cwd?: string | null;
   backend?: string;
   exitCode?: number | null;
+  /** Older/live protocol snapshots may call this field `exit`. */
+  exit?: number | null;
   stdout?: string;
   stderr?: string;
   result?: unknown;
@@ -82,12 +84,16 @@ export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
   const message = execErrorMessage(output);
   if (message) return { kind: "fail", label: message };
   if (output.running) return { kind: "running", label: "running…" };
-  if (output.exitCode === undefined || output.exitCode === null) {
+  // Accept both the current `exitCode` field and live/legacy snapshots
+  // that use `exit`. A null exit value means the process is still running;
+  // it must not be treated as a non-zero exit.
+  const exitCode = output.exitCode !== undefined ? output.exitCode : output.exit;
+  if (exitCode === undefined || exitCode === null) {
     return { kind: "running", label: "running…" };
   }
-  return output.exitCode === 0
-    ? { kind: "ok",   label: `exit ${output.exitCode}` }
-    : { kind: "fail", label: `exit ${output.exitCode}` };
+  return exitCode === 0
+    ? { kind: "ok",   label: `exit ${exitCode}` }
+    : { kind: "fail", label: `exit ${exitCode}` };
 }
 
 export function execEnvironmentLabel(input?: { backend?: string }, output?: ExecSnapshot | null): string {
