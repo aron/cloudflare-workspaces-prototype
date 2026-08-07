@@ -81,13 +81,3 @@ export function execBackends(env: Env): Record<string, { description: string }> 
 export function defaultExecBackend(env: Env): ExecBackend {
   return env.LOADER ? "shell" : "container";
 }
-
-/**
- * Backends that carry structured JSON across the boundary — they
- * accept an `input` argument and return a `result`. Only the module
- * backend ('javascript') does; the command backends ('shell',
- * 'container') run a command line and never set a result value.
- */
-export function jsonExecBackends(env: Env): ExecBackend[] {
-  return env.LOADER ? ["javascript"] : [];
-}

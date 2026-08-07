@@ -5,8 +5,11 @@
  * when the part's tool name is "exec". Reads the output shape the
  * package's exec tool returns:
  *
- *   { command, cwd, backend, exitCode, stdout, stderr }
+ *   { command, cwd, backend, exitCode, stdout, stderr, result? }
  *   { command, cwd, backend, error }                     // failed call
+ *
+ * While the package tool is streaming, `exitCode` is `null` and stdout /
+ * stderr are progressive snapshots.
  *
  * The agent additionally wraps every tool for per-call cancellation,
  * which reports failures as `{ error: { details } }`.
@@ -36,9 +39,10 @@ export interface ExecSnapshot {
   command?: string;
   cwd?: string | null;
   backend?: string;
-  exitCode?: number;
+  exitCode?: number | null;
   stdout?: string;
   stderr?: string;
+  result?: unknown;
   /** A string from the package's exec tool, `{ details }` from the agent's wrapper. */
   error?: string | { details?: string };
   running?: boolean;
@@ -47,7 +51,13 @@ export interface ExecSnapshot {
 }
 
 interface ExecToolViewProps {
-  input?: { command?: string; cwd?: string; backend?: string };
+  input?: {
+    command?: string;
+    cwd?: string;
+    backend?: string;
+    env?: Record<string, string>;
+    input?: unknown;
+  };
   output?: ExecSnapshot | null;
   errorText?: string;
   state?: string;
@@ -72,7 +82,9 @@ export function statusFor(output?: ExecSnapshot | null, errorText?: string): {
   const message = execErrorMessage(output);
   if (message) return { kind: "fail", label: message };
   if (output.running) return { kind: "running", label: "running…" };
-  if (output.exitCode === undefined) return { kind: "running", label: "running…" };
+  if (output.exitCode === undefined || output.exitCode === null) {
+    return { kind: "running", label: "running…" };
+  }
   return output.exitCode === 0
     ? { kind: "ok",   label: `exit ${output.exitCode}` }
     : { kind: "fail", label: `exit ${output.exitCode}` };
@@ -166,6 +178,12 @@ export function ExecToolView({
           <div className="mt-2 border-t border-red-500/20 pt-2 text-xs text-red-400">
             Error: {errorText}
           </div>
+        )}
+
+        {output?.result !== undefined && !isRunning && (
+          <pre className="mt-2 max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded bg-kumo-base p-3 font-mono text-xs leading-relaxed">
+            {JSON.stringify(output.result, null, 2)}
+          </pre>
         )}
 
         {canCancel && (

@@ -38,9 +38,13 @@ describe("ExecToolView helpers", () => {
     });
   });
 
-  it("treats a missing exit code as still running", () => {
+  it("treats a missing or null exit code as still running", () => {
     expect(statusFor(undefined)).toEqual({ kind: "running", label: "running…" });
     expect(statusFor({ stdout: "partial" })).toEqual({ kind: "running", label: "running…" });
+    expect(statusFor({ exitCode: null, stdout: "partial" })).toEqual({
+      kind: "running",
+      label: "running…",
+    });
   });
 
   it("accepts both error encodings", () => {

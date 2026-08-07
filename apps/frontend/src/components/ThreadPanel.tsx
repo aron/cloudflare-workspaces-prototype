@@ -545,7 +545,13 @@ export function ThreadPanel({
                           return (
                             <ExecToolView
                               key={i}
-                              input={input as { command?: string; cwd?: string; backend?: string } | undefined}
+                              input={input as {
+                                command?: string;
+                                cwd?: string;
+                                backend?: string;
+                                env?: Record<string, string>;
+                                input?: unknown;
+                              } | undefined}
                               output={output as ExecSnapshot | null}
                               errorText={errorText}
                               state={part.state}

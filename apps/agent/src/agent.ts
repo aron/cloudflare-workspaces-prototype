@@ -99,8 +99,7 @@ import { readIdentity } from "./identity.js";
 import { shortId } from "./ids.js";
 import { guessMimeType } from "./mime.js";
 import { resolveOrphanToolCalls } from "./orphan-tools.js";
-import { execBackends, defaultExecBackend, jsonExecBackends } from "./exec-backends.js";
-import { createExecTool } from "./exec-tool.js";
+import { execBackends, defaultExecBackend } from "./exec-backends.js";
 import { buildListing, type ListingEntry } from "./file-listing.js";
 import { extractAuthorFromUpgradeRequest, stampChatFrame, type ChatAuthor } from "./author-stamp.js";
 import { buildSystemPrompt, buildWorkerSystemPrompt, type Skill } from "./system-prompt.js";
@@ -1589,23 +1588,13 @@ export class Agent extends Think<Env> {
         backends: execBackends(this.env),
       },
     });
-    // Replace the package's built-in exec with our superset: same
-    // command/cwd/backend surface, plus per-execution `env` and, for
-    // the 'javascript' module backend, JSON `input`/`result` (see
-    // exec-tool.ts).
-    tools.exec = createExecTool({
-      workspace: this.workspace,
-      defaultBackend: defaultExecBackend(this.env),
-      backends: execBackends(this.env),
-      jsonBackends: jsonExecBackends(this.env),
-    });
 
     return {
       // Wrapped so a single wedged call can be failed from the UI
-      // without nuking the turn. `schedule`, `cloudflare` and
-      // `delegate` stay unwrapped below: they own their own abort
-      // paths, and wrapping an async generator would collapse its
-      // interim chunks into the last one.
+      // without nuking the turn. `exec` stays unwrapped because the
+      // package tool is an async generator with its own abort path;
+      // `schedule`, `cloudflare` and `delegate` also stay unwrapped
+      // below because they own their own interim-chunk handling.
       ...this.cancellable({
         ...tools,
         ...(this.env.BRAVE_API_KEY
@@ -2094,7 +2083,11 @@ export class Agent extends Think<Env> {
       const execute = (def as unknown as {
         execute?: (input: unknown, opts: unknown) => unknown;
       }).execute;
-      if (typeof execute !== "function") {
+      // The computer package's exec tool is an async generator: it
+      // yields live stdout/stderr snapshots and handles abortSignal by
+      // killing the underlying execution. Awaiting it here would turn
+      // the generator into a terminal value and stop streaming.
+      if (name === "exec" || typeof execute !== "function") {
         wrapped[name] = def;
         continue;
       }
@@ -2437,14 +2430,6 @@ export class SubAgent extends Think<Env> {
           defaultBackend: defaultExecBackend(this.env),
           backends: execBackends(this.env),
         },
-      }),
-      // Superset exec (per-execution env; JSON input/result for the
-      // 'javascript' backend), overriding the package's built-in above.
-      exec: createExecTool({
-        workspace: this._lazyWorkspace(),
-        defaultBackend: defaultExecBackend(this.env),
-        backends: execBackends(this.env),
-        jsonBackends: jsonExecBackends(this.env),
       }),
       ...buildBrowserTools({
         browser: this.env.BROWSER as unknown as import("./browser-tools.js").BuildBrowserToolsDeps["browser"],
