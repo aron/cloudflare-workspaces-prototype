@@ -1,10 +1,16 @@
 # Sandbox container image for the agent.
 #
 # Pulls the prebuilt computerd SEA binary out of the public GHCR image
-# published by github.com/cloudflare/computer, pinned in lockstep
-# with the `@cloudflare/computer` npm dependency (see
-# package.json). computerd runs as PID 1 and serves the workspace RPC +
-# FUSE mount.
+# published by github.com/cloudflare/computer. computerd runs as PID 1
+# and serves the workspace RPC + FUSE mount.
+#
+# The container's computerd speaks the framed-stream RPC protocol to the
+# npm client (`@cloudflare/computer`), so the image tag must track the
+# client's protocol. The npm package is currently the PR #39 pre-release
+# (which still reports version 0.1.0-alpha.1 internally), whose RPC
+# contract matches the published computerd 0.1.1 — so the two version
+# strings differ even though they are protocol-compatible. Bump this tag
+# whenever the npm dependency's RPC contract moves.
 #
 # Layered on top: a Node.js + Bun toolchain (node, npm, bun, esbuild,
 # wrangler) so `exec` calls from the agent find them on PATH inside the
@@ -12,7 +18,7 @@
 # land on top of Bun (preferred in the sandbox for speed) or npm / npx;
 # the image deliberately stays otherwise lean — zig and go were dropped.
 
-FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1 AS computerd
+FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.1 AS computerd
 
 FROM debian:stable-slim
 
