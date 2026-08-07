@@ -52,6 +52,7 @@ import { PathAutocomplete } from "@/components/PathAutocomplete";
 import { ExecToolView, type ExecSnapshot } from "@/components/ExecToolView";
 import { DelegateToolView } from "@/components/DelegateToolView";
 import { CloudflareToolView } from "@/components/CloudflareToolView";
+import { GithubToolView } from "@/components/GithubToolView";
 import { ScreenshotToolView } from "@/components/ScreenshotToolView";
 import { parseBangInput } from "@/lib/bang-parser.js";
 import { acceptCompletion } from "@/lib/path-autocomplete.js";
@@ -590,6 +591,21 @@ export function ThreadPanel({
                         if (name === "cloudflare") {
                           return (
                             <CloudflareToolView
+                              key={i}
+                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                              output={output as any}
+                              errorText={errorText}
+                              state={part.state}
+                              toolCallId={toolCallId}
+                              onCancel={(id) => { void agent.call("cancelToolCall", [id]).catch(() => {}); }}
+                            />
+                          );
+                        }
+                        // Custom chrome for github - the interactive OAuth
+                        // onboarding card (same streaming shape as cloudflare).
+                        if (name === "github") {
+                          return (
+                            <GithubToolView
                               key={i}
                               // eslint-disable-next-line @typescript-eslint/no-explicit-any
                               output={output as any}
